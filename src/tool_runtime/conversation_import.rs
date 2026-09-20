@@ -794,7 +794,7 @@ impl ToolRuntime {
         }
         if !trusted_mcp_host_file_import {
             return ToolResult::err(
-                "import_conversation_files_to_project requires an explicitly trusted OAuth MCP client",
+                "import_conversation_files_to_project requires an explicitly trusted OAuth MCP client or API token",
             );
         }
         self.import_conversation_files(

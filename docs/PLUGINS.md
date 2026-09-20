@@ -302,6 +302,11 @@ project-root-fenced Plugin that moves one file or directory to the operating
 system Trash/Recycle Bin without adding permanent deletion to WebCodex's built-in
 tool surface.
 
+[`plugins/mycodex-tools`](../plugins/mycodex-tools/README.md) provides eleven
+optional headless Office/PDF tools backed by established Python libraries.
+It reads bounded content and creates verified new files; Word/Excel updates
+preserve the source. File, process, Job and image delivery use existing runtime tools.
+
 ## Calling and failure semantics
 
 Each provider handles one request at a time. Concurrent calls receive a

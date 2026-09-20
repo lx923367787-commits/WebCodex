@@ -33,7 +33,8 @@ pub(crate) struct ServerStatusOptions {
 
 pub(crate) async fn run_server_tunnel(opts: ServerTunnelOptions) -> Result<(), String> {
     let local_server_url = derive_regular_tunnel_server_url(&opts.env_file)?;
-    let bootstrap_token = derive_regular_tunnel_bootstrap_token(&opts.env_file)?;
+    let mcp_token =
+        derive_regular_tunnel_mcp_token(&opts.env_file, opts.mcp_token_file.as_deref())?;
     let runtime_parent = opts
         .env_file
         .parent()
@@ -41,10 +42,83 @@ pub(crate) async fn run_server_tunnel(opts: ServerTunnelOptions) -> Result<(), S
         .to_path_buf();
     webcodex::run_regular_server_tunnel(webcodex::RegularServerTunnelOptions {
         local_server_url,
-        bootstrap_token,
+        mcp_token,
         runtime_parent,
     })
     .await
+}
+
+/// Use an explicitly selected local host credential without changing Server
+/// bootstrap authority or the Tunnel's control-plane API key. Selection alone
+/// grants no file-import trust; the Server must separately allow-list its ID.
+pub(crate) fn derive_regular_tunnel_mcp_token(
+    env_file: &Path,
+    explicit_file: Option<&Path>,
+) -> Result<String, String> {
+    let configured_file = if let Some(path) = explicit_file {
+        Some(path.to_path_buf())
+    } else {
+        read_env_file_value(env_file, "WEBCODEX_TUNNEL_MCP_TOKEN_FILE")?.map(PathBuf::from)
+    };
+    let Some(path) = configured_file else {
+        return derive_regular_tunnel_bootstrap_token(env_file);
+    };
+    if !path.is_absolute() {
+        return Err("Tunnel MCP token file must be an absolute local path".to_string());
+    }
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        if !matches!(path.components().next(), Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+        {
+            return Err(
+                "Tunnel MCP token file must be on a local drive, not a network or device path"
+                    .to_string(),
+            );
+        }
+    }
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| "Tunnel MCP token file cannot be read".to_string())?;
+    if !metadata.is_file() || metadata.len() > 8192 {
+        return Err(
+            "Tunnel MCP token file must be an ordinary file of at most 8192 bytes".to_string(),
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(
+                "Tunnel MCP token file must be private to its owner (mode 0600 or 0400)"
+                    .to_string(),
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err("Tunnel MCP token file must not be a reparse point".to_string());
+        }
+    }
+    let mut contents = String::new();
+    {
+        use std::io::Read;
+        std::fs::File::open(&path)
+            .map_err(|_| "Tunnel MCP token file cannot be read".to_string())?
+            .take(8193)
+            .read_to_string(&mut contents)
+            .map_err(|_| "Tunnel MCP token file must contain valid UTF-8".to_string())?;
+    }
+    if contents.len() > 8192 {
+        return Err("Tunnel MCP token file exceeds 8192 bytes".to_string());
+    }
+    let token = contents.trim().to_string();
+    if !token.starts_with("wc_pat_") || token.bytes().any(|byte| byte <= b' ' || byte >= 127) {
+        return Err("Tunnel MCP token file must contain one managed user API token".to_string());
+    }
+    Ok(token)
 }
 
 pub(crate) fn derive_regular_tunnel_bootstrap_token(env_file: &Path) -> Result<String, String> {

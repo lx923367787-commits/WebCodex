@@ -672,7 +672,10 @@ fn mcp_file_import_trust_decision_reports_exact_failure_stage() {
 
     let api_auth = crate::auth::AuthContext::new(crate::auth::AuthKind::ApiToken);
     let not_oauth = mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&api_auth));
-    assert_eq!(not_oauth.reason, HostFileImportTrustReason::NotOAuthToken);
+    assert_eq!(
+        not_oauth.reason,
+        HostFileImportTrustReason::MissingApiTokenIdentity
+    );
 
     let mut missing_id = mcp_import_oauth_auth(&client.client_id);
     missing_id.allowed_client_id = None;
@@ -1162,4 +1165,269 @@ fn build_mcp_import_oauth_management_router(
                 .push(Router::with_path("create").post(crate::oauth_http::oauth_clients_create))
                 .push(Router::with_path("revoke").post(crate::oauth_http::oauth_clients_revoke)),
         )
+}
+
+#[tokio::test]
+async fn mcp_file_import_api_token_trust_is_exact_and_rechecks_lifecycle() {
+    use crate::auth::{PatVerifier, TokenVerifier};
+
+    let (_tmp, db) = test_db();
+    let user = seed_user(&db, "alice");
+    let token = seed_mcp_import_pat(&db, &user);
+    let record = db
+        .get_api_key_by_hash(&crate::auth::hash_token(&token))
+        .unwrap()
+        .unwrap();
+    let mut config = (*test_config(Some("secret"))).clone();
+    assert!(!config.oauth2.enabled);
+    let auth = PatVerifier
+        .verify(&config, Some(&db), &token)
+        .await
+        .unwrap()
+        .unwrap();
+    let decision = mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&auth));
+    assert_eq!(
+        decision.reason,
+        HostFileImportTrustReason::ApiTokenIdNotConfigured
+    );
+
+    config.trusted_mcp_file_api_token_ids = vec![record.id.clone()];
+    let trusted = mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&auth));
+    assert_eq!(trusted.trust, HostFileImportTrust::TrustedApiToken);
+    assert_eq!(trusted.reason, HostFileImportTrustReason::TrustedApiToken);
+    assert_eq!(trusted.active_api_token_found, Some(true));
+
+    // Same owner and name are insufficient: a replacement gets its own ID.
+    let replacement = seed_mcp_import_pat(&db, &user);
+    let replacement_auth = PatVerifier
+        .verify(&config, Some(&db), &replacement)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&replacement_auth))
+            .reason,
+        HostFileImportTrustReason::ApiTokenIdNotConfigured
+    );
+
+    let mut wrong_owner = auth.clone();
+    wrong_owner.user_id = Some("another-user".to_string());
+    assert_eq!(
+        mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&wrong_owner)).reason,
+        HostFileImportTrustReason::ApiTokenUnavailable
+    );
+    let mut missing_owner = auth.clone();
+    missing_owner.user_id = None;
+    assert_eq!(
+        mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&missing_owner)).reason,
+        HostFileImportTrustReason::MissingApiTokenIdentity
+    );
+
+    // An allowlisted ID cannot override current owner disablement.
+    db.set_user_disabled(&user.id, true, chrono::Utc::now().timestamp())
+        .unwrap();
+    assert_eq!(
+        mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&auth)).reason,
+        HostFileImportTrustReason::ApiTokenUnavailable
+    );
+    db.set_user_disabled(&user.id, false, chrono::Utc::now().timestamp())
+        .unwrap();
+
+    // get_api_key_by_id deliberately includes revoked and expired records.
+    db.conn_for_tests()
+        .execute(
+            "UPDATE api_keys SET expires_at = ?1 WHERE id = ?2",
+            rusqlite::params![chrono::Utc::now().timestamp() - 1, record.id],
+        )
+        .unwrap();
+    assert_eq!(
+        mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&auth)).reason,
+        HostFileImportTrustReason::ApiTokenUnavailable
+    );
+    db.conn_for_tests()
+        .execute(
+            "UPDATE api_keys SET expires_at = NULL, kind = 'agent' WHERE id = ?1",
+            [&record.id],
+        )
+        .unwrap();
+    assert_eq!(
+        mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&auth)).reason,
+        HostFileImportTrustReason::ApiTokenUnavailable
+    );
+    db.conn_for_tests()
+        .execute(
+            "UPDATE api_keys SET kind = 'user' WHERE id = ?1",
+            [&record.id],
+        )
+        .unwrap();
+    db.revoke_api_key(&record.id, chrono::Utc::now().timestamp())
+        .unwrap();
+    assert_eq!(
+        mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&auth)).reason,
+        HostFileImportTrustReason::ApiTokenUnavailable
+    );
+
+    let mut unknown = auth.clone();
+    let unknown_id = uuid::Uuid::new_v4().to_string();
+    config
+        .trusted_mcp_file_api_token_ids
+        .push(unknown_id.clone());
+    unknown.api_key_id = Some(unknown_id);
+    assert_eq!(
+        mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&unknown)).reason,
+        HostFileImportTrustReason::ApiTokenUnavailable
+    );
+}
+
+#[tokio::test]
+async fn mcp_file_import_api_token_allowlist_never_trusts_other_credential_kinds() {
+    use crate::auth::{AuthKind, PatVerifier, TokenVerifier};
+
+    let (_tmp, db) = test_db();
+    let user = seed_user(&db, "alice");
+    let token = seed_mcp_import_pat(&db, &user);
+    let record = db
+        .get_api_key_by_hash(&crate::auth::hash_token(&token))
+        .unwrap()
+        .unwrap();
+    let mut config = (*test_config(Some("secret"))).clone();
+    config.trusted_mcp_file_api_token_ids = vec![record.id];
+    let auth = PatVerifier
+        .verify(&config, Some(&db), &token)
+        .await
+        .unwrap()
+        .unwrap();
+    for kind in [
+        AuthKind::Bootstrap,
+        AuthKind::SharedKey,
+        AuthKind::AgentToken,
+        AuthKind::AccountCredential,
+        AuthKind::ProjectCredential,
+        AuthKind::OpenAnonymous,
+        AuthKind::OAuth2Token,
+    ] {
+        let mut wrong_kind = auth.clone();
+        wrong_kind.kind = kind;
+        assert_eq!(
+            mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&wrong_kind)).trust,
+            HostFileImportTrust::Untrusted,
+            "API ID must not confer trust on {kind:?}"
+        );
+    }
+    let mut bootstrap = auth;
+    bootstrap.is_bootstrap = true;
+    assert_eq!(
+        mcp_host_file_import_trust_decision_from_state(&config, &db, Some(&bootstrap)).trust,
+        HostFileImportTrust::Untrusted
+    );
+}
+
+#[test]
+fn api_token_mcp_file_import_works_without_oauth_and_preserves_guards() {
+    run_mcp_import_in_large_stack_test_thread(
+        api_token_mcp_file_import_works_without_oauth_and_preserves_guards_impl,
+    );
+}
+
+async fn api_token_mcp_file_import_works_without_oauth_and_preserves_guards_impl() {
+    use sha2::{Digest, Sha256};
+
+    let _lock = lock_mcp_import_test().await;
+    let bytes = b"trusted-api-token-file-payload".to_vec();
+    let server = start_mcp_import_mock_server(mcp_import_http_response(
+        "200 OK",
+        &[("Content-Length", bytes.len().to_string())],
+        &bytes,
+    ))
+    .await;
+    let _network = McpImportNetworkOverride::set(server.base_url.clone());
+    let (_tmp, db) = test_db();
+    let user = seed_user(&db, "alice");
+    let token = seed_mcp_import_pat(&db, &user);
+    let record = db
+        .get_api_key_by_hash(&crate::auth::hash_token(&token))
+        .unwrap()
+        .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let (runtime, registry) = mcp_import_runtime(project.path(), Some("alice")).await;
+    let mut config = (*test_config(Some("secret"))).clone();
+    assert!(!config.oauth2.enabled);
+    let params = mcp_2026_params(json!({
+        "name": "import_conversation_files_to_project",
+        "arguments": {
+            "project": "agent:importer:demo",
+            "openaiFileIdRefs": [{"download_url": "https://download.example/private-reference/file.png",
+                "file_id": "host-file-reference", "mime_type": "image/png", "file_name": "source.png"}],
+            "targets": ["api-token.png"],
+            "trusted_mcp_host_file_import": true
+        }
+    }));
+
+    let untrusted_service = Service::new(build_test_router(
+        Arc::new(config.clone()),
+        db.clone(),
+        runtime.clone(),
+    ));
+    let (status, body, _) =
+        oauth_mcp_request(&untrusted_service, &token, "tools/call", params.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["isError"], true);
+    assert_eq!(
+        crate::tool_runtime::conversation_import::import_test_dns_resolution_count(),
+        0,
+        "JSON cannot assert host trust for an unlisted API token"
+    );
+
+    config.trusted_mcp_file_api_token_ids = vec![record.id.clone()];
+    let service = Service::new(build_test_router(Arc::new(config), db.clone(), runtime));
+    // Operator trust is not project:write authority.
+    db.conn_for_tests()
+        .execute(
+            "UPDATE api_keys SET scopes = 'runtime:read project:read' WHERE id = ?1",
+            [&record.id],
+        )
+        .unwrap();
+    let (status, _, _) = oauth_mcp_request(&service, &token, "tools/call", params.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        crate::tool_runtime::conversation_import::import_test_dns_resolution_count(),
+        0
+    );
+    db.conn_for_tests()
+        .execute(
+            "UPDATE api_keys SET scopes = 'project:write' WHERE id = ?1",
+            [&record.id],
+        )
+        .unwrap();
+
+    let mut unsafe_url = params.clone();
+    unsafe_url["arguments"]["openaiFileIdRefs"][0]["download_url"] =
+        json!("https://127.0.0.1/private");
+    let (status, body, _) = oauth_mcp_request(&service, &token, "tools/call", unsafe_url).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["isError"], true);
+    assert_eq!(
+        crate::tool_runtime::conversation_import::import_test_dns_resolution_count(),
+        0
+    );
+
+    let agent = tokio::spawn(complete_mcp_import_save(registry, bytes.clone()));
+    let (status, body, _) = oauth_mcp_request(&service, &token, "tools/call", params).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    assert_eq!(body["result"]["isError"], false, "body: {body:?}");
+    tokio::time::timeout(std::time::Duration::from_secs(5), agent)
+        .await
+        .unwrap()
+        .unwrap();
+    let decision = take_last_mcp_host_file_import_trust_decision().unwrap();
+    assert_eq!(decision.trust, HostFileImportTrust::TrustedApiToken);
+    let imported = &body["result"]["structuredContent"]["output"]["imported"][0];
+    assert_eq!(imported["path"], "artifacts/imports/api-token.png");
+    assert_eq!(imported["bytes_written"], bytes.len());
+    assert_eq!(imported["sha256"], format!("{:x}", Sha256::digest(&bytes)));
+    let serialized = serde_json::to_string(&body).unwrap();
+    assert!(!serialized.contains(&token));
+    assert!(!serialized.contains(&record.id));
+    assert!(!serialized.contains("private-reference"));
+    assert!(!serialized.contains("host-file-reference"));
 }

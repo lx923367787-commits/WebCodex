@@ -7,6 +7,7 @@ pub(super) fn test_config(oauth2: OAuth2Config) -> Arc<crate::Config> {
         token: Some("bootstrap-token".to_string()),
         max_text_size: 2 * 1024 * 1024,
         oauth2,
+        trusted_mcp_file_api_token_ids: Vec::new(),
     })
 }
 

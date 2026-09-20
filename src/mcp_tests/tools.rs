@@ -1242,9 +1242,16 @@ fn ordinary_artifact_result_keeps_existing_text_and_structured_base64_shape() {
 
 #[tokio::test]
 async fn mcp_image_call_returns_native_image_for_remote_agent_project() {
-    // read_project_artifact is an artifact tool outside the local_coding
-    // surface; select the full operator surface for this call.
-    let runtime = test_runtime_with_surface(ModelSurface::FullOperatorRuntime);
+    assert_mcp_image_call_returns_native_image(ModelSurface::FullOperatorRuntime).await;
+}
+
+#[tokio::test]
+async fn adaptive_gateway_image_call_returns_native_image_for_remote_agent_project() {
+    assert_mcp_image_call_returns_native_image(ModelSurface::AdaptiveRuntime).await;
+}
+
+async fn assert_mcp_image_call_returns_native_image(model_surface: ModelSurface) {
+    let runtime = test_runtime_with_surface(model_surface);
     let client_id = "mcp-vision-agent";
     let runner_instance_id = "inst-mcp-vision";
     let project_name = "remote-images";
@@ -1315,20 +1322,22 @@ async fn mcp_image_call_returns_native_image_for_remote_agent_project() {
         let project = project.clone();
         let auth = auth.clone();
         async move {
+            let arguments = json!({
+                "project": project,
+                "path": path,
+                "as_image": true
+            });
+            let params = if model_surface == ModelSurface::AdaptiveRuntime {
+                mcp_2026_params(json!({
+                    "name": "call_runtime_tool",
+                    "arguments": {"tool": "read_project_artifact", "arguments": arguments}
+                }))
+            } else {
+                json!({"name": "read_project_artifact", "arguments": arguments})
+            };
             handle_mcp_request(
                 &runtime,
-                rpc(
-                    "tools/call",
-                    Some(json!(77)),
-                    json!({
-                        "name": "read_project_artifact",
-                        "arguments": {
-                            "project": project,
-                            "path": path,
-                            "as_image": true
-                        }
-                    }),
-                ),
+                rpc("tools/call", Some(json!(77)), params),
                 Some(&auth),
             )
             .await

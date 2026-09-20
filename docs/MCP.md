@@ -376,8 +376,23 @@ payloads through model text:
   short-lived process-local presentation state, and the normal project artifact
   size, MIME, path, and authorization bounds remain in force.
 
-`read_project_artifact` remains the bounded chunk-inspection API; it is not the
-large-file download path. Office artifacts such as DOCX/PPTX/XLSX and PDFs use
+Host-file import is default-denied. It requires either an explicitly trusted,
+active OAuth client or a dedicated managed user API token whose exact record ID
+is listed in `WEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS`. The API-token route also
+rechecks the token's owner, expiry, revocation and user status; names, prefixes,
+Bootstrap credentials and Runner tokens never imply trust. Normal project-write
+and download policies still apply. The [deployment guide](DEPLOYMENT.md#local-tunnel-file-import)
+describes the opt-in local Tunnel setup without changing its Tunnel ID.
+
+For model vision, call `read_project_artifact` with `as_image=true` over MCP to
+return a complete PNG, JPEG, or WebP up to 1 MiB as a native image ContentBlock.
+Omit `offset` and `length` in this mode. On the adaptive surface, discover the
+MCP-only option with `tool_manifest(tool_name="read_project_artifact")`, then
+invoke the target through `call_runtime_tool`. The host must deliver the image
+ContentBlock to the model; a download ResourceLink alone does not provide vision.
+Normal artifact reads retain bounded chunk inspection, while
+`export_project_artifact` remains the complete-file download path.
+Office artifacts such as DOCX/PPTX/XLSX and PDFs use
 the same artifact transport and can therefore move between a project and a
 supporting ChatGPT host without a model manually carrying their Base64.
 

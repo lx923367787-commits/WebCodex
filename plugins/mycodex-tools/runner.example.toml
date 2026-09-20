@@ -1,0 +1,12 @@
+# Merge only into the explicitly selected writable Runner configuration.
+# Do not add a second [plugins] table if one already exists.
+[plugins]
+request_timeout_secs = 60
+
+[[plugins.providers]]
+id = "mycodex-tools"
+name = "MyCodex Office and PDF"
+command = 'E:\wbecodex\.local\venvs\mycodex-tools\Scripts\python.exe'
+args = ['E:\wbecodex\source\plugins\mycodex-tools\plugin.py', '--font-path', 'C:\Windows\Fonts\simhei.ttf']
+cwd = 'E:\wbecodex\sandbox'
+timeout_secs = 60

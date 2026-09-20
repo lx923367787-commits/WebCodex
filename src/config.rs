@@ -8,6 +8,9 @@ pub struct Config {
     pub token: Option<String>,
     pub max_text_size: usize,
     pub oauth2: OAuth2Config,
+    /// Exact API token record IDs explicitly trusted to supply MCP host-file
+    /// references. Empty by default; independent of whether OAuth is enabled.
+    pub trusted_mcp_file_api_token_ids: Vec<String>,
 }
 
 /// Server-side QUIC Runner transport configuration. Sourced from
@@ -489,6 +492,12 @@ impl Config {
             token: std::env::var("WEBCODEX_TOKEN").ok(),
             max_text_size: 2 * 1024 * 1024,
             oauth2: OAuth2Config::from_env(),
+            trusted_mcp_file_api_token_ids: std::env::var(
+                "WEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS",
+            )
+            .ok()
+            .map(|value| parse_trusted_mcp_file_api_token_ids(&value))
+            .unwrap_or_default(),
         }
     }
 
@@ -520,6 +529,21 @@ impl Config {
             .map(|t| constant_time_eq(t.as_bytes(), token.as_bytes()))
             .unwrap_or(false)
     }
+}
+
+fn parse_trusted_mcp_file_api_token_ids(value: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for value in value.split(',').map(str::trim) {
+        // Standard token creation returns canonical UUID record IDs. Neither
+        // token plaintext, token prefixes, names nor wildcards grant trust.
+        let Ok(id) = uuid::Uuid::parse_str(value) else {
+            continue;
+        };
+        if id.to_string() == value && !ids.iter().any(|existing| existing == value) {
+            ids.push(value.to_string());
+        }
+    }
+    ids
 }
 
 pub(crate) fn runtime_state_dir() -> PathBuf {
@@ -660,6 +684,27 @@ mod tests {
         assert!(cfg.require_pkce);
         assert!(!cfg.shared_key_bridge_enabled);
         assert!(cfg.trusted_mcp_file_client_ids.is_empty());
+    }
+
+    #[test]
+    fn mcp_file_api_token_trust_defaults_to_empty_and_parses_exact_record_ids() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.remove("WEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS");
+        env.set("WEBCODEX_OAUTH2_ENABLED", "false");
+        assert!(Config::from_env().trusted_mcp_file_api_token_ids.is_empty());
+        let first = "12345678-1234-4234-8234-123456789abc";
+        let second = "abcdef12-1234-4234-8234-123456789abc";
+        env.set(
+            "WEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS",
+            format!(
+                " {first},*,wc_pat_secret,ChatGPT,{first},{second},{}",
+                second.to_uppercase()
+            ),
+        );
+        let config = Config::from_env();
+        assert!(!config.oauth2.enabled);
+        assert_eq!(config.trusted_mcp_file_api_token_ids, vec![first, second]);
+        assert!(parse_trusted_mcp_file_api_token_ids("*, invalid, wc_pat_secret").is_empty());
     }
 
     #[test]

@@ -390,7 +390,7 @@ curl -fsS -X POST https://your-domain.example/api/oauth/clients/create \
 
 `allowed_scopes` 限制 OAuth client 最多可以请求哪些权限。WebCodex 新增 permission 时不会静默扩大已有 client。要修改现有 client，请把期望保留的完整、非空 allow-list 提交到 `POST /api/oauth/clients/update_scopes`。真实变化会让旧 OAuth grant 失效并要求重新授权；提交相同 canonical list 是 no-op。安全模型见[认证](AUTH_MODEL.zh-CN.md#oauth2)。
 
-如果启用 ChatGPT MCP host-file import，请把精确的 server-generated OAuth client id 配入 `WEBCODEX_OAUTH2_TRUSTED_MCP_FILE_CLIENT_IDS`。重新创建 client 会生成新 id，因此应把更新这个设置作为一次显式 trust rotation。Client display name 与 redirect URI 不能替代该精确 client id。
+对于 OAuth host-file import 路径，请把精确的 server-generated OAuth client id 配入 `WEBCODEX_OAUTH2_TRUSTED_MCP_FILE_CLIENT_IDS`。重新创建 client 会生成新 id，因此应把更新这个设置作为一次显式 trust rotation。Client display name 与 redirect URI 不能替代该精确 client id。
 
 用 `POST /api/oauth/clients/list` 与 `POST /api/oauth/clients/revoke` 列出与
 撤销 client。OAuth 使用 authorization-code 流程；动态 client 注册、OIDC 与
@@ -398,6 +398,33 @@ device-code 流程未实现。宿主提供 `offline_access` 时保持勾选—�
 refresh-token scope，不授予额外 WebCodex 权限。
 
 ## GPT Actions 与 MCP
+
+### 本地隧道文件导入
+
+Local Full Runtime 默认向本地 MCP 注入 Bootstrap 凭据，该凭据不会自动获得
+host 文件导入信任。若要保留 OpenAI Tunnel ID 和 ChatGPT 的 Tunnel/No-auth
+选择，可由操作者显式配置专用用户 API token：
+
+1. 通过已认证的 `POST /api/tokens/create` 为目标 Runner/项目的所属用户创建令牌。
+   文件导入、导出需要 `project:write`、`project:read`，发现需要 `runtime:read`；
+   其他预期代码能力的 scopes 需明确保留。把只返回一次的 token 存入本机私有文件，
+   不发送给模型、不复用普通客户端令牌。
+2. 在 Server env 文件的 `WEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS` 中配置 token
+   的精确**记录 UUID**，不是名称、前缀或 token 明文。多个 ID 用逗号分隔；默认空，
+   非法 ID 不会获得信任。
+3. 同一 env 文件的 `WEBCODEX_TUNNEL_MCP_TOKEN_FILE` 指向该私有文件的绝对路径。
+   `server tunnel --mcp-token-file PATH` 优先于此设置；文件无效时失败，不回退为 Bootstrap。
+4. 启用已复核的 Server/CLI 构建，通过正常管理者重启指定 Server/Tunnel。
+   Server Bootstrap、Runner 传输凭据、OpenAI 控制面 key 和 Tunnel ID 继续独立。
+5. 验证真实 host 文件引用导入后的 SHA-256 一致，再验证
+   `read_project_artifact(as_image=true)` 确实返回可供模型识别的图片内容。
+
+该配置仅信任精确的专用 MCP host 凭据，不信任全部 Bearer 客户端。令牌撤销/到期、
+用户停用、所属用户不符或替换后的新 ID 均被拒绝；项目权限、URL/DNS/重定向、MIME/
+大小限制及 host 的 `openai/fileParams` 绑定继续生效。移除白名单 ID 与 token-file
+选择即可恢复默认，再通过标准 token API 撤销旧专用令牌。OAuth 客户端仍使用原有独立配置。
+
+### 客户端入口
 
 - **MCP：** 用 user API token（`wc_pat_*`）把客户端连接到
   `https://your-domain.example/mcp`；启用 OAuth 时用 OAuth 流程。

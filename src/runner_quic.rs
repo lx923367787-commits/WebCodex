@@ -836,6 +836,7 @@ mod tests {
             data_dir: std::path::PathBuf::from("./data"),
             token: None,
             max_text_size: 2 * 1024 * 1024,
+            trusted_mcp_file_api_token_ids: Vec::new(),
             oauth2: crate::OAuth2Config::default(),
         });
         let registry = Arc::new(RunnerRegistry::default());
@@ -1466,6 +1467,7 @@ mod tests {
             data_dir: std::path::PathBuf::from("./data"),
             token: None,
             max_text_size: 2 * 1024 * 1024,
+            trusted_mcp_file_api_token_ids: Vec::new(),
             oauth2: crate::OAuth2Config::default(),
         });
         let registry = Arc::new(RunnerRegistry::default());
@@ -1521,6 +1523,7 @@ mod tests {
             data_dir: std::path::PathBuf::from("./data"),
             token: None,
             max_text_size: 2 * 1024 * 1024,
+            trusted_mcp_file_api_token_ids: Vec::new(),
             oauth2: crate::OAuth2Config::default(),
         });
         let registry = Arc::new(RunnerRegistry::default());

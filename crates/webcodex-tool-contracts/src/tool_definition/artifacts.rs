@@ -69,7 +69,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                     false,
                     super::ToolSessionEvidencePolicy::NONE,
                 ),
-                "Import 1..10 current ChatGPT/host attachments into a Runner project using openaiFileIdRefs from the host file-reference mechanism. This is the preferred host-native attachment-to-project transfer path: do not base64-transfer files, construct download URLs, or use local /mnt/data paths; Control downloads and saves them as project artifacts. Existing trusted MCP host/OAuth client and host rewrite checks still apply.",
+                "Import 1..10 current ChatGPT/host attachments into a Runner project using openaiFileIdRefs from the host file-reference mechanism. This is the preferred host-native attachment-to-project transfer path: do not base64-transfer files, construct download URLs, or use local /mnt/data paths; Control downloads and saves them as project artifacts. Requires an explicitly trusted active OAuth client or an exact allowlisted managed user API token dedicated to the MCP host. Bootstrap and ordinary unlisted credentials do not grant file-import trust. Normal project-write, download and host rewrite checks still apply.",
                 import_conversation_files_to_project_input_schema,
             ),
             PERMISSION_RISK_ARTIFACT_WRITE,

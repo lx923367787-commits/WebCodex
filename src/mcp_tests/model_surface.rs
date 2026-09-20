@@ -778,6 +778,84 @@ async fn adaptive_runtime_ssh_resource_is_discovered_and_invoked_only_through_ga
 }
 
 #[tokio::test]
+async fn mcp_tool_manifest_advertises_image_mode_without_changing_runtime_schema() {
+    let full_list = mcp_tools_list_payload_with_compact(ModelSurface::FullOperatorRuntime, false);
+    let image_option = full_list["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "read_project_artifact")
+        .unwrap()["inputSchema"]["properties"]["as_image"]
+        .clone();
+    for model_surface in [
+        ModelSurface::AdaptiveRuntime,
+        ModelSurface::FullOperatorRuntime,
+    ] {
+        let runtime = test_runtime_with_surface(model_surface);
+        let canonical = runtime
+            .dispatch(crate::tool_runtime::ToolCall::ToolManifest {
+                tool_name: Some("read_project_artifact".to_string()),
+                category: None,
+                intent: None,
+                include_recommended_flows: false,
+                include_risk_summary: false,
+            })
+            .await;
+        assert!(canonical.success);
+        let generic_schema = &canonical.output["contract"]["input_schema"];
+        assert!(generic_schema["properties"].get("as_image").is_none());
+        let described = handle_mcp_request(
+            &runtime,
+            rpc(
+                "tools/call",
+                Some(json!(723)),
+                mcp_2026_params(json!({
+                    "name": "tool_manifest",
+                    "arguments": {"tool_name": "read_project_artifact"}
+                })),
+            ),
+            None,
+        )
+        .await;
+        let McpOutcome::Ok(value) = described else {
+            panic!("MCP artifact manifest must succeed");
+        };
+        let output = &value["result"]["structuredContent"]["output"];
+        assert_eq!(output["name"], "read_project_artifact");
+        assert_eq!(output["input_schema"]["properties"]["as_image"], image_option);
+        assert!(output["description"]
+            .as_str()
+            .unwrap()
+            .contains("as_image=true"));
+        assert_eq!(
+            output["route"]["mode"],
+            if model_surface == ModelSurface::AdaptiveRuntime {
+                "gateway"
+            } else {
+                "direct"
+            }
+        );
+        if model_surface == ModelSurface::AdaptiveRuntime {
+            assert_eq!(output["route"]["via"], "call_runtime_tool");
+        }
+        let mut projected_schema = output["input_schema"].clone();
+        projected_schema["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("as_image");
+        assert_eq!(&projected_schema, generic_schema);
+        for field in ["effect", "risk", "approval", "idempotency", "annotations"] {
+            assert_eq!(output[field], canonical.output["contract"][field]);
+        }
+    }
+    let generic = registered_tool_specs()
+        .into_iter()
+        .find(|spec| spec.name == "read_project_artifact")
+        .unwrap();
+    assert!(generic.input_schema["properties"].get("as_image").is_none());
+}
+
+#[tokio::test]
 async fn adaptive_runtime_tool_manifest_exact_projection_is_sparse_and_routes_explicitly() {
     let runtime = test_runtime_with_surface(ModelSurface::AdaptiveRuntime);
     let canonical_direct = runtime

@@ -924,6 +924,7 @@ mod tests {
             data_dir: PathBuf::from("./data"),
             token: Some("secret123".to_string()),
             max_text_size: 2 * 1024 * 1024,
+            trusted_mcp_file_api_token_ids: Vec::new(),
             oauth2: crate::OAuth2Config::default(),
         };
         assert!(config.is_auth_enabled());
@@ -939,6 +940,7 @@ mod tests {
             data_dir: PathBuf::from("./data"),
             token: None,
             max_text_size: 2 * 1024 * 1024,
+            trusted_mcp_file_api_token_ids: Vec::new(),
             oauth2: crate::OAuth2Config::default(),
         };
         assert!(!config.is_auth_enabled());

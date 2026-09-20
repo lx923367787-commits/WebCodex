@@ -514,6 +514,35 @@ pub(super) fn add_stateless_workflow_recorder_metadata(
     }
 }
 
+fn adapt_artifact_image_mode_for_mcp(input_schema: &mut Value, description: &mut String) {
+    if let Some(properties) = input_schema["properties"].as_object_mut() {
+        properties.insert(
+            "as_image".to_string(),
+            json!({
+                "type": "boolean",
+                "description": "MCP-only. When true, read one complete PNG, JPEG, or WebP up to 1 MiB and return it as native image content. Cannot be combined with offset or length."
+            }),
+        );
+    }
+    description.push_str(
+        " Over MCP, set as_image=true to return one complete PNG, JPEG, or WebP as native image content; ordinary calls keep the existing chunked base64 response.",
+    );
+}
+
+fn adapt_tool_manifest_result_for_mcp(result: &mut ToolResult) {
+    if !result.success || result.output["name"] != "read_project_artifact" {
+        return;
+    }
+    let Some(mut description) = result.output["description"].as_str().map(str::to_string) else {
+        return;
+    };
+    let Some(input_schema) = result.output.get_mut("input_schema") else {
+        return;
+    };
+    adapt_artifact_image_mode_for_mcp(input_schema, &mut description);
+    result.output["description"] = Value::String(description);
+}
+
 fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, _app_enabled: bool) -> Value {
     let tool_name = spec.name.clone();
     if matches!(
@@ -523,18 +552,7 @@ fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, _app_enabled: bool) -> 
         adapt_computer_snapshot_output_schema_for_mcp(&mut spec);
     }
     if tool_name == "read_project_artifact" {
-        if let Some(properties) = spec.input_schema["properties"].as_object_mut() {
-            properties.insert(
-                "as_image".to_string(),
-                json!({
-                    "type": "boolean",
-                    "description": "MCP-only. When true, read one complete PNG, JPEG, or WebP up to 1 MiB and return it as native image content. Cannot be combined with offset or length."
-                }),
-            );
-        }
-        spec.description.push_str(
-            " Over MCP, set as_image=true to return one complete PNG, JPEG, or WebP as native image content; ordinary calls keep the existing chunked base64 response.",
-        );
+        adapt_artifact_image_mode_for_mcp(&mut spec.input_schema, &mut spec.description);
     }
     let mut value = if compact {
         json!({
@@ -648,6 +666,7 @@ pub(super) async fn handle_list(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HostFileImportTrustReason {
     Trusted,
+    TrustedApiToken,
     MissingConfig,
     MissingDatabase,
     MissingAuth,
@@ -657,12 +676,17 @@ pub(super) enum HostFileImportTrustReason {
     ClientIdNotConfigured,
     ClientRegistrationMissingOrRevoked,
     ClientRegistrationLookupFailed,
+    MissingApiTokenIdentity,
+    ApiTokenIdNotConfigured,
+    ApiTokenUnavailable,
+    ApiTokenLookupFailed,
 }
 
 impl HostFileImportTrustReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::Trusted => "trusted",
+            Self::TrustedApiToken => "trusted_api_token",
             Self::MissingConfig => "missing_config",
             Self::MissingDatabase => "missing_database",
             Self::MissingAuth => "missing_auth",
@@ -672,6 +696,10 @@ impl HostFileImportTrustReason {
             Self::ClientIdNotConfigured => "client_id_not_configured",
             Self::ClientRegistrationMissingOrRevoked => "client_registration_missing_or_revoked",
             Self::ClientRegistrationLookupFailed => "client_registration_lookup_failed",
+            Self::MissingApiTokenIdentity => "missing_api_token_identity",
+            Self::ApiTokenIdNotConfigured => "api_token_id_not_configured",
+            Self::ApiTokenUnavailable => "api_token_unavailable",
+            Self::ApiTokenLookupFailed => "api_token_lookup_failed",
         }
     }
 }
@@ -684,8 +712,11 @@ pub(super) struct HostFileImportTrustDecision {
     database_present: bool,
     oauth_enabled: bool,
     configured_trusted_client_count: usize,
+    configured_trusted_api_token_count: usize,
     pub(super) client_id_configured: Option<bool>,
     pub(super) active_client_registration_found: Option<bool>,
+    pub(super) api_token_id_configured: Option<bool>,
+    pub(super) active_api_token_found: Option<bool>,
 }
 
 #[cfg(test)]
@@ -712,8 +743,11 @@ impl HostFileImportTrustDecision {
             database_present: false,
             oauth_enabled: false,
             configured_trusted_client_count: 0,
+            configured_trusted_api_token_count: 0,
             client_id_configured: None,
             active_client_registration_found: None,
+            api_token_id_configured: None,
+            active_api_token_found: None,
         }
     }
 
@@ -725,8 +759,11 @@ impl HostFileImportTrustDecision {
             database_present: false,
             oauth_enabled: config.oauth2.enabled,
             configured_trusted_client_count: config.oauth2.trusted_mcp_file_client_ids.len(),
+            configured_trusted_api_token_count: config.trusted_mcp_file_api_token_ids.len(),
             client_id_configured: None,
             active_client_registration_found: None,
+            api_token_id_configured: None,
+            active_api_token_found: None,
         }
     }
 }
@@ -743,12 +780,18 @@ pub(super) fn mcp_host_file_import_trust_decision_from_state(
         database_present: true,
         oauth_enabled: config.oauth2.enabled,
         configured_trusted_client_count: config.oauth2.trusted_mcp_file_client_ids.len(),
+        configured_trusted_api_token_count: config.trusted_mcp_file_api_token_ids.len(),
         client_id_configured: None,
         active_client_registration_found: None,
+        api_token_id_configured: None,
+        active_api_token_found: None,
     };
     let Some(auth) = auth else {
         return base;
     };
+    if auth.kind == crate::auth::AuthKind::ApiToken && !auth.is_bootstrap {
+        return mcp_api_token_file_import_trust(config, db, auth, base);
+    }
     if !auth.is_oauth_token() {
         return HostFileImportTrustDecision {
             reason: HostFileImportTrustReason::NotOAuthToken,
@@ -803,6 +846,83 @@ pub(super) fn mcp_host_file_import_trust_decision_from_state(
             client_id_configured: Some(true),
             active_client_registration_found: None,
             ..base
+        },
+    }
+}
+
+fn mcp_api_token_file_import_trust(
+    config: &crate::Config,
+    db: &crate::Database,
+    auth: &AuthContext,
+    base: HostFileImportTrustDecision,
+) -> HostFileImportTrustDecision {
+    let (Some(token_id), Some(user_id)) = (
+        auth.api_key_id.as_deref().filter(|id| !id.is_empty()),
+        auth.user_id.as_deref().filter(|id| !id.is_empty()),
+    ) else {
+        return HostFileImportTrustDecision {
+            reason: HostFileImportTrustReason::MissingApiTokenIdentity,
+            ..base
+        };
+    };
+    if !config
+        .trusted_mcp_file_api_token_ids
+        .iter()
+        .any(|id| id == token_id)
+    {
+        return HostFileImportTrustDecision {
+            reason: HostFileImportTrustReason::ApiTokenIdNotConfigured,
+            api_token_id_configured: Some(false),
+            ..base
+        };
+    }
+    let configured = HostFileImportTrustDecision {
+        api_token_id_configured: Some(true),
+        active_api_token_found: Some(false),
+        ..base
+    };
+    // Normal authentication already verified the token secret. Recheck the
+    // exact durable identity and lifecycle here: allowlisting an old ID must
+    // never confer trust on another token, user, token kind, or revoked row.
+    let token = match db.get_api_key_by_id(token_id) {
+        Ok(Some(token))
+            if token.id == token_id
+                && token.user_id == user_id
+                && token.kind() == crate::models::TOKEN_KIND_USER
+                && !token.is_revoked()
+                && !token.is_expired(chrono::Utc::now().timestamp()) =>
+        {
+            token
+        }
+        Ok(_) => {
+            return HostFileImportTrustDecision {
+                reason: HostFileImportTrustReason::ApiTokenUnavailable,
+                ..configured
+            }
+        }
+        Err(_) => {
+            return HostFileImportTrustDecision {
+                reason: HostFileImportTrustReason::ApiTokenLookupFailed,
+                ..configured
+            }
+        }
+    };
+    match db.get_user_by_id(&token.user_id) {
+        Ok(Some(user)) if user.id == user_id && !user.is_disabled() => {
+            HostFileImportTrustDecision {
+                trust: HostFileImportTrust::TrustedApiToken,
+                reason: HostFileImportTrustReason::TrustedApiToken,
+                active_api_token_found: Some(true),
+                ..configured
+            }
+        }
+        Ok(_) => HostFileImportTrustDecision {
+            reason: HostFileImportTrustReason::ApiTokenUnavailable,
+            ..configured
+        },
+        Err(_) => HostFileImportTrustDecision {
+            reason: HostFileImportTrustReason::ApiTokenLookupFailed,
+            ..configured
         },
     }
 }
@@ -890,8 +1010,11 @@ fn log_mcp_host_file_import_trust_decision(
         database_present = decision.database_present,
         oauth_enabled = decision.oauth_enabled,
         configured_trusted_client_count = decision.configured_trusted_client_count,
+        configured_trusted_api_token_count = decision.configured_trusted_api_token_count,
         client_id_configured = ?decision.client_id_configured,
         active_client_registration_found = ?decision.active_client_registration_found,
+        api_token_id_configured = ?decision.api_token_id_configured,
+        active_api_token_found = ?decision.active_api_token_found,
         "mcp_host_file_import_trust_decision"
     );
 }
@@ -1758,7 +1881,7 @@ pub(super) async fn handle_call(
     if let Some(slot) = correlation_out.as_deref_mut() {
         *slot = outcome.correlation.clone();
     }
-    let result = match outcome.error_status {
+    let mut result = match outcome.error_status {
         Some(ToolCallErrorStatus::InsufficientScope {
             required_scope,
             description,
@@ -1793,6 +1916,12 @@ pub(super) async fn handle_call(
             .expect("tool kernel outcome without error must include result"),
     };
     debug_assert_eq!(outcome.success, result.success);
+    // Session/audit consumers retain the canonical runtime contract. The exact
+    // model manifest must advertise the same MCP-only image option as tools/list,
+    // including when the target is discovered behind the adaptive gateway.
+    if params.name == "tool_manifest" {
+        adapt_tool_manifest_result_for_mcp(&mut result);
+    }
     if let Some(lc) = lifecycle.as_deref() {
         // Protocol layer produced a JSON-RPC result (not -32xxx).
         // Tool kernel success is independent (isError / structuredContent).

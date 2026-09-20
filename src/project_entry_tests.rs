@@ -340,6 +340,7 @@ async fn authenticated_project_fixture_for(recipe: &str) -> AuthenticatedProject
         data_dir: state.join("data"),
         token: Some(bootstrap_key.clone()),
         max_text_size: 2 * 1024 * 1024,
+        trusted_mcp_file_api_token_ids: Vec::new(),
         oauth2: crate::OAuth2Config::default(),
     });
     let router = Router::new()

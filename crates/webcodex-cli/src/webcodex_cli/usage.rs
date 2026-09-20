@@ -284,15 +284,16 @@ For start/stop/restart/logs/uninstall, --service-file PATH targets a custom mana
 }
 
 pub(crate) fn server_tunnel_usage() -> &'static str {
-    "Usage: webcodex server tunnel --provider openai --env-file PATH --json --stop-on-stdin-eof\n\n\
+    "Usage: webcodex server tunnel --provider openai --env-file PATH [--mcp-token-file PATH] --json --stop-on-stdin-eof\n\n\
 Run the canonical OpenAI Secure Tunnel for an already-running local WebCodex Server.\n\n\
 Options:\n\
   --provider openai          Required provider; regular Cloudflare remains a separate future contract\n\
   --env-file PATH            Local Server env file used for loopback address and bootstrap authority\n\
+  --mcp-token-file PATH      Private absolute file containing a dedicated managed user API token\n\
   --json                     Emit the safe machine readiness event\n\
   --stop-on-stdin-eof        Stop when the owning integration closes stdin\n\
   -h, --help                 Print help and exit\n\n\
-The Tunnel exposes only the local Server MCP endpoint and authenticates it with the effective Server bootstrap credential (process environment overrides the env file). The ready event contains only provider/readiness/clipboard metadata; credentials are never printed.\n"
+The Tunnel exposes only the local Server MCP endpoint. An explicit --mcp-token-file takes precedence over WEBCODEX_TUNNEL_MCP_TOKEN_FILE in the Server env file; an invalid selected file fails without falling back. Otherwise the effective Server bootstrap credential is used (process environment overrides the env file). File-import trust requires a separate exact Server allow-list; selecting a token does not grant it. The ready event contains only provider/readiness/clipboard metadata; credentials are never printed.\n"
 }
 
 pub(crate) fn server_init_usage() -> &'static str {

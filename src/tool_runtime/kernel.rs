@@ -29,11 +29,12 @@ pub(crate) enum HostFileImportTrust {
     #[default]
     Untrusted,
     TrustedOAuthClient,
+    TrustedApiToken,
 }
 
 impl HostFileImportTrust {
     pub(crate) fn is_trusted(self) -> bool {
-        matches!(self, Self::TrustedOAuthClient)
+        matches!(self, Self::TrustedOAuthClient | Self::TrustedApiToken)
     }
 }
 

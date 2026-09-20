@@ -439,7 +439,7 @@ curl -fsS -X POST https://your-domain.example/api/oauth/clients/create \
 
 `allowed_scopes` limits what an OAuth client may request. Existing clients are not silently widened when WebCodex adds new permissions. To change an existing client, submit the complete desired non-empty allow-list to `POST /api/oauth/clients/update_scopes`. A real change invalidates the client's old OAuth grants and requires reauthorization; submitting the same canonical list is a no-op. See [Authentication](AUTH_MODEL.md#oauth2) for the security model.
 
-If ChatGPT MCP host-file import is enabled, configure the exact server-generated OAuth client id in `WEBCODEX_OAUTH2_TRUSTED_MCP_FILE_CLIENT_IDS`. Reprovisioning the client creates a new id, so update this setting as part of that explicit trust rotation. Client display names and redirect URIs are not substitutes for the configured client id.
+For the OAuth host-file import route, configure the exact server-generated OAuth client id in `WEBCODEX_OAUTH2_TRUSTED_MCP_FILE_CLIENT_IDS`. Reprovisioning the client creates a new id, so update this setting as part of that explicit trust rotation. Client display names and redirect URIs are not substitutes for the configured client id.
 
 List and revoke clients with `POST /api/oauth/clients/list` and
 `POST /api/oauth/clients/revoke`. OAuth uses the authorization-code flow;
@@ -448,6 +448,41 @@ implemented. Keep `offline_access` enabled when a host offers it — it is a
 protocol-level refresh-token scope and grants no extra WebCodex permission.
 
 ## GPT Actions and MCP
+
+### Local Tunnel file import
+
+Local Full Runtime normally injects its Bootstrap credential into the local MCP
+hop. That credential does **not** establish host-file import trust. To enable
+the existing file bridge while retaining the same OpenAI Tunnel ID and ChatGPT
+Tunnel/No-auth selection, an operator can explicitly provision a dedicated user
+API token:
+
+1. Use the authenticated `POST /api/tokens/create` operation for the user who owns
+   the intended Runner/projects. Select only the required scopes; file import
+   and export need `project:write`/`project:read`, and discovery needs `runtime:read`.
+   Retain other intended coding scopes explicitly. Store the returned token once
+   in a private local file; do not send it to the model or reuse a general client token.
+2. Add its exact token **record UUID**, not its name, prefix or plaintext token,
+   to the Server env file as `WEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS=<record UUID>`.
+   Multiple IDs are comma-separated. The default is empty; malformed IDs fail closed.
+3. In that same env file, set `WEBCODEX_TUNNEL_MCP_TOKEN_FILE` to the absolute
+   private file path. `server tunnel --mcp-token-file PATH` explicitly overrides
+   this setting. An invalid selected file is an error, never a Bootstrap fallback.
+4. Activate the reviewed Server/CLI build and restart the selected Server/Tunnel
+   through its normal owner. The Server Bootstrap credential, Runner transport
+   credential, OpenAI control-plane key and Tunnel ID remain separate.
+5. Verify an actual host-provided file reference imports with the same SHA-256,
+   then verify `read_project_artifact(as_image=true)` returns visual image content.
+
+This opt-in trusts the exact dedicated MCP host credential, not all Bearer
+clients. Token revocation/expiry, user disablement, ownership changes and a
+replacement token ID fail closed. It never bypasses ordinary project authority,
+URL/DNS/redirect checks, MIME/size bounds or host `openai/fileParams` binding.
+Removing the allowlisted ID and the token-file selection restores the default;
+revoke the retired dedicated token through the standard token API. OAuth clients
+continue using the existing, separate trusted OAuth client configuration.
+
+### Client surfaces
 
 - **MCP:** connect a client to `https://your-domain.example/mcp` with a user
   API token (`wc_pat_*`) or, when OAuth is enabled, the OAuth flow.

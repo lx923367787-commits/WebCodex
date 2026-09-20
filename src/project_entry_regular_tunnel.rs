@@ -12,7 +12,7 @@ const REGULAR_TUNNEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegularServerTunnelOptions {
     pub(crate) local_server_url: String,
-    pub(crate) bootstrap_token: String,
+    pub(crate) mcp_token: String,
     pub(crate) runtime_parent: PathBuf,
 }
 
@@ -29,11 +29,11 @@ impl RegularTunnelSession {
         Ok(Self { directory })
     }
 
-    fn write_authorization_file(&self, bootstrap_token: &str) -> Result<PathBuf, ProductError> {
-        let token = bootstrap_token.trim();
+    fn write_authorization_file(&self, mcp_token: &str) -> Result<PathBuf, ProductError> {
+        let token = mcp_token.trim();
         if token.is_empty() {
             return Err(tunnel_auth_error(
-                "the local Server bootstrap credential is unavailable",
+                "the local Server MCP credential is unavailable",
             ));
         }
         let path = self.directory.join("openai-mcp-authorization");
@@ -53,7 +53,7 @@ pub(crate) async fn run_regular_server_tunnel(
 ) -> Result<(), ProductError> {
     let local_server_url = validate_local_server_url(&options.local_server_url)?;
     let session = RegularTunnelSession::create(&options.runtime_parent)?;
-    let authorization_file = session.write_authorization_file(&options.bootstrap_token)?;
+    let authorization_file = session.write_authorization_file(&options.mcp_token)?;
     let prerequisites = prepare_openai_tunnel().await?;
     let deadline = Instant::now() + REGULAR_TUNNEL_STARTUP_TIMEOUT;
     let mut tunnel = start_openai_tunnel(

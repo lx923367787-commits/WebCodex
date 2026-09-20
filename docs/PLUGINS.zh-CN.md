@@ -266,6 +266,10 @@ keyword 会在 provider admission 时明确拒绝，不会 silently ignore。v1 
 项目根内，只把单个文件或目录移入系统 Trash / Recycle Bin，不会把永久删除能力加入
 WebCodex 内建工具面。
 
+[`plugins/mycodex-tools`](../plugins/mycodex-tools/README.zh-CN.md) 基于成熟 Python
+库提供 11 个可选、无界面的 Office/PDF 工具，支持有界内容读取、验证后创建新文件，
+Word/Excel 修改保留源文件。文件、进程、Job 和图片回传继续使用现有运行时工具。
+
 ## 调用与失败语义
 
 每个 provider 同一时间只处理一个 request。并发请求会得到 provider-busy，而不是无限

@@ -346,7 +346,19 @@ host-native 文件传输，不需要把完整二进制经由模型文本搬运�
   process-local 的 presentation state；现有 project artifact 的大小、MIME、路径与
   authorization 边界继续生效。
 
-`read_project_artifact` 仍然只是有界 chunk inspection API，不承担大文件下载。
+Host 文件导入默认拒绝，需要明确受信任且有效的 OAuth 客户端，或专用的托管用户
+API token，其精确记录 ID 必须列入 `WEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS`。
+API token 路径还会重新检查所属用户、到期、撤销和用户状态；名称、前缀、Bootstrap
+凭据或 Runner token 均不能自动获得信任。项目写权限及下载规则继续生效。
+保持 Tunnel ID 的显式启用步骤见[部署说明](DEPLOYMENT.zh-CN.md#本地隧道文件导入)。
+
+需要模型识别图片时，通过 MCP 调用 `read_project_artifact(as_image=true)`，即可
+将不超过 1 MiB 的完整 PNG、JPEG 或 WebP 作为原生 image ContentBlock 返回；此模式
+不能同时传入 `offset` 或 `length`。在 adaptive surface 上，先通过
+`tool_manifest(tool_name="read_project_artifact")` 发现这一 MCP 专用参数，再经
+`call_runtime_tool` 调用。Host 必须将 image ContentBlock 交给模型；仅返回下载用
+ResourceLink 并不代表模型已经获得视觉内容。普通 artifact read 继续用于有界分块检查，
+完整文件下载继续使用 `export_project_artifact`。
 DOCX/PPTX/XLSX 等 Office artifact 与 PDF 复用同一 artifact transport，因此在
 支持这些 host 能力的 ChatGPT 中，可以在 project 与 host 之间直接传递，而不需要
 模型手工搬运 Base64。

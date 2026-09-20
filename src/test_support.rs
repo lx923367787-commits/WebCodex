@@ -104,6 +104,7 @@ pub(crate) fn test_config(token: Option<&str>) -> Arc<crate::Config> {
         data_dir: PathBuf::from("./data"),
         token: token.map(str::to_string),
         max_text_size: 2 * 1024 * 1024,
+        trusted_mcp_file_api_token_ids: Vec::new(),
         oauth2: crate::OAuth2Config::default(),
     })
 }
@@ -116,6 +117,7 @@ pub(crate) fn test_config_oauth2(token: Option<&str>) -> Arc<crate::Config> {
         data_dir: PathBuf::from("./data"),
         token: token.map(str::to_string),
         max_text_size: 2 * 1024 * 1024,
+        trusted_mcp_file_api_token_ids: Vec::new(),
         oauth2: crate::OAuth2Config {
             enabled: true,
             access_token_ttl_secs: 3600,
