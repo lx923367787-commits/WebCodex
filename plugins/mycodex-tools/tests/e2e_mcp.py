@@ -223,6 +223,7 @@ class Harness:
     def __init__(self, args):
         self.args = args
         self.root = Path(tempfile.mkdtemp(prefix="mycodex-mcp-e2e-")).resolve()
+        self._owned_root = self.root
         self.temp_parent = Path(tempfile.gettempdir()).resolve()
         self.processes, self.logs, self.credentials = [], [], []
         self.job = WindowsProcessTree() if os.name == "nt" else None
@@ -609,6 +610,30 @@ class Harness:
         return {"busy_code": code, "timeout_code": timeout_code, "timeout_state": timeout_state,
                 "provider_dispatch_count": 1}
 
+    def wait_for_temporary_root_removal(self):
+        deadline = time.monotonic() + 5
+        last_error = None
+        while True:
+            if last_error is not None and time.monotonic() >= deadline:
+                raise last_error
+            require(self.root.is_absolute() and self.root == self._owned_root
+                    and self.root.parent == self.temp_parent
+                    and self.root.name.startswith("mycodex-mcp-e2e-")
+                    and self.temp_parent.resolve() == self.temp_parent
+                    and self.root.resolve() == self._owned_root,
+                    "Refused cleanup outside owned temporary root")
+            try:
+                shutil.rmtree(self.root)
+                return
+            except OSError as error:
+                if os.name != "nt" or getattr(error, "winerror", None) not in (32, 145):
+                    raise
+                last_error = error
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(0.05, remaining))
+
     def close(self):
         if self.job:
             self.job.close()
@@ -627,15 +652,14 @@ class Harness:
                 else:
                     process.kill()
                 process.wait(timeout=5)
+        self.report["temporary_processes_stopped"] = all(process.poll() is not None for process in self.processes)
         for log in self.logs:
             log.close()
-        require(self.root.parent == self.temp_parent and self.root.name.startswith("mycodex-mcp-e2e-")
-                and self.root.resolve() == self.root, "Refused cleanup outside owned temporary root")
         if any(not item["passed"] for item in self.report["scenarios"]):
             self.report["log_tails"] = self.sanitized({path.name: path.read_text(encoding="utf-8", errors="replace")[-4000:]
                                                         for path in self.root.glob("*.log")})
-        shutil.rmtree(self.root)
-        self.report["temporary_processes_stopped"] = all(process.poll() is not None for process in self.processes)
+        self.report["temporary_root_removed"] = False
+        self.wait_for_temporary_root_removal()
         self.report["temporary_root_removed"] = not self.root.exists()
 
 
