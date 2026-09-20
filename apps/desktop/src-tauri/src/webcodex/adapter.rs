@@ -82,6 +82,49 @@ impl WebCodexAdapter {
         })
     }
 
+    pub(crate) async fn local_file_bridge_token(
+        &self,
+        identity: &ProjectRuntimeIdentity,
+        env_file: &Path,
+        cancellation: &CancellationContext,
+    ) -> DesktopResult<crate::bundled_tools::BridgeToken> {
+        let credential = crate::bundled_tools::bootstrap_credential_file(env_file)?;
+        let mut args = vec![
+            "tokens".into(),
+            "create".into(),
+            "--server-url".into(),
+            identity.server_url.clone(),
+            "--token-file".into(),
+            credential.path().to_string_lossy().to_string(),
+            "--username".into(),
+            platform::current_username(),
+            "--name".into(),
+            "Desktop file bridge".into(),
+            "--no-system-proxy".into(),
+            "--json".into(),
+        ];
+        for scope in [
+            "runtime:read",
+            "project:read",
+            "project:write",
+            "job:run",
+            "plugin:inspect",
+            "plugin:invoke",
+        ] {
+            args.extend(["--scope".into(), scope.into()]);
+        }
+        run_json(&self.binaries()?.webcodex, &args, None, true, cancellation)
+            .await
+            .map_err(|error| {
+                DesktopError::new(
+                    "file_bridge_token_create_failed",
+                    "Desktop could not create its dedicated local file-bridge token",
+                    "Check the local managed account and Server connection, then retry.",
+                )
+                .with_details(serde_json::json!({"cause":error.code, "command":error.details}))
+            })
+    }
+
     pub async fn inspect_project(&self, path: &str) -> DesktopResult<ProjectSelection> {
         inspect_project_path(path).await
     }

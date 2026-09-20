@@ -550,6 +550,7 @@ pub struct DesktopCore {
     tunnel_config: TunnelConfig,
     snapshot: DesktopStateSnapshot,
     adapter: WebCodexAdapter,
+    bundled_tools: Option<crate::bundled_tools::BundledTools>,
     supervisor: SharedSupervisor,
     activity: ActivityLog,
     published: Arc<RwLock<DesktopStateSnapshot>>,
@@ -592,6 +593,7 @@ impl DesktopCore {
             tunnel_config,
             snapshot,
             adapter: WebCodexAdapter::new(Some(resource_dir.join("webcodex-runtime"))),
+            bundled_tools: crate::bundled_tools::BundledTools::discover(&resource_dir)?,
             supervisor,
             activity,
             published,
@@ -994,6 +996,14 @@ impl DesktopCore {
             ));
         }
 
+        // The packaged document provider is bound to the selected project. Use
+        // the existing owned-process transaction when its working root changes.
+        if self.bundled_tools.is_some() {
+            return self
+                .configure_local_setup(Some(project_path), cancellation)
+                .await;
+        }
+
         let project = self.adapter.inspect_project(project_path).await?;
         cancellation.check()?;
         let identity = identity_from_config(&self.config).ok_or_else(|| {
@@ -1242,7 +1252,60 @@ impl DesktopCore {
                 }
             };
 
-        let replacing_owned_runner = identity_replaced
+        if self.bundled_tools.is_some() && crate::bundled_tools::needs_file_bridge(&env_file)? {
+            if !process_is_active(self.process_snapshot(ProcessKind::LocalServer).await) {
+                return Err(DesktopError::new(
+                    "bundled_tools_external_server",
+                    "The file bridge requires restarting Desktop's own local Server",
+                    "Stop the external local Server, then restart the Desktop runtime.",
+                ));
+            }
+            let bridge = self
+                .adapter
+                .local_file_bridge_token(&identity, &env_file, cancellation)
+                .await?;
+            crate::bundled_tools::install_file_bridge(&env_file, &bridge)?;
+            drop(bridge);
+            // Trust is loaded at Server startup. Only Desktop-owned processes
+            // are stopped. OpenAI Tunnel credentials are neither read nor changed.
+            self.stop_process_until(
+                ProcessKind::RegularTunnel,
+                Deadline::after(READINESS_CLEANUP_SLACK),
+            )
+            .await;
+            self.stop_process_until(
+                ProcessKind::LocalRunner,
+                Deadline::after(READINESS_CLEANUP_SLACK),
+            )
+            .await;
+            self.stop_process_until(
+                ProcessKind::LocalServer,
+                Deadline::after(READINESS_CLEANUP_SLACK),
+            )
+            .await;
+            cancellation.check()?;
+            let deadline = Deadline::after(SERVER_READY_TIMEOUT);
+            let command = self.adapter.local_server_command(&env_file)?;
+            self.spawn_owned(ProcessKind::LocalServer, command, false, cancellation)
+                .await?;
+            self.wait_for_server(
+                &server_url,
+                Some(&env_file),
+                None,
+                cancellation,
+                deadline,
+                true,
+            )
+            .await?;
+        }
+        let runner_config_change = match &self.bundled_tools {
+            Some(tools) => {
+                tools.configure_runner(&identity.runner_config, Path::new(&project.path))?
+            }
+            None => None,
+        };
+        let runner_config_changed = runner_config_change.is_some();
+        let replacing_owned_runner = (identity_replaced || runner_config_changed)
             && process_is_active(self.process_snapshot(ProcessKind::LocalRunner).await);
         let runner_deadline = Deadline::after(RUNNER_READY_TIMEOUT);
         let activation: DesktopResult<bool> = async {
@@ -1262,7 +1325,7 @@ impl DesktopCore {
                 cancellation.check()?;
             }
 
-            let runner_ready = if identity_replaced {
+            let runner_ready = if identity_replaced || runner_config_changed {
                 // A fresh Desktop enrollment may reuse the same client_id while
                 // changing the Runner token or project registry. An older Runner
                 // with that client_id is not proof that this exact config is active.
@@ -1436,6 +1499,9 @@ impl DesktopCore {
             );
             self.publish_snapshot();
             return Err(error);
+        }
+        if let Some(change) = runner_config_change {
+            change.commit();
         }
         self.snapshot.project = Some(committed_project);
         self.snapshot.readiness = aggregate_readiness(
@@ -3146,6 +3212,117 @@ fn same_project(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires WEBCODEX_DESKTOP_BUNDLE_RESOURCES pointing to a complete installer payload"]
+    async fn native_bundled_tools_first_run_and_project_switch() {
+        let resources = PathBuf::from(
+            std::env::var("WEBCODEX_DESKTOP_BUNDLE_RESOURCES").expect("installer resource path"),
+        );
+        let data_dir = unique_state_dir("bundled-tools-live");
+        let project = data_dir.join("project-one");
+        let second_project = data_dir.join("project-two");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&second_project).unwrap();
+        let mut core = DesktopCore::new(data_dir.clone(), resources).unwrap();
+        assert!(core.bundled_tools.is_some());
+        let cancellation = CancellationContext::never();
+        let mut phase = "first local setup";
+        let outcome: DesktopResult<()> = async {
+            let first = core
+                .configure_local_setup(Some(&project.to_string_lossy()), &cancellation)
+                .await?;
+            assert!(first.readiness.runtime_ready);
+            let identity = identity_from_config(&core.config).unwrap();
+            let runner = stored_runner_client_id(&core.config).unwrap();
+            let env_file = core
+                .config
+                .runtime
+                .as_ref()
+                .unwrap()
+                .server_env_file
+                .as_ref()
+                .unwrap()
+                .clone();
+            let initial_env = std::fs::read(&env_file).unwrap();
+            phase = "first real MCP probe";
+            let result = crate::bundled_tools::probe_live_bundle(
+                core.bundled_tools.as_ref().unwrap(),
+                &identity,
+                &runner,
+                &env_file,
+                &cancellation,
+            )
+            .await?;
+            assert_eq!(result["tools"].as_array().unwrap().len(), 11);
+            phase = "switch selected project";
+            let switched = core
+                .activate_local_project(&second_project.to_string_lossy(), &cancellation)
+                .await?;
+            assert!(switched.readiness.runtime_ready);
+            let switched_identity = identity_from_config(&core.config).unwrap();
+            assert_eq!(identity.runner_config, switched_identity.runner_config);
+            let config = std::fs::read_to_string(&identity.runner_config)
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap();
+            let provider = config["plugins"]["providers"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"].as_str() == Some("mycodex-tools"))
+                .unwrap();
+            assert!(same_project(
+                provider["cwd"].as_str().unwrap(),
+                &second_project.to_string_lossy()
+            ));
+            assert!(
+                std::fs::read(&env_file).unwrap() == initial_env,
+                "project switch must not rotate the bridge token"
+            );
+            phase = "second real MCP probe";
+            crate::bundled_tools::probe_live_bundle(
+                core.bundled_tools.as_ref().unwrap(),
+                &switched_identity,
+                &runner,
+                &env_file,
+                &cancellation,
+            )
+            .await?;
+            phase = "failed project switch restores provider root";
+            let third_project = data_dir.join("project-three");
+            let blocked_state_path = data_dir.join("deliberately-a-directory");
+            std::fs::create_dir_all(&third_project).unwrap();
+            std::fs::create_dir_all(&blocked_state_path).unwrap();
+            let saved_config_path = core.config_path.clone();
+            core.config_path = blocked_state_path;
+            let failure = core.activate_local_project(&third_project.to_string_lossy(), &cancellation).await;
+            core.config_path = saved_config_path;
+            assert!(failure.is_err(), "injected state publication failure must be observed");
+            assert_eq!(core.snapshot.readiness.runner, RunnerReadiness::Stopped);
+            let recovered = std::fs::read_to_string(&identity.runner_config).unwrap().parse::<toml_edit::DocumentMut>().unwrap();
+            let recovered_provider = recovered["plugins"]["providers"].as_array_of_tables().unwrap().iter().find(|p| p["id"].as_str() == Some("mycodex-tools")).unwrap();
+            assert!(same_project(recovered_provider["cwd"].as_str().unwrap(), &second_project.to_string_lossy()));
+            phase = "stop and resume";
+            core.stop_local_runtime(&cancellation).await?;
+            core.configure_local_setup(Some(&second_project.to_string_lossy()), &cancellation)
+                .await?;
+            assert!(
+                std::fs::read(&env_file).unwrap() == initial_env,
+                "resume must reuse the exact trust policy"
+            );
+            Ok(())
+        }
+        .await;
+        core.supervisor.lock().await.stop_all().await;
+        // Only this unique fixture is removed; production data/config is never used.
+        if outcome.is_ok() {
+            let _ = std::fs::remove_dir_all(&data_dir);
+        } else {
+            eprintln!("failed fixture retained at {} (phase: {phase})", data_dir.display());
+        }
+        outcome.expect("native bundled-tools automatic setup and real MCP acceptance");
+    }
 
     #[test]
     fn default_management_project_uses_safe_platform_location() {

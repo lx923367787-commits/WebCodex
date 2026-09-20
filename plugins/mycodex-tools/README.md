@@ -6,6 +6,12 @@ Eleven headless Office/PDF tools for the existing WebCodex Runner. This optional
 plugin uses the [native plugin gateway](../../docs/PLUGINS.md); it does not add an
 Agent framework, another MCP server, or tools to outer MCP `tools/list`.
 
+The optional **WebCodex Desktop tools-enhanced Windows installer** includes its
+own Python, pinned dependencies, and an openly licensed Chinese font. Selecting a
+local project in Desktop enables the bundled tools. Users enter their Tunnel ID
+and API Key themselves in Desktop. The manual installation instructions below
+apply to source deployments and existing Runners, not that installer.
+
 ## Architecture and existing capabilities
 
 The model calls WebCodex over MCP, then `plugin_tool` routes to a Python process

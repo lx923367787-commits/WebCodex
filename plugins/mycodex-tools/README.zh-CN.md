@@ -5,6 +5,10 @@
 为现有 WebCodex 增加 11 个无界面的 Word、Excel、PowerPoint、PDF 工具。
 文件、PowerShell、Python、Job 和图片回传继续使用原生接口；不增加 Agent 框架或第二个 MCP 服务。
 
+使用 **WebCodex Desktop 工具增强版安装器** 时，独立 Python、固定依赖和开源中文字体已随包提供。
+用户在桌面端选择工作项目后自动启用这些工具；Tunnel ID 和 API Key 由用户自己在桌面端填写。
+无需运行本目录的安装脚本。下面的安装步骤仅用于源码部署或手动接入已有 Runner。
+
 ## 安装与启用
 
 在本目录运行 `./install.ps1`，使用 Python 3.11 创建独立环境并按

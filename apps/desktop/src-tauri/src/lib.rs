@@ -1,4 +1,5 @@
 mod activity;
+mod bundled_tools;
 mod commands;
 mod deadline;
 mod desktop_shell;
