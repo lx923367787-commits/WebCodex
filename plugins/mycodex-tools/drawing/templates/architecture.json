@@ -1,0 +1,30 @@
+{
+  "kind": "architecture",
+  "title": "本地轻办公绘图架构",
+  "direction": "LR",
+  "groups": [
+    {"id": "chat", "label": "任务入口"},
+    {"id": "runtime", "label": "本机处理"},
+    {"id": "storage", "label": "已登记项目目录"}
+  ],
+  "nodes": [
+    {"id": "user", "label": "GPT Chat", "group": "chat"},
+    {"id": "mcp", "label": "WebCodex MCP", "group": "runtime"},
+    {"id": "drawing", "label": "Python 绘图入口", "group": "runtime"},
+    {"id": "graphviz", "label": "Graphviz\n流程图与架构图", "group": "runtime"},
+    {"id": "charts", "label": "Matplotlib\n数据图表", "group": "runtime"},
+    {"id": "input", "label": "规范与原始数据", "shape": "database", "group": "storage"},
+    {"id": "output", "label": "新版本图形与清单", "shape": "database", "group": "storage"}
+  ],
+  "edges": [
+    {"from": "user", "to": "mcp", "label": "绘图要求"},
+    {"from": "mcp", "to": "drawing", "label": "run_process"},
+    {"from": "input", "to": "drawing", "label": "只读输入"},
+    {"from": "drawing", "to": "graphviz", "label": "节点与连线"},
+    {"from": "drawing", "to": "charts", "label": "选定数据"},
+    {"from": "graphviz", "to": "output"},
+    {"from": "charts", "to": "output"},
+    {"from": "output", "to": "mcp", "label": "原生图片与文件"},
+    {"from": "mcp", "to": "user", "label": "查看结果"}
+  ]
+}

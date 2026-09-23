@@ -907,6 +907,7 @@ impl ToolRuntime {
                 },
                 "tool_runtime".to_string(),
                 ShellJobStartMetadata {
+                    document: None,
                     project_id: Some(project.to_string()),
                     session_id: session_id.clone(),
                     ssh_resource: ssh_resource.map(str::to_string),

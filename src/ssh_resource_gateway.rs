@@ -156,18 +156,6 @@ impl SshResourceOperation {
     }
 }
 
-pub(crate) fn operation_policy(
-    arguments: &Value,
-) -> Result<SpecializedOperationPolicy, &'static str> {
-    let action = arguments
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or("ssh_resource action is required")?;
-    SshResourceOperation::parse(action)
-        .map(SshResourceOperation::policy)
-        .ok_or("ssh_resource action must be one of list, register, or remove")
-}
-
 #[derive(Debug, Clone)]
 struct ResolvedRunner {
     client_id: String,
@@ -326,15 +314,10 @@ pub(crate) fn audit_arguments(arguments: &Value) -> Value {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SshResourceInvocationResult {
-    operation: SshResourceOperation,
     result: Result<Value, GatewayError>,
 }
 
 impl SshResourceInvocationResult {
-    pub(crate) fn policy(&self) -> SpecializedOperationPolicy {
-        self.operation.policy()
-    }
-
     pub(crate) fn success(&self) -> bool {
         self.result.is_ok()
     }
@@ -349,13 +332,6 @@ impl SshResourceInvocationResult {
 
     pub(crate) fn failure_kind(&self) -> Option<&str> {
         self.result.as_ref().err().map(|error| error.code)
-    }
-
-    pub(crate) fn to_mcp_result(&self) -> Value {
-        match &self.result {
-            Ok(value) => success_result(value.clone()),
-            Err(error) => error_result(error.clone()),
-        }
     }
 
     pub(crate) fn to_tool_result(&self) -> ToolResult {
@@ -406,7 +382,7 @@ pub(crate) async fn invoke(
         )
         .await?;
     let result = execute_business(runtime, operation, request, auth).await;
-    let invocation = SshResourceInvocationResult { operation, result };
+    let invocation = SshResourceInvocationResult { result };
     runtime.finish_specialized_invocation(
         permit,
         invocation.success(),
@@ -426,38 +402,6 @@ async fn execute_business(
         SshResourceOperation::List => list(runtime, request, auth).await,
         SshResourceOperation::Register => register(runtime, request, auth).await,
         SshResourceOperation::Remove => remove(runtime, request, auth).await,
-    }
-}
-
-pub(crate) async fn call(
-    runtime: &ToolRuntime,
-    arguments: Value,
-    auth: Option<&AuthContext>,
-) -> Value {
-    let parsed: SshResourceToolCall = match serde_json::from_value(arguments) {
-        Ok(parsed) => parsed,
-        Err(_) => {
-            return error_result(GatewayError::new(
-                "ssh_resource_invalid",
-                "ssh_resource arguments are invalid",
-            ))
-        }
-    };
-    let Some(operation) = SshResourceOperation::parse(&parsed.action) else {
-        return error_result(GatewayError::new(
-            "ssh_resource_invalid",
-            "action must be one of list, register, or remove",
-        ));
-    };
-    if !authorized(auth) {
-        return error_result(GatewayError::new(
-            "insufficient_scope",
-            "Runner-local SSH resource access requires the ssh:local scope",
-        ));
-    }
-    match execute_business(runtime, operation, parsed, auth).await {
-        Ok(value) => success_result(value),
-        Err(error) => error_result(error),
     }
 }
 
@@ -888,31 +832,6 @@ fn binding_required_error() -> GatewayError {
         "a current opaque binding from ssh_resource action=list is required",
     )
     .recovery("List SSH resources on the intended exact Runner, then retry with its binding.")
-}
-
-fn success_result(value: Value) -> Value {
-    let text = serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string());
-    json!({
-        "content": [{"type": "text", "text": text}],
-        "structuredContent": value,
-        "isError": false
-    })
-}
-
-fn error_result(error: GatewayError) -> Value {
-    let mut structured = json!({
-        "error": {"code": error.code, "message": error.message},
-        "dispatchState": error.dispatch_state,
-    });
-    if let Some(recovery) = error.recovery {
-        structured["recovery"] = Value::String(recovery.to_string());
-    }
-    let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{}".to_string());
-    json!({
-        "content": [{"type": "text", "text": text}],
-        "structuredContent": structured,
-        "isError": true
-    })
 }
 
 #[cfg(test)]

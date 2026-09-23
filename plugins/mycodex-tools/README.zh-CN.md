@@ -2,10 +2,30 @@
 
 [English](README.md)
 
-为现有 WebCodex 增加 11 个无界面的 Word、Excel、PowerPoint、PDF 工具。
-文件、PowerShell、Python、Job 和图片回传继续使用原生接口；不增加 Agent 框架或第二个 MCP 服务。
+新版通过现有 WebCodex MCP 提供四个日常办公入口，复用 Runner Job、项目权限和原生图片回传，不增加第二个 MCP 服务。详细流程见 [办公工作流](../../docs/OFFICE_WORKFLOW.zh-CN.md)；便携包内也附有 `docs/OFFICE_WORKFLOW.zh-CN.md`。
 
-使用 **WebCodex Desktop 工具增强版安装器** 时，独立 Python、固定依赖和开源中文字体已随包提供。
+| 入口 | 用途 |
+| --- | --- |
+| `present_document` | 读取正文、表格及每次最多两页真实图像；短分页及来源 SHA 绑定的续读 |
+| `document_edit` | 按结构化操作修改；默认原文件写回，先验证并自动备份，也可显式另存副本 |
+| `document_convert` | 转换到新文件，保留原件；扫描 PDF/图片可 OCR 到可搜索 PDF 或可编辑文字 DOCX |
+| `document_restore` | 列出备份，或校验当前 SHA 后恢复；恢复也生成修改前备份 |
+
+Windows 办公读改优先使用本机 Office 2021 对象接口，禁止 GUI 点击；不会接管用户正在使用的 Office 实例。后台处理进入现有 Job 后，继续观察相同 Job，不能重新提交修改。原位修改须提供读取时的 `expected_sha256`；文件被占用或版本过期会拒绝写入。遇到未知结果先查文件与回执，不自动重放。
+
+PDF/PNG/JPEG/WEBP 支持 PDFium 渲染和本地 Tesseract 简体中文、英文 OCR。PDF 局部换字限可唯一定位的完整顶层文字对象，保留其位置；缺字可使用随包中文字体，但遇到溢出、跨对象、旋转、透明、裁切或带替代文字的对象会拒绝，并建议转可编辑文档。中文表单填写限未旋转的单行文字字段。PDF 转 DOCX 统一使用文字提取或 OCR 重排，不调用 Word 的 PDF 导入，也不承诺恢复复杂表格和版式。
+
+单文件 64 MiB，Office ZIP 实际解压总量 256 MiB；原生每张图像最多 1 MiB，超限可裁切或缩小页范围。Tesseract、依赖和中文字体可随便携候选包携带，Office 本体不打包。候选包生成不会安装、改配置或重启现有服务。
+
+## 构建便携候选包
+
+`build_local_bundle.py --help` 提供可重复构建命令。先用 `--runtime-only` 和 `--python-base`、`--font-dir`、`--tesseract-base` 准备独立运行时；源码确认后以 `--prepared-runtime` 输出到一个全新目录。脚本拒绝覆盖目标和链接路径，按 `requirements.lock` 安装精确依赖，并验证 pywin32、PDFium、Tesseract 及语言数据。`MANIFEST.json` 记录源码 HEAD/dirty、依赖版本及每个文件的 SHA-256（不包含清单自身）。
+
+配置 `runner.example.toml` 中的 `document_worker`、`document_worker_args` 及准确项目根后，四入口才可用；下面保留旧 11 个插件工具的兼容说明。
+
+## 旧 11 工具兼容接口
+
+旧 **WebCodex Desktop 工具增强版安装器** 已随包提供旧接口的独立 Python、固定依赖和开源中文字体；这不表示现有安装已经升级为上面的四入口。
 用户在桌面端选择工作项目后自动启用这些工具；Tunnel ID 和 API Key 由用户自己在桌面端填写。
 无需运行本目录的安装脚本。下面的安装步骤仅用于源码部署或手动接入已有 Runner。
 
@@ -67,20 +87,20 @@ Python 长任务继续观察同一个 Job，不重新执行命令。
 
 ## 明确限制
 
-- 单文件 32 MiB、Office ZIP 解压总量 128 MiB、调用预算 60 秒；结果还受现有 JSON 限制。
+- 单文件 64 MiB、Office ZIP 解压总量 256 MiB；旧插件 RPC 调用预算 60 秒，结果还受现有 JSON 限制。
 - 路径拒绝越界、绝对路径、符号链接/junction、凭据与 Git 控制路径。
   这是防误操作检查；受信任本地插件不提供操作系统沙箱。
 - 目标已存在、源哈希过期、文件损坏、缺少字体、排版溢出均明确失败。
   对 `OutcomeUnknown` 必须先回读核验，不自动重放写入；`busy` 不表示已排队。
 - Word 替换内容可能改变该处行内格式；Excel 的复杂对象、外部链接不保证无损。
   公式保存为公式文本，不重新计算、不冒充最新计算值。
-- PDF 不做 OCR，不恢复语义表格；扫描页报告无可提取文字。中文生成必须指定覆盖中文的本机 TTF 字体，
+- 旧 `pdf_read/search/create` 不做 OCR，不恢复语义表格；扫描页报告无可提取文字。中文生成必须指定覆盖中文的本机 TTF 字体，
   缺失即报错，安装包不分发系统字体。
 - PPT 采用基础可编辑布局，标题 32 pt、正文 24 pt，不复制动画、SmartArt 或复杂母版。
 - UTF-8 是默认文本编码；旧编码通过 Python 显式指定，不自动猜测或覆盖转换。
 
 依赖选用 python-docx、openpyxl、python-pptx、pypdf、ReportLab、Pillow 和 defusedxml。
-只做薄适配，不复制第三方解析器。无需 Office、COM、LibreOffice、OCR、OpenCV 或付费 API。
+旧 11 工具只做薄适配，不复制第三方解析器；这些旧接口无需 Office/COM 或 OCR。新版四入口另用本机 Office、pywin32、PDFium 和 Tesseract，不需要付费模型 API。
 
 ## 测试与回退
 
@@ -89,4 +109,10 @@ Python 长任务继续观察同一个 Job，不重新执行命令。
 使用合成测试凭据，不触碰现有服务。实际结果见 [测试报告](TEST_REPORT.md)。
 
 需要停用时，从指定 Runner 配置移除该 provider 后热加载；已生成文件保留。
-后续 OCR、丰富模板、渲染和更多项目接入分别评估，不扩大首期接口。
+新版 OCR、渲染和原位修改走四个文档入口，旧接口继续保持兼容。
+
+## 流程图、架构图与 Excel 数据图表
+
+独立的 `draw.py` 通过现有 `run_process` 生成流程图、分组架构图，以及 XLSX/CSV 的柱状、折线、饼图和散点图。输出 PNG/SVG/PDF、可修改的 JSON 定义、数据快照和 ZIP；使用现有 `read_project_artifact(as_image=true)` 回传实际预览。
+
+参见 [绘图工作流与调用示例](../../docs/DRAWING_WORKFLOW.zh-CN.md)。绘图依赖安装到独立的 `drawing/vendor`，不替换 Office 依赖，不增加 MCP 工具。`build_drawing_addon.py --help` 提供增量构建入口；目标必须是新目录。保留原工作簿，修改图定义后另存新版本。

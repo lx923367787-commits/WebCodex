@@ -277,15 +277,10 @@ fn audit_arguments_with_resolved_binding(mut audit: Value, binding: &PluginBindi
 
 #[derive(Debug, Clone)]
 pub(crate) struct PluginInvocationResult {
-    operation: PluginOperation,
     result: Result<GatewaySuccess, GatewayError>,
 }
 
 impl PluginInvocationResult {
-    pub(crate) fn policy(&self) -> SpecializedOperationPolicy {
-        self.operation.policy()
-    }
-
     pub(crate) fn success(&self) -> bool {
         match &self.result {
             Ok(GatewaySuccess::Metadata(_)) => true,
@@ -311,10 +306,6 @@ impl PluginInvocationResult {
             Err(error) => Some(error.code.as_str()),
             _ => None,
         }
-    }
-
-    pub(crate) fn to_mcp_result(&self) -> Value {
-        render_gateway_result(self.result.clone())
     }
 
     pub(crate) fn to_tool_result(&self) -> ToolResult {
@@ -370,7 +361,7 @@ pub(crate) async fn invoke(
         .await?;
 
     let result = execute_business(runtime, operation, request, auth).await;
-    let invocation = PluginInvocationResult { operation, result };
+    let invocation = PluginInvocationResult { result };
     runtime.finish_specialized_invocation(
         permit,
         invocation.success(),
@@ -1035,21 +1026,6 @@ fn describe_required_error() -> GatewayError {
     )
 }
 
-fn render_gateway_result(result: Result<GatewaySuccess, GatewayError>) -> Value {
-    match result {
-        Ok(GatewaySuccess::Metadata(value)) => gateway_success_result(value),
-        Ok(GatewaySuccess::ToolResult(result)) => {
-            serde_json::to_value(result).unwrap_or_else(|_| {
-                gateway_error_result(GatewayError::local(
-                    "invalid_plugin_result",
-                    "Plugin result could not be encoded",
-                ))
-            })
-        }
-        Err(error) => gateway_error_result(error),
-    }
-}
-
 fn gateway_error_tool_result(error: &GatewayError) -> ToolResult {
     let state = error
         .dispatch_state
@@ -1066,34 +1042,6 @@ fn gateway_error_tool_result(error: &GatewayError) -> ToolResult {
         output["recovery"] = Value::String(recovery.to_string());
     }
     ToolResult::err_with_output(error.message.clone(), output)
-}
-
-fn gateway_success_result(value: Value) -> Value {
-    let text = serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string());
-    json!({
-        "content": [{"type": "text", "text": text}],
-        "structuredContent": value,
-        "isError": false
-    })
-}
-
-fn gateway_error_result(error: GatewayError) -> Value {
-    let dispatch_state = error.dispatch_state.map(dispatch_state_name);
-    let mut structured = json!({
-        "error": {"code": error.code, "message": error.message}
-    });
-    if let Some(state) = dispatch_state {
-        structured["dispatchState"] = Value::String(state.to_string());
-    }
-    if let Some(recovery) = error.recovery {
-        structured["recovery"] = Value::String(recovery.to_string());
-    }
-    let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{}".to_string());
-    json!({
-        "content": [{"type": "text", "text": text}],
-        "structuredContent": structured,
-        "isError": true
-    })
 }
 
 fn dispatch_state_name(state: PluginDispatchState) -> &'static str {

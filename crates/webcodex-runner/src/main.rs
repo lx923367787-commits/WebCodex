@@ -598,6 +598,7 @@ fn test_job_snapshot(job_id: &str) -> ShellJobSnapshot {
         error: None,
         command_execution_state: None,
         context: runner_protocol::ShellJobContext {
+            document: None,
             runtime_project_id: None,
             workflow_session_id: None,
             ssh_resource: None,
@@ -620,6 +621,7 @@ fn test_job_snapshot(job_id: &str) -> ShellJobSnapshot {
 #[cfg(test)]
 fn test_job_context(cwd: &Path, validation_steps: Vec<String>) -> runner_protocol::ShellJobContext {
     runner_protocol::ShellJobContext {
+        document: None,
         runtime_project_id: None,
         workflow_session_id: None,
         ssh_resource: None,

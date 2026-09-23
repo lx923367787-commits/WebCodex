@@ -8,6 +8,8 @@ pub mod audit_preview;
 pub mod authority;
 pub mod build_info;
 pub mod coding_agent;
+pub mod goal;
+pub mod host_goal;
 pub mod job_observation;
 pub mod lsp_bridge;
 pub mod mcp_gateway;

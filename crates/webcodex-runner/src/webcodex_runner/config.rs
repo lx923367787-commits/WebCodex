@@ -226,6 +226,11 @@ pub(crate) struct PluginProviderConfig {
     pub(crate) profile: Option<String>,
     #[serde(default)]
     pub(crate) timeout_secs: Option<u64>,
+    /// Operator-selected office worker; never supplied by a model tool call.
+    #[serde(default)]
+    pub(crate) document_worker: Option<String>,
+    #[serde(default)]
+    pub(crate) document_worker_args: Vec<String>,
 }
 
 fn default_plugin_request_timeout_secs() -> u64 {
@@ -1840,6 +1845,28 @@ fn validate_plugin_config(config: &PluginConfig, shell: &ShellConfig) -> Result<
                 ));
             }
         }
+        if provider.document_worker.as_ref().is_some_and(|worker| {
+            worker.is_empty()
+                || worker.len() > 4096
+                || worker.contains('\0')
+                || !Path::new(worker).is_absolute()
+        }) || (provider.document_worker.is_some() && provider.cwd.is_none())
+            || provider.document_worker_args.len() > 48
+            || provider.document_worker_args.iter().any(|arg| {
+                arg.len() > 4096
+                    || arg.contains('\0')
+                    || matches!(arg.as_str(), "--request" | "--result")
+            })
+            || provider
+                .document_worker_args
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+                > 16 * 1024
+            || (provider.document_worker.is_none() && !provider.document_worker_args.is_empty())
+        {
+            return Err(format!("plugins provider '{}' document_worker requires absolute worker/cwd paths and bounded operator arguments without --request/--result", provider.id));
+        }
         let timeout = provider.timeout_secs.unwrap_or(config.request_timeout_secs);
         if !(1..=120).contains(&timeout) {
             return Err(format!(
@@ -1857,6 +1884,8 @@ mod plugin_config_tests {
 
     fn provider() -> PluginProviderConfig {
         PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "provider".to_string(),
             name: "Provider".to_string(),
             command: "node".to_string(),

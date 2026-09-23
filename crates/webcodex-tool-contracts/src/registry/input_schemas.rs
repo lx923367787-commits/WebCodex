@@ -4,10 +4,13 @@ mod checkpoints;
 mod cleanup;
 mod coding;
 mod coding_agents;
+pub(crate) mod goals;
+pub(crate) mod host_goals;
 mod common;
 mod communication;
 mod computer;
 mod discovery;
+mod documents;
 mod files;
 mod git;
 mod hygiene;
@@ -53,6 +56,16 @@ pub use coding_agents::{
     coding_agent_cancel_input_schema, coding_agent_observe_input_schema,
     coding_agent_start_input_schema,
 };
+pub use goals::{
+    goal_cancel_input_schema, goal_list_input_schema, goal_read_input_schema,
+    goal_resume_input_schema, goal_start_input_schema,
+};
+pub use host_goals::{
+    goal_bootstrap_input_schema, goal_check_node_input_schema, goal_checkpoint_input_schema,
+    goal_claim_node_input_schema, goal_confirm_plan_input_schema, goal_mode_start_input_schema,
+    goal_plan_save_input_schema, goal_context_input_schema, context_epoch_input_schema,
+    TOOL_CALL_GOAL_CONTEXT_FIELD, TOOL_CALL_CONTEXT_EPOCH_FIELD,
+};
 pub use communication::{
     attach_agent_endpoint_input_schema, bootstrap_agent_conversation_input_schema,
     consume_agent_deliveries_input_schema, consume_agent_wake_input_schema,
@@ -81,6 +94,10 @@ pub use discovery::{
     empty_input_schema, list_projects_input_schema, list_runners_input_schema,
     list_tools_input_schema, read_tool_trace_input_schema, runtime_status_input_schema,
     tool_manifest_input_schema,
+};
+pub use documents::{
+    document_convert_input_schema, document_edit_input_schema, document_restore_input_schema,
+    present_document_input_schema,
 };
 pub use files::{
     list_project_files_input_schema, list_project_tracked_files_input_schema,

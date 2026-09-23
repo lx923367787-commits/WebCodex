@@ -1499,6 +1499,7 @@ mod phase_e2_status_tests {
     fn runner_concurrency_counts_jobs_across_projects_for_one_client() {
         fn job(job_id: &str, client_id: &str, project_id: &str, status: &str) -> ShellJobInfo {
             ShellJobInfo {
+                document: None,
                 job_id: job_id.to_string(),
                 request_id: None,
                 client_id: client_id.to_string(),

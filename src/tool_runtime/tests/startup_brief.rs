@@ -108,7 +108,7 @@ fn instruction_source<'a>(output: &'a Value, path: &str) -> &'a Value {
 fn assert_builtin_workflow(output: &Value) {
     let workflow = &output["workflow"];
     assert_eq!(workflow["contract"], "webcodex.coding_workflow");
-    assert_eq!(workflow["version"], 9);
+    assert_eq!(workflow["version"], 10);
     assert_eq!(workflow["authority"], "model_guidance_only");
     assert!(workflow["role_selection"]
         .as_str()
@@ -199,6 +199,38 @@ fn assert_builtin_workflow(output: &Value) {
         .expect("normal closeout guidance");
     assert!(closeout_guidance.contains("finish_coding_task(summary_only=true)"));
     assert!(closeout_guidance.contains("full closeout only"));
+    let goal_guidance = workflow["model_protocol"]["goal_mode"]
+        .as_str()
+        .expect("host goal planning and confirmation guidance");
+    for phrase in [
+        "开启目标模式",
+        "goal_mode_start",
+        "Before drafting the plan, read/search project inputs",
+        "present_document",
+        "without plan confirmation or goal_context",
+        "further read-only investigation remains allowed",
+        "goal_plan_save",
+        "plan.json",
+        "plan.md",
+        "awaiting_confirmation",
+        "goal_confirm_plan",
+        "exact version/hash",
+        "earlier broad authorization is insufficient",
+        "goal_claim_node",
+        "goal_context",
+        "goal_check_node",
+        "继续本地当前任务",
+        "goal_bootstrap",
+        "context_epoch",
+        "24k",
+        "32k",
+        "only after goal_checkpoint succeeds",
+    ] {
+        assert!(
+            goal_guidance.contains(phrase),
+            "goal mode guidance: {phrase}"
+        );
+    }
     for role in ["implementation_owner", "independent_review"] {
         let role = &workflow["roles"][role];
         assert!(role["purpose"]

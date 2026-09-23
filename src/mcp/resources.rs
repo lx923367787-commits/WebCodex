@@ -1504,6 +1504,136 @@ pub(super) enum McpResourceToolResultAdaptation {
     Unhandled(ToolResult),
 }
 
+/// Narrow office presentation adapter. Native image bytes never pass through
+/// the Plugin ABI or the generic runtime result/audit envelope.
+pub(super) async fn document_tool_result(
+    runtime: &ToolRuntime,
+    mut result: ToolResult,
+    auth: Option<&AuthContext>,
+    stateless_2026: bool,
+    model_surface: ModelSurface,
+) -> Value {
+    if !result.success || result.output.get("status").and_then(Value::as_str) != Some("completed") {
+        return mcp_runtime_tool_result_fallback(result);
+    }
+    let project = result
+        .output
+        .get("project")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let previews = result
+        .output
+        .get("previews")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut media = Vec::new();
+    let mut failures = Vec::new();
+    for preview in &previews {
+        let path = preview.get("path").and_then(Value::as_str).unwrap_or("");
+        let expected = preview.get("sha256").and_then(Value::as_str).unwrap_or("");
+        let mut read = runtime
+            .read_project_artifact(
+                project.clone(),
+                path.to_string(),
+                None,
+                None,
+                None,
+                Some(true),
+            )
+            .await;
+        if !read.success
+            || read.output.get("sha256").and_then(Value::as_str) != Some(expected)
+            || read
+                .output
+                .get("file_bytes")
+                .and_then(Value::as_u64)
+                .is_none_or(|size| size > 1024 * 1024)
+        {
+            failures.push(json!({"path":path,"code":"preview_unavailable_or_changed"}));
+            continue;
+        }
+        match mcp_native_image_tool_result("read_project_artifact", &mut read, None) {
+            Ok(image_result) => {
+                media.push(json!({"type":"text","text":format!("Document page {}",preview.get("page").unwrap_or(&Value::Null))}));
+                if let Some(items) = image_result.get("content").and_then(Value::as_array) {
+                    media.extend(
+                        items
+                            .iter()
+                            .filter(|item| {
+                                item.get("type").and_then(Value::as_str) == Some("image")
+                            })
+                            .cloned(),
+                    );
+                }
+            }
+            Err(_) => failures.push(json!({"path":path,"code":"invalid_preview_image"})),
+        }
+    }
+    if !previews.is_empty() {
+        let delivered = media
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("image"));
+        result.output["visual_delivery"] = json!(if !delivered {
+            "unavailable"
+        } else if failures.is_empty() {
+            "mcp_images"
+        } else {
+            "partial"
+        });
+    }
+    if !failures.is_empty() {
+        result.output["preview_errors"] = json!(failures);
+    }
+    if result.output.get("export_file").and_then(Value::as_bool) == Some(true) {
+        let source = result
+            .output
+            .get("source_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let binding = if stateless_2026 && model_surface.supports_operator_extensions() {
+            mcp_artifact_export_caller_binding(auth).ok()
+        } else {
+            None
+        };
+        if let Some(binding) = binding {
+            if let Ok(resolved) = runtime.resolve_project_input_for_auth(&project, auth).await {
+                let export = runtime
+                    .export_project_artifact_metadata_resolved(&resolved, source, auth)
+                    .await;
+                if export.success
+                    && export.output.get("sha256") == result.output.get("source_sha256")
+                {
+                    let link = mcp_artifact_export_tool_result(export, binding);
+                    if let Some(items) = link.get("content").and_then(Value::as_array) {
+                        media.extend(
+                            items
+                                .iter()
+                                .filter(|item| {
+                                    item.get("type").and_then(Value::as_str)
+                                        == Some("resource_link")
+                                })
+                                .cloned(),
+                        );
+                    }
+                    result.output["original_delivery"] = json!("resource_link");
+                } else {
+                    result.output["original_delivery"] = json!("source_changed_or_unavailable");
+                }
+            }
+        } else {
+            result.output["original_delivery"] = json!("unsupported_on_this_surface");
+        }
+    }
+    let mut framed = mcp_runtime_tool_result_fallback(result);
+    if let Some(content) = framed.get_mut("content").and_then(Value::as_array_mut) {
+        content.extend(media);
+    }
+    framed
+}
+
 pub(super) fn adapt_tool_result(
     tool_name: &str,
     as_image_requested: bool,

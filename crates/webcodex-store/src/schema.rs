@@ -641,6 +641,9 @@ impl Database {
         // domain. They reference durable Agents/Conversations for correlation only
         // and deliberately do not bind any execution backend in A3.
         Self::ensure_agent_task_schema(&mut conn)?;
+        Self::ensure_goal_schema(&mut conn)?;
+        Self::ensure_host_goal_schema(&mut conn)?;
+        Self::ensure_host_goal_context_schema(&conn)?;
 
         // Project Memory was introduced after v0.3.9. Only the current schema is
         // supported; development-only intermediate shapes are rejected.

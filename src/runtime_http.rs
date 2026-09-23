@@ -536,7 +536,21 @@ fn extract_tool_call(body: &Value) -> Result<(String, Value), String> {
         .get(TOOL_CALL_PARAMS_FIELD)
         .filter(|params| !params.is_null())
     {
-        params.clone()
+        let mut params = params.clone();
+        for field in [
+            webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD,
+            webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD,
+        ] {
+            if let Some(value) = obj.get(field) {
+                let params_object = params.as_object_mut().ok_or_else(|| {
+                    format!("field 'params' must be an object when {field} is supplied")
+                })?;
+                if params_object.insert(field.to_string(), value.clone()).is_some() {
+                    return Err(format!("{field} was supplied both outside and inside 'params'"));
+                }
+            }
+        }
+        params
     } else {
         let mut flattened = serde_json::Map::new();
         for (key, value) in obj {

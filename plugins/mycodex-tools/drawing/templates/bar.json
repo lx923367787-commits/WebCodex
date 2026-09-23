@@ -1,0 +1,34 @@
+{
+  "kind": "chart",
+  "chart_type": "bar",
+  "title": "月度收支对比",
+  "source": {
+    "path": "drawings/data.xlsx",
+    "sheet": "Sheet1",
+    "range": "A1:C7",
+    "header": true
+  },
+  "x": "月份",
+  "series": [
+    {
+      "column": "收入",
+      "label": "收入"
+    },
+    {
+      "column": "成本",
+      "label": "成本"
+    }
+  ],
+  "x_label": "月份",
+  "y_label": "金额",
+  "unit": "元",
+  "missing": "error",
+  "numeric_strings": "error",
+  "style": {
+    "width": 10,
+    "height": 6,
+    "dpi": 160,
+    "font_size": 12,
+    "show_values": false
+  }
+}

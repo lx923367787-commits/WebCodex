@@ -49,6 +49,7 @@ impl SessionShellRecord {
     /// ControlPath, credentials, or command text.
     fn job_context(&self) -> Option<ShellJobContext> {
         self.resource.as_ref().map(|resource| ShellJobContext {
+            document: None,
             runtime_project_id: Some(self.runtime_project_id.clone()),
             workflow_session_id: Some(self.workflow_session_id.clone()),
             ssh_resource: Some(resource.clone()),
@@ -427,6 +428,7 @@ impl ToolRuntime {
                 Err(error) => return shell_tool_error_from_message(error, None),
             };
             let job_context = ShellJobContext {
+                document: None,
                 runtime_project_id: Some(runtime_project_id.clone()),
                 workflow_session_id: Some(session_id.clone()),
                 ssh_resource: Some(resource.to_string()),

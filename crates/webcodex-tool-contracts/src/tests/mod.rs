@@ -58,11 +58,14 @@ fn required_fields(spec: &ToolSpec) -> Vec<String> {
 }
 
 mod artifact_schemas;
+mod document_schemas;
 mod catalog_discovery;
 mod computer_schemas;
 mod definitions;
 mod edit_schemas;
 mod flattened_args;
+mod goal_schemas;
+mod host_goal_schemas;
 mod input_schemas;
 mod metadata_policy;
 mod migration_contracts;

@@ -1062,6 +1062,7 @@ impl RunnerRegistry {
         let ssh_context = ssh_resource
             .zip(ssh_session_id)
             .map(|(resource, session_id)| ShellJobContext {
+                document: None,
                 runtime_project_id: None,
                 workflow_session_id: Some(session_id),
                 ssh_resource: Some(resource),

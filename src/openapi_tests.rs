@@ -9,6 +9,16 @@ fn runtime_accepted_flattened_action_fields() -> std::collections::BTreeSet<Stri
     fields
 }
 
+#[test]
+fn host_goal_openapi_wrapper_context_has_one_closed_canonical_schema() {
+    let spec=build_openapi_spec();
+    let request=&spec["components"]["schemas"]["ToolCallRequest"];
+    assert_eq!(request["properties"]["goal_context"],webcodex_tool_contracts::goal_context_input_schema());
+    assert_eq!(request["properties"]["context_epoch"],webcodex_tool_contracts::context_epoch_input_schema());
+    assert_eq!(request["additionalProperties"],false);
+    assert_eq!(request["required"],json!(["tool"]));
+}
+
 fn flattened_schema_alternatives(schema: &Value) -> Vec<&Value> {
     schema["anyOf"].as_array().map_or_else(
         || vec![schema],
@@ -1287,7 +1297,9 @@ fn openapi_call_runtime_tool_declares_flattened_action_fields() {
         );
     }
     for field in properties.keys() {
-        if TOOL_CALL_WRAPPER_FIELDS.contains(&field.as_str()) {
+        if TOOL_CALL_WRAPPER_FIELDS.contains(&field.as_str())
+            || field == webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD
+        {
             continue;
         }
         assert!(

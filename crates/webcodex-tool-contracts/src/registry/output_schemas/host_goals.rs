@@ -1,0 +1,227 @@
+use serde_json::{json, Value};
+
+use super::common::wrapped_output_schema;
+use crate::registry::input_schemas::host_goals::host_plan_schema;
+
+fn object(properties: Value) -> Value {
+    let required = properties
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
+}
+fn text(max: usize) -> Value {
+    json!({"type":"string","maxLength":max})
+}
+fn number() -> Value {
+    json!({"type":"integer","minimum":0})
+}
+fn nullable(value: Value) -> Value {
+    json!({"anyOf":[value,{"type":"null"}]})
+}
+fn list(items: Value, max: usize) -> Value {
+    json!({"type":"array","maxItems":max,"items":items})
+}
+fn sha256() -> Value {
+    json!({"type":"string","pattern":"^[A-Fa-f0-9]{64}$"})
+}
+fn phase() -> Value {
+    json!({"type":"string","enum":["planning","awaiting_confirmation","ready","executing","verifying","paused","blocked","completed","cancelled"]})
+}
+
+pub(super) fn goal_schema() -> Value {
+    let mut schema = object(json!({
+        "goal_id":text(96), "project":text(512),
+        "objective":text(512), "phase":phase(), "revision":number(),
+        "plan_version":number(), "acceptance_contract_version":number(),
+        "plan_hash":nullable(sha256()), "plan_materialized":{"type":"boolean"},
+        "confirmation":nullable(object(json!({
+            "plan_version":number(), "plan_hash":sha256(),
+            "confirmed_at":{"type":"integer"}
+        }))),
+        "current_node_id":nullable(text(64)), "current_attempt_id":nullable(text(128)),
+        "fence":number(), "completed_node_ids":list(text(64),64),
+        "created_at":{"type":"integer"}, "updated_at":{"type":"integer"}
+    }));
+    schema["properties"]["completed_node_count"] = number();
+    schema["properties"]["completed_node_ids_partial"] = json!({"type":"boolean"});
+    schema
+}
+
+pub(super) fn summary_schema() -> Value {
+    let mut schema = object(json!({
+        "driver":{"type":"string","enum":["host"]}, "goal_id":text(96),
+        "project":text(512), "objective":text(16*1024), "phase":phase(), "state":phase(),
+        "spec":object(json!({"project":text(512),"objective":text(16*1024),"provider_id":{"type":"null"}})),
+        "revision":number(), "plan_version":number(), "current_node_id":nullable(text(64)),
+        "created_at":{"type":"integer"}, "updated_at":{"type":"integer"}
+    }));
+    schema["properties"]["plan_materialized"] = json!({"type":"boolean"});
+    schema["properties"]["confirmation_required"] = json!({"type":"boolean"});
+    schema["properties"]["objective_truncated"] = json!({"type":"boolean"});
+    schema
+}
+
+fn serialized_plan_schema() -> Value {
+    // A serialized plan includes serde-defaulted command args/cwd; accept null cwd.
+    let mut plan = host_plan_schema();
+    for pointer in [
+        "/properties/final_criteria/items",
+        "/properties/nodes/items/properties/acceptance/items",
+    ] {
+        let criterion = plan.pointer_mut(pointer).unwrap();
+        let cwd = criterion["oneOf"][2]["properties"]["cwd"].clone();
+        criterion["oneOf"][2]["properties"]["cwd"] = nullable(cwd);
+    }
+    plan
+}
+
+fn requirements_schema() -> Value {
+    let mut properties = serialized_plan_schema()["properties"]
+        .as_object()
+        .unwrap()
+        .clone();
+    properties.remove("nodes");
+    object(Value::Object(properties))
+}
+
+fn node_schema() -> Value {
+    serialized_plan_schema()["properties"]["nodes"]["items"].clone()
+}
+
+fn binding_schema() -> Value {
+    object(json!({
+        "goal_id":text(96), "node_id":text(64), "attempt_id":text(128),
+        "plan_version":number(), "fence":number()
+    }))
+}
+
+pub(super) fn context_meter_schema() -> Value {
+    let mut schema = object(json!({
+        "context_epoch":nullable(text(128)), "observed_tokens":nullable(number()),
+        "warning_tokens":number(), "handoff_tokens":number(),
+        "level":{"type":"string","enum":["normal","warning","handoff_recommended","unavailable"]},
+        "newly_crossed":{"type":"boolean"}, "unmeasured_modalities":{"type":"boolean"},
+        "sample_count":number(), "measurement":{"type":"string","enum":["observed_estimate"]},
+        "algorithm":{"type":"string","enum":["o200k_base"]}, "coverage":{"type":"string","enum":["partial"]}
+    }));
+    schema["properties"]["notice"] = text(4096);
+    schema["properties"]["retry_accounting"] =
+        json!({"type":"string","enum":["per_server_invocation"]});
+    schema
+}
+
+fn mode_binding() -> Value {
+    json!({"type":"string","enum":["window_bound","explicit_context_only"],"description":"window_bound uses a reliable host conversation. explicit_context_only can bind calls carrying the same declared context_epoch but cannot identify calls which omit/change it; it never grants authority or authenticates a host chat."})
+}
+
+fn continuation_schema() -> Value {
+    object(json!({
+        "tool":{"type":"string","enum":["goal_read","goal_list","goal_bootstrap","goal_plan_save","goal_confirm_plan","goal_claim_node","goal_checkpoint","goal_check_node","observe_jobs","job_status","coding_agent_observe","coding_agent_cancel"]},
+        "arguments":{"type":"object","description":"Arguments for the named canonical tool; validate against that tool's input schema before calling."}
+    }))
+}
+
+pub(super) fn page_fields() -> Vec<(&'static str, Value)> {
+    vec![
+        ("driver", json!({"type":"string","enum":["host"]})),
+        (
+            "projection",
+            json!({"type":"string","enum":["summary","bootstrap","node_context","detail"]}),
+        ),
+        ("goal", goal_schema()),
+        (
+            "progress_summary",
+            object(json!({
+                "partial":{"type":"boolean","const":true},
+                "completed_summary":text(350),"next_step":text(350),"issues":list(text(160),3),
+                "counts":object(json!({"facts":number(),"decisions":number(),"issues":number(),"artifacts":number()}))
+            })),
+        ),
+        ("requirements", requirements_schema()),
+        ("node", node_schema()),
+        (
+            "context_read",
+            object(json!({
+                "goal_id":text(96),"revision":number(),"plan_version":number(),"node_id":text(64),
+                "complete":{"type":"boolean","const":true}
+            })),
+        ),
+        (
+            "section",
+            json!({"type":"string","enum":["goal","plan","state","checkpoints","attempts","operations"]}),
+        ),
+        ("encoding", json!({"type":"string","enum":["json_text"]})),
+        ("text", text(8192)),
+        ("next_cursor", nullable(text(2048))),
+        ("has_more", json!({"type":"boolean"})),
+        ("revision", number()),
+        ("plan_version", number()),
+        ("replayed", json!({"type":"boolean"})),
+        ("binding", binding_schema()),
+        ("context_meter", context_meter_schema()),
+        ("mode_binding", mode_binding()),
+        ("continuation", continuation_schema()),
+        (
+            "details",
+            json!({"type":"object","additionalProperties":false,"properties":{
+            "tool":{"type":"string","enum":["goal_read"]},"arguments":{"type":"object"},
+            "sections":{"type":"array","items":{"type":"string","enum":["goal","plan","state","checkpoints","attempts","operations"]},"maxItems":6}
+        },"required":["tool","arguments"]}),
+        ),
+        ("unresolved_operation_count", number()),
+        ("material_sha256", sha256()),
+        (
+            "plan_artifacts",
+            nullable(object(
+                json!({"json_path":text(4096),"markdown_path":text(4096)}),
+            )),
+        ),
+        ("confirmation_required", json!({"type":"boolean"})),
+        ("plan_artifacts_valid", nullable(json!({"type":"boolean"}))),
+        (
+            "delivery_freshness",
+            json!({"type":"string","enum":["not_completed","current","changed","unavailable"],"description":"On an explicit completed-goal read, compare current artifacts with saved acceptance fingerprints. Historical completion alone is not current delivery readiness."}),
+        ),
+        ("delivery_ready", json!({"type":"boolean"})),
+        ("goal_id", text(96)),
+        (
+            "run_id",
+            text(webcodex_core::coding_agent::CODING_AGENT_MAX_RUN_ID_BYTES),
+        ),
+        (
+            "state",
+            json!({"type":"string","enum":["starting","running","waiting_permission","completed","failed","cancelled","lost"]}),
+        ),
+        (
+            "execution_state",
+            json!({"type":"string","enum":["not_started","started","completed","outcome_unknown"]}),
+        ),
+        ("error_kind", text(128)),
+        (
+            "dispatch_certainty",
+            json!({"type":"string","enum":["not_started","completed","unknown","outcome_unknown"]}),
+        ),
+    ]
+}
+
+pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
+    if !matches!(
+        name,
+        "goal_mode_start"
+            | "goal_plan_save"
+            | "goal_confirm_plan"
+            | "goal_claim_node"
+            | "goal_checkpoint"
+            | "goal_check_node"
+            | "goal_bootstrap"
+    ) {
+        return None;
+    }
+    let mut schema = wrapped_output_schema(page_fields());
+    schema["properties"]["output"]["additionalProperties"] = json!(false);
+    schema["description"]=json!("Bounded Host Goal projection. Summary/bootstrap/detail receipts fit within 8 KiB; complete node context fits within 16 KiB. progress_summary is explicitly partial; only context_read.complete from a node projection acknowledges execution prerequisites. Reassemble detail text pages before interpreting the selected JSON section.");
+    Some(schema)
+}

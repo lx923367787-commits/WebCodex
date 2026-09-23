@@ -440,7 +440,8 @@ fn startup_workflow_schema() -> Value {
                     "context_sidecar": {"type": "string", "maxLength": 320},
                     "runner_targeting": {"type": "string", "maxLength": 320},
                     "persistent_shell": {"type": "string", "maxLength": 320},
-                    "normal_closeout": {"type": "string", "maxLength": 480}
+                    "normal_closeout": {"type": "string", "maxLength": 480},
+                    "goal_mode": {"type": "string", "maxLength": 1800}
                 },
                 "required": [
                     "session_context_ack",
@@ -450,7 +451,8 @@ fn startup_workflow_schema() -> Value {
                     "context_sidecar",
                     "runner_targeting",
                     "persistent_shell",
-                    "normal_closeout"
+                    "normal_closeout",
+                    "goal_mode"
                 ],
                 "additionalProperties": false
             },

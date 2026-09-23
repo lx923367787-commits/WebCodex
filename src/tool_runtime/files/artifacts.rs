@@ -145,7 +145,9 @@ fn validate_artifact_mime(mime_type: Option<&str>) -> Result<Option<String>, Str
     let Some(mime) = mime_type.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    if ooxml_extension_for_mime(mime).is_some() {
+    if ooxml_extension_for_mime(mime).is_some()
+        || webcodex_core::artifact_policy::legacy_office_extension_for_mime(mime).is_some()
+    {
         return Ok(Some(mime.to_string()));
     }
     match mime {
@@ -175,10 +177,17 @@ pub(crate) fn validate_artifact_mime_for_path(
         return Err(octet_stream_safe_extension_error());
     }
     if let Some(mime) = mime_type.as_deref() {
-        if let Some(required_extension) = ooxml_extension_for_mime(mime) {
+        if let Some(required_extension) = ooxml_extension_for_mime(mime)
+            .or_else(|| webcodex_core::artifact_policy::legacy_office_extension_for_mime(mime))
+        {
             if !path.to_ascii_lowercase().ends_with(required_extension) {
                 return Err(format!(
-                    "OOXML MIME type '{mime}' requires a matching {required_extension} artifact path"
+                    "{} MIME type '{mime}' requires a matching {required_extension} artifact path",
+                    if ooxml_extension_for_mime(mime).is_some() {
+                        "OOXML"
+                    } else {
+                        "Office"
+                    }
                 ));
             }
         }

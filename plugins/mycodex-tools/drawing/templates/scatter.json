@@ -1,0 +1,30 @@
+{
+  "kind": "chart",
+  "chart_type": "scatter",
+  "title": "收入与成本分布",
+  "source": {
+    "path": "drawings/data.xlsx",
+    "sheet": "Sheet1",
+    "range": "A1:C7",
+    "header": true
+  },
+  "x": "收入",
+  "series": [
+    {
+      "column": "成本",
+      "label": "成本"
+    }
+  ],
+  "x_label": "收入",
+  "y_label": "成本",
+  "missing": "error",
+  "numeric_strings": "error",
+  "style": {
+    "width": 10,
+    "height": 6,
+    "dpi": 160,
+    "font_size": 12,
+    "show_values": false
+  },
+  "unit": "元"
+}

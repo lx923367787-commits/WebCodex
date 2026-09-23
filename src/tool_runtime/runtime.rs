@@ -108,6 +108,7 @@ pub struct ToolRuntime {
     pub(crate) plugin_gateway: Arc<crate::plugin_gateway::PluginGatewayRuntime>,
     pub(crate) ssh_resource_gateway: Arc<crate::ssh_resource_gateway::SshResourceGatewayRuntime>,
     pub(crate) coding_agent_runs: Arc<super::coding_agent::CodingAgentServerState>,
+    pub(crate) goal_controller: Arc<super::goal::GoalController>,
     pub runtime_info: Arc<RuntimeInfo>,
     runtime_exposure: crate::model_surface::RuntimeExposure,
     pub(crate) checkpoint_store: checkpoint::CheckpointStore,
@@ -184,6 +185,7 @@ impl ToolRuntime {
                 crate::ssh_resource_gateway::SshResourceGatewayRuntime::default(),
             ),
             coding_agent_runs: Arc::new(super::coding_agent::CodingAgentServerState::default()),
+            goal_controller: Arc::new(super::goal::GoalController::default()),
             runtime_info,
             runtime_exposure: crate::model_surface::RuntimeExposure::Runtime(
                 crate::model_surface::ModelSurface::LocalCoding,

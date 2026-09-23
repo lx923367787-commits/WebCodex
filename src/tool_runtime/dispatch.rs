@@ -1431,6 +1431,18 @@ impl ToolRuntime {
             .recording_session_authorized
             .then(|| recorder_metadata.recording_session_project.as_deref())
             .flatten();
+        if let Err(result) = self
+            .host_goal_admit_effect(
+                tool_name,
+                activity_project.as_deref(),
+                &serde_json::to_value(&call).unwrap_or_default(),
+                auth,
+                super::host_goal::requires_confirmed_plan(&call),
+            )
+            .await
+        {
+            return result;
+        }
         let mut result = self
             .dispatch_authorized_inner(
                 call,
@@ -1528,6 +1540,15 @@ impl ToolRuntime {
         correlation: &mut super::window_activity::ToolCallCorrelation,
     ) -> ToolResult {
         match call {
+            call @ (ToolCall::GoalModeStart { .. }
+            | ToolCall::GoalPlanSave { .. }
+            | ToolCall::GoalConfirmPlan { .. }
+            | ToolCall::GoalBootstrap { .. }
+            | ToolCall::GoalClaimNode { .. }
+            | ToolCall::GoalCheckpoint { .. }
+            | ToolCall::GoalCheckNode { .. }) => {
+                Box::pin(self.dispatch_host_goal_tool(call, auth)).await
+            }
             call @ (ToolCall::ListTools { .. }
             | ToolCall::ListRunners { .. }
             | ToolCall::RuntimeStatus { .. }
@@ -1651,6 +1672,72 @@ impl ToolRuntime {
                     .await
             }
             ToolCall::CodingAgentCancel { run_id } => self.coding_agent_cancel(run_id, auth).await,
+
+            ToolCall::GoalStart {
+                project,
+                provider_id,
+                objective,
+                criteria,
+                artifact_paths,
+                reviewer_provider_id,
+                limits,
+                config,
+                idempotency_key,
+            } => {
+                Box::pin(self.goal_start(
+                    webcodex_core::goal::GoalSpec {
+                        project,
+                        provider_id,
+                        objective,
+                        criteria,
+                        artifact_paths,
+                        reviewer_provider_id,
+                        limits: limits.unwrap_or_default(),
+                        config: config.unwrap_or_default(),
+                    },
+                    idempotency_key,
+                    auth,
+                ))
+                .await
+            }
+            ToolCall::GoalRead {
+                goal_id,
+                round_offset,
+                round_limit,
+                history_after,
+                history_limit,
+                history_kind,
+                view,
+                node_id,
+                section,
+                cursor,
+            } => {
+                if goal_id.starts_with("hgoal_") {
+                    return Box::pin(self.host_goal_read(
+                        &goal_id,
+                        history_after,
+                        history_limit,
+                        history_kind.as_deref(),
+                        view.as_deref(),
+                        node_id.as_deref(),
+                        section.as_deref(),
+                        cursor.as_deref(),
+                        auth,
+                    ))
+                    .await;
+                }
+                Box::pin(self.goal_read(goal_id, round_offset, round_limit, auth)).await
+            }
+            ToolCall::GoalList { project, limit } => {
+                Box::pin(self.goal_list(project, limit, auth)).await
+            }
+            ToolCall::GoalCancel { goal_id } => Box::pin(self.goal_cancel(goal_id, auth)).await,
+            ToolCall::GoalResume { goal_id } => Box::pin(self.goal_resume(goal_id, auth)).await,
+
+            call @ (ToolCall::PresentDocument(_)
+            | ToolCall::DocumentEdit(_)
+            | ToolCall::DocumentConvert(_)
+            | ToolCall::DocumentRestore(_)) => self.dispatch_document_tool(call, auth).await,
 
             call @ (ToolCall::RunProcess { .. }
             | ToolCall::RunDetachedProcess { .. }

@@ -11,8 +11,8 @@ import stat
 import tempfile
 import zipfile
 
-MAX_FILE_BYTES = 32 * 1024 * 1024
-MAX_ZIP_BYTES = 128 * 1024 * 1024
+MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_ZIP_BYTES = 256 * 1024 * 1024
 MAX_FRAME_BYTES = 1024 * 1024
 MAX_ARGUMENT_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 128 * 1024
@@ -137,7 +137,7 @@ class Context:
         reserved |= {f"{prefix}{i}" for prefix in ("com", "lpt") for i in range(1, 10)}
         protected = {".git", ".ssh", ".aws", ".azure", ".gnupg", ".local",
                      "node_modules", "target", "credentials", "secrets", "tokens",
-                     "project-registry", "projects.d"}
+                     "project-registry", "projects.d", ".webcodex-office"}
         for part in parts:
             lower = part.casefold()
             if (part in ("", ".", "..") or part.endswith((" ", "."))
@@ -176,7 +176,7 @@ class Context:
         except FileNotFoundError:
             raise ToolError("file_not_found", "Input file does not exist.") from None
         if len(content) > MAX_FILE_BYTES:
-            raise ToolError("file_too_large", "Input exceeds 32 MiB.")
+            raise ToolError("file_too_large", "Input exceeds 64 MiB.")
         digest = hashlib.sha256(content).hexdigest()
         if expected_sha256 is not None and expected_sha256 != digest:
             raise ToolError("stale_source", "Source changed; read it again before updating.")
@@ -185,7 +185,7 @@ class Context:
 
     @staticmethod
     def validate_file_bytes(content, extension):
-        if extension in (".docx", ".xlsx", ".pptx"):
+        if extension in (".docx", ".xlsx", ".pptx", ".docm", ".xlsm", ".pptm"):
             try:
                 with zipfile.ZipFile(io.BytesIO(content)) as archive:
                     entries = archive.infolist()
@@ -195,6 +195,15 @@ class Context:
                         raise ToolError("unsupported_format", "Encrypted Office archives are unsupported.")
                     if "[Content_Types].xml" not in archive.namelist():
                         raise ToolError("invalid_file", "Input is not an Office Open XML document.")
+                    # Do not trust only ZIP directory sizes. Bound bytes actually
+                    # decompressed, and validate CRCs before any Office process opens it.
+                    expanded = 0
+                    for item in entries:
+                        with archive.open(item) as stream:
+                            while chunk := stream.read(1024 * 1024):
+                                expanded += len(chunk)
+                                if expanded > MAX_ZIP_BYTES:
+                                    raise ToolError("archive_too_large", "Office archive exceeds expansion bounds.")
             except zipfile.BadZipFile:
                 raise ToolError("invalid_file", "Office archive is damaged or invalid.") from None
 
@@ -210,7 +219,7 @@ class Context:
         try:
             writer(temporary)
             if temporary.stat().st_size > MAX_FILE_BYTES:
-                raise ToolError("file_too_large", "Generated artifact exceeds 32 MiB.")
+                raise ToolError("file_too_large", "Generated artifact exceeds 64 MiB.")
             self.validate_file_bytes(temporary.read_bytes(), extension)
             verifier(temporary)
             with temporary.open("r+b") as stream:

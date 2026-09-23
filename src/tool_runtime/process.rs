@@ -293,6 +293,41 @@ fn decorate(
 }
 
 impl ToolRuntime {
+    pub(super) async fn run_document_worker(
+        &self,
+        project: String,
+        spec: webcodex_core::plugin::DocumentWorkerSpec,
+        stdin: String,
+        metadata: webcodex_core::runner_protocol::DocumentJobMetadata,
+        session_id: Option<String>,
+        auth: Option<&AuthContext>,
+    ) -> ToolResult {
+        let mut args = spec.args;
+        args.extend([
+            "--request".into(),
+            "-".into(),
+            "--result".into(),
+            format!(".webcodex-office/cache/{}/result.json", metadata.request_id),
+        ]);
+        self.run_process_with_contract_mode(
+            project,
+            spec.executable,
+            args,
+            Some(stdin),
+            Some(300),
+            Some(5),
+            Some(spec.cwd),
+            Some(ExecutionPurpose::Operation),
+            None,
+            session_id,
+            auth,
+            None,
+            true,
+            Some(metadata),
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_process_with_contract_for_resource(
         &self,
@@ -323,6 +358,7 @@ impl ToolRuntime {
             auth,
             validation_assertion_name,
             true,
+            None,
         )
         .await
     }
@@ -569,6 +605,7 @@ impl ToolRuntime {
             None,
             None,
             false,
+            None,
         )
         .await
     }
@@ -589,7 +626,9 @@ impl ToolRuntime {
         auth: Option<&AuthContext>,
         validation_assertion_name: Option<&str>,
         allow_async_handoff: bool,
+        document: Option<webcodex_core::runner_protocol::DocumentJobMetadata>,
     ) -> ToolResult {
+        let document_operation = document.is_some();
         let budget =
             match StructuredExecutionBudget::resolve_with_sync_wait(timeout_secs, sync_wait_secs) {
             Ok(budget) => budget,
@@ -717,6 +756,7 @@ impl ToolRuntime {
                     },
                     "tool_runtime".to_string(),
                     ShellJobStartMetadata {
+                        document,
                         project_id: Some(project.clone()),
                         session_id,
                         project_cwd: Some(resolved_cwd.clone()),
@@ -831,9 +871,15 @@ impl ToolRuntime {
                         "detected_summary": detected_summary,
                     }))
                 }
-                Err(error) => outcome_unknown_result(format!(
-                    "the durable process Job could not be observed during handoff: {error}"
-                )),
+                Err(error) => {
+                    let mut result = outcome_unknown_result(format!(
+                        "the durable process Job could not be observed during handoff: {error}"
+                    ));
+                    if document_operation {
+                        result.output["job_id"] = json!(job.job_id);
+                    }
+                    result
+                }
             };
             if result.output["promoted_to_job"] != json!(true) {
                 add_structured_continuation_facts(

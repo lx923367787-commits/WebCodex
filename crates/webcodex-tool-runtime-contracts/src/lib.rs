@@ -17,3 +17,5 @@ pub use tool_result::*;
 mod tool_call_test_support;
 #[cfg(test)]
 mod tool_call_tests;
+#[cfg(test)]
+mod goal_contract_tests;

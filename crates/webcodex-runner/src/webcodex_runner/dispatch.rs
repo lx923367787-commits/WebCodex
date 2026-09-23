@@ -368,6 +368,21 @@ pub(crate) fn dispatch_request_with_outcome(
             })
         }
     };
+    if let RunnerOperation::Job(RunnerJobOperation::StartProcess(operation)) = &invocation.operation
+    {
+        if let Err(error) = runtime.plugins().validate_document_process(
+            operation,
+            project_registry_dir,
+            &invocation.metadata.client_id,
+        ) {
+            return submit_decode_failure(sink, config, runtime, request, error).map(|handled| {
+                RunnerDispatchOutcome {
+                    handled,
+                    project_cache_invalidation_required: false,
+                }
+            });
+        }
+    }
     let project_cache_invalidation_required =
         matches!(&invocation.operation, RunnerOperation::Project(_));
     let invocation_metadata = invocation.metadata.clone();
@@ -394,9 +409,22 @@ pub(crate) fn dispatch_request_with_outcome(
         RunnerOperation::McpGateway(operation) => sink
             .submit_mcp_gateway_result(request_id, runtime.mcp_gateway().handle(operation))
             .map(|_| true),
-        RunnerOperation::PluginGateway(operation) => sink
-            .submit_plugin_gateway_result(request_id, runtime.plugins().handle(operation))
-            .map(|_| true),
+        RunnerOperation::PluginGateway(operation) => {
+            let result = match operation {
+                webcodex_core::plugin::PluginGatewayRequest::DocumentWorkerSpec {
+                    project_id,
+                    project_root,
+                } => runtime.plugins().document_worker_spec(
+                    &project_id,
+                    &project_root,
+                    project_registry_dir,
+                    &client_id,
+                ),
+                other => runtime.plugins().handle(other),
+            };
+            sink.submit_plugin_gateway_result(request_id, result)
+                .map(|_| true)
+        }
         RunnerOperation::RunnerConfig(operation) => {
             let result = handle_runner_config_operation(runtime, &operation);
             // A reload may have replaced the snapshot passed into dispatch_request.

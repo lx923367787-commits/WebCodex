@@ -533,6 +533,7 @@ fn validate_command_execution_state(
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellJobStartMetadata {
+    pub document: Option<webcodex_core::runner_protocol::DocumentJobMetadata>,
     pub project_id: Option<String>,
     pub session_id: Option<String>,
     pub ssh_resource: Option<String>,
@@ -855,6 +856,7 @@ impl RunnerRegistry {
             .map(|step| step.name.clone())
             .collect::<Vec<_>>();
         let job_context = ShellJobContext {
+            document: metadata.document.clone(),
             runtime_project_id: metadata.project_id.clone(),
             workflow_session_id: metadata.session_id.clone(),
             ssh_resource: metadata.ssh_resource.clone(),
@@ -1085,6 +1087,7 @@ impl RunnerRegistry {
             Some(job_id.clone()),
         )?;
         let job = ShellJobRecord {
+            document: metadata.document,
             job_id: job_id.clone(),
             request_id: Some(request_id.clone()),
             client_id: client_id.clone(),

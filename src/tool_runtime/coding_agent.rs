@@ -68,8 +68,8 @@ pub(crate) struct CodingAgentPreparedStart {
     pub(crate) provider_id: String,
     pub(crate) provider_instance_id: String,
     pub(crate) intent_fingerprint: String,
-    client: crate::runner_protocol::RunnerView,
-    project_root: String,
+    pub(super) client: crate::runner_protocol::RunnerView,
+    pub(super) project_root: String,
     instruction: String,
     config: BTreeMap<String, CodingAgentConfigValue>,
     timeout_secs: u64,
@@ -192,7 +192,7 @@ impl CodingAgentServerState {
         ))
     }
 
-    fn observation_token(&self, run_id: &str, sequence: u64) -> String {
+    pub(super) fn observation_token(&self, run_id: &str, sequence: u64) -> String {
         observation_token(&self.observation_mac_key, &self.epoch, run_id, sequence)
     }
 
@@ -1260,6 +1260,10 @@ fn validate_start_input(
         }
     }
     Ok(())
+}
+
+pub(super) fn goal_owner_key(auth: Option<&AuthContext>) -> Result<String, String> {
+    stable_principal(auth).map(|principal| authority_fingerprint(&principal))
 }
 
 fn stable_principal(auth: Option<&AuthContext>) -> Result<String, String> {

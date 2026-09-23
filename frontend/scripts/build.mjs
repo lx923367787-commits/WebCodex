@@ -22,6 +22,7 @@ const watchedSources = new Set([
   "console.html",
   "runtime.ts",
   "runtime_console_state.ts",
+  "goal_panel.ts",
   "runtime.css",
   "runtime.html",
   "admin.ts",
@@ -143,8 +144,14 @@ export function createOutputs(
   );
   assertClassicScript(resolve(outputDirectory, "app.js"), appInlined);
   const runtimeModule = transpileTypeScript(sourceDirectory, "runtime.ts");
+  const goalPanelModule = buildJs(transpileTypeScript(sourceDirectory, "goal_panel.ts"));
+  const goalPanelClassic = stripModuleExports(goalPanelModule);
   const runtimeScript = stripModuleExports(
     runtimeModule
+      .replace(
+        /^import\s*\{[\s\S]*?\}\s*from\s*["']\.\/goal_panel(?:\.js)?["'];?\s*\n/m,
+        ""
+      )
       .replace(
         /^import\s*\{[\s\S]*?\}\s*from\s*["']\.\/workflow_session_state(?:\.js)?["'];?\s*\n/m,
         ""
@@ -155,7 +162,7 @@ export function createOutputs(
       )
   );
   const runtimeInlined = buildJs(
-    workflowSessionStateClassic + "\n" + runtimeConsoleStateClassic + "\n" + runtimeScript
+    workflowSessionStateClassic + "\n" + runtimeConsoleStateClassic + "\n" + goalPanelClassic + "\n" + runtimeScript
   );
   assertClassicScript(resolve(outputDirectory, "runtime.js"), runtimeInlined);
   const adminControllerModule = buildJs(
@@ -210,6 +217,7 @@ export function createOutputs(
     ["review_state.js", reviewStateModule],
     ["workflow_session_state.js", workflowSessionStateModule],
     ["runtime_console_state.js", runtimeConsoleStateModule],
+    ["goal_panel.js", goalPanelModule],
     ["admin_controller.js", adminControllerModule],
     ["admin_mutation_controller.js", adminMutationControllerModule],
     ["admin_mutation_view.js", adminMutationViewModule],

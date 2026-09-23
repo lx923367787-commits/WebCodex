@@ -195,12 +195,16 @@ fn mcp_export_api_auth(api_key_id: &str, username: &str) -> crate::auth::AuthCon
 
 #[path = "mcp_tests/artifact_export.rs"]
 mod artifact_export;
+#[path = "mcp_tests/documents.rs"]
+mod documents;
 #[path = "mcp_tests/computer_app.rs"]
 mod computer_app;
 #[path = "mcp_tests/file_import.rs"]
 mod file_import;
 #[path = "mcp_tests/http_transport.rs"]
 mod http_transport;
+#[path = "mcp_tests/host_goal_transport.rs"]
+mod host_goal_transport;
 #[path = "mcp_tests/model_ergonomics.rs"]
 mod model_ergonomics;
 #[path = "mcp_tests/model_surface.rs"]

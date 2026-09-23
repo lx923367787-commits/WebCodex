@@ -48,7 +48,7 @@ class FilePolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolError, "Source changed"):
             self.ctx.read_bytes("x.pdf", ".pdf", "0" * 64)
         with mock.patch("mycodex_tools.common.MAX_FILE_BYTES", 3):
-            with self.assertRaisesRegex(ToolError, "32 MiB"):
+            with self.assertRaisesRegex(ToolError, "64 MiB"):
                 self.ctx.read_bytes("x.pdf", ".pdf")
 
     def test_invalid_and_expanding_office_archives_rejected(self):

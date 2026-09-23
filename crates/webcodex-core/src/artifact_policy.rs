@@ -3,6 +3,9 @@ pub const DOCX_MIME: &str =
 pub const PPTX_MIME: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 pub const XLSX_MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+pub const DOC_MIME: &str = "application/msword";
+pub const XLS_MIME: &str = "application/vnd.ms-excel";
+pub const PPT_MIME: &str = "application/vnd.ms-powerpoint";
 
 pub const SAFE_OCTET_STREAM_ARTIFACT_EXTENSIONS: &[&str] = &[
     ".artifact",
@@ -21,7 +24,19 @@ pub const SAFE_OCTET_STREAM_ARTIFACT_EXTENSIONS: &[&str] = &[
     ".docx",
     ".pptx",
     ".xlsx",
+    ".doc",
+    ".xls",
+    ".ppt",
 ];
+
+pub fn legacy_office_extension_for_mime(mime: &str) -> Option<&'static str> {
+    match mime {
+        DOC_MIME => Some(".doc"),
+        XLS_MIME => Some(".xls"),
+        PPT_MIME => Some(".ppt"),
+        _ => None,
+    }
+}
 
 pub fn ooxml_extension_for_mime(mime: &str) -> Option<&'static str> {
     match mime {

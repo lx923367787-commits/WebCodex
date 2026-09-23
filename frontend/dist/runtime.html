@@ -173,6 +173,10 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
                 <span><strong>Durable Agents</strong><small>Agents, inboxes and conversations</small></span>
               </button>
+              <button class="operations-nav-item" type="button" data-operations-target="runtime-operations-goals" aria-controls="runtime-operations-goals">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="m8 12 3 3 5-6" /></svg>
+                <span><strong>Goals</strong><small>Execute, check and improve</small></span>
+              </button>
             </section>
           </div>
 
@@ -436,6 +440,62 @@
                 <div id="runtime-runner-list" class="fleet-list" role="group" aria-label="Runner Fleet"></div>
                 <p id="runtime-runners-empty" class="muted small" hidden>No caller-visible Runners.</p>
                 <p id="runtime-runner-unavailable" class="muted small" hidden>Runtime-wide Runner facts require runtime:read.</p>
+              </section>
+
+              <section id="runtime-operations-goals" class="operations-card operations-goals" tabindex="-1" hidden>
+                <div class="operations-card-head">
+                  <div><span class="eyebrow">Goal workspace</span><h3>Goals</h3></div>
+                  <button id="goal-refresh" class="btn" type="button">Refresh goals</button>
+                </div>
+                <p class="muted small">Start in ChatGPT with “开启目标模式：&lt;目标&gt;”. Review the saved local plan, then tell ChatGPT to begin.</p>
+                <p class="small"><strong>Selected project</strong> · <span id="goal-project"></span></p>
+                <p id="goal-status" class="small" role="status" aria-live="polite"></p>
+                <details class="goal-create">
+                  <summary>Create a background ACP goal</summary>
+                  <p class="muted small">The server runs each goal and checks its acceptance criteria after every round.</p>
+                  <form id="goal-create-form">
+                    <fieldset id="goal-create-fields" class="goal-form-grid">
+                      <label>Execution provider ID<input id="goal-provider" required maxlength="128" autocomplete="off" spellcheck="false" /></label>
+                      <label>Reviewer provider ID (optional)<input id="goal-reviewer" maxlength="128" autocomplete="off" spellcheck="false" /><span class="muted small">Leave blank to use the execution provider for a separate review run.</span></label>
+                      <label class="goal-full-width">Goal objective<textarea id="goal-objective" rows="3" required maxlength="16000"></textarea></label>
+                      <label>Acceptance criteria (one per line)<textarea id="goal-acceptance" rows="4" maxlength="16000"></textarea></label>
+                      <label>Artifact paths (one per line)<textarea id="goal-artifacts" rows="4" required maxlength="16000" spellcheck="false" placeholder="output/report.md"></textarea></label>
+                      <p class="muted small goal-full-width">Artifact paths add file-existence checks. Acceptance text adds reviewer checks.</p>
+                      <label>Maximum rounds<input id="goal-max-rounds" type="number" min="1" max="50" step="1" value="5" required /></label>
+                      <label>Total time limit (minutes)<input id="goal-minutes" type="number" min="1" max="1440" step="1" value="30" required /></label>
+                      <details class="goal-full-width"><summary>Advanced acceptance checks (JSON)</summary><label>Additional criteria<textarea id="goal-criteria-json" rows="6" maxlength="64000" spellcheck="false">[]</textarea></label><pre class="goal-json-example">[{"kind":"file_contains","id":"title","description":"Report title","path":"output/report.md","text":"Report"}]</pre></details>
+                    </fieldset>
+                    <button id="goal-start" class="btn primary" type="submit">Start goal</button>
+                  </form>
+                </details>
+                <div class="goal-workspace">
+                  <section><h4>Recent goals</h4><div id="goal-list" class="goal-list"></div><p id="goal-list-empty" class="muted small">No goals for this project.</p></section>
+                  <section>
+                    <p id="goal-detail-empty" class="muted">Select a goal to inspect its rounds and evidence.</p>
+                    <article id="goal-detail" hidden>
+                      <h4 id="goal-detail-objective"></h4><code id="goal-detail-id" class="small"></code>
+                      <p id="goal-detail-status" class="chip"></p><p id="goal-detail-note" class="small"></p>
+                      <section id="goal-host-detail" hidden>
+                        <p id="goal-host-guidance" class="goal-notice" role="status"></p>
+                        <p id="goal-host-delivery-status" class="small" role="status" hidden></p>
+                        <div id="goal-context-warning" class="goal-notice" role="status"><strong id="goal-context-count"></strong><p id="goal-context-advice"></p><p class="muted small">Visible tool text only; ordinary chat, other apps and images are not fully measured. This is not actual context capacity.</p></div>
+                        <h4>Local plan</h4><pre id="goal-host-plan" class="goal-host-text"></pre>
+                        <div class="goal-actions"><button id="goal-copy-continuation" class="btn" type="button">Copy continuation instruction</button></div>
+                        <textarea id="goal-continuation" class="goal-host-text" rows="3" readonly aria-label="Continuation instruction"></textarea>
+                        <h4>Saved task state</h4><div id="goal-host-state"></div>
+                        <h4>Node steps and acceptance</h4><div id="goal-host-nodes"></div>
+                        <details><summary>Latest checkpoint and evidence</summary><pre id="goal-host-checkpoint" class="goal-host-text"></pre></details>
+                      </section>
+                      <section id="goal-acp-detail">
+                        <p id="goal-delivery-status" class="small" role="status"></p>
+                        <div class="goal-actions"><button id="goal-stop" class="btn" type="button">Stop goal</button><button id="goal-resume" class="btn" type="button">Resume goal</button></div>
+                        <h4>Checks and evidence</h4>
+                        <div class="goal-actions"><button id="goal-round-previous" class="btn" type="button">Previous round</button><span id="goal-round-page" class="small" role="status"></span><button id="goal-round-next" class="btn" type="button">Next round</button></div>
+                        <div id="goal-rounds"></div>
+                      </section>
+                    </article>
+                  </section>
+                </div>
               </section>
 
               <section id="runtime-operations-agents" class="operations-card operations-agents" tabindex="-1" hidden>

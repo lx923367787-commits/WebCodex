@@ -370,6 +370,20 @@ fn publish_state_file(temp: &Path, state_path: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn publish_state_file(temp: &Path, state_path: &Path) -> Result<(), String> {
+    // Rust's filesystem APIs support long paths, but this direct Win32 call
+    // needs the verbatim prefix returned by canonicalize. The destination may
+    // not exist yet, so resolve its existing parent and retain the filename.
+    let temp = fs::canonicalize(temp)
+        .map_err(|error| format!("failed to resolve ACP Run temp state path: {error}"))?;
+    let parent = state_path
+        .parent()
+        .ok_or_else(|| "ACP Run state path has no parent".to_string())?;
+    let filename = state_path
+        .file_name()
+        .ok_or_else(|| "ACP Run state path has no filename".to_string())?;
+    let state_path = fs::canonicalize(parent)
+        .map_err(|error| format!("failed to resolve ACP Run state directory: {error}"))?
+        .join(filename);
     let from = temp
         .as_os_str()
         .encode_wide()
@@ -2740,7 +2754,14 @@ fn normalize_update(message: &Value) -> Option<CodingAgentEvent> {
         .and_then(Value::as_str)
         .map(bounded_text);
     match kind {
-        "agent_message_chunk" => Some(event(CodingAgentEventKind::AgentMessage, text, None, None)),
+        "agent_message_chunk" => {
+            let phase = update
+                .pointer("/_meta/codex/phase")
+                .and_then(Value::as_str)
+                .filter(|phase| matches!(*phase, "commentary" | "final_answer"))
+                .map(str::to_string);
+            Some(event(CodingAgentEventKind::AgentMessage, text, phase, None))
+        }
         "agent_thought_chunk" => Some(event(CodingAgentEventKind::Reasoning, text, None, None)),
         "plan" => Some(event(
             CodingAgentEventKind::Plan,
@@ -5065,6 +5086,71 @@ for line in sys.stdin:
     }
 
     #[test]
+    #[cfg(windows)]
+    fn durable_store_replaces_and_reopens_long_unicode_windows_paths() {
+        let temp = TempDir::new().unwrap();
+        let root = temp
+            .path()
+            .join("目标状态".repeat(24))
+            .join("runner-namespace".repeat(6));
+        let store = DurableRunStore::new(root.clone());
+        let timestamp = now();
+        let mut record = DurableRunRecord {
+            schema_version: STORE_SCHEMA_VERSION,
+            run_id: "wc_agent_run_long_unicode_state01".to_string(),
+            intent_fingerprint: "fingerprint".to_string(),
+            authority_fingerprint: "auth_long_path".to_string(),
+            runtime_project_id: "agent:test:demo".to_string(),
+            provider_id: "codex".to_string(),
+            provider_instance_id: "acp_long_path".to_string(),
+            state: CodingAgentRunState::Starting,
+            execution_state: CodingAgentExecutionState::NotStarted,
+            dispatch_phase: DurableDispatchPhase::BeforePromptBarrier,
+            created_at: timestamp,
+            updated_at: timestamp,
+            terminal: None,
+        };
+        let path = store.state_path(&record.run_id);
+        assert!(path.as_os_str().encode_wide().count() > 260);
+        assert!(
+            !path.to_string_lossy().starts_with(r"\\?\"),
+            "The regression fixture must exercise an ordinary, unprefixed path"
+        );
+        store.write(&record).unwrap();
+        assert_eq!(
+            store.read(&record.run_id).unwrap().unwrap().state,
+            CodingAgentRunState::Starting
+        );
+
+        record.state = CodingAgentRunState::Completed;
+        record.execution_state = CodingAgentExecutionState::Completed;
+        record.dispatch_phase = DurableDispatchPhase::Terminal;
+        record.updated_at = timestamp.saturating_add(1);
+        record.terminal = Some(CodingAgentTerminal {
+            stop_reason: Some(CODING_AGENT_STOP_REASON_END_TURN.to_string()),
+            error_code: None,
+            message: Some("长路径结果已完成".to_string()),
+            completed_at: record.updated_at,
+        });
+        store.write(&record).unwrap();
+        drop(store);
+
+        let reopened = DurableRunStore::new(root);
+        let restored = reopened.read(&record.run_id).unwrap().unwrap();
+        assert_eq!(restored.snapshot(0), record.snapshot(0));
+        let scanned = reopened.scan().unwrap();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].snapshot(0), record.snapshot(0));
+        assert_eq!(
+            fs::read_dir(reopened.run_dir(&record.run_id))
+                .unwrap()
+                .count(),
+            1,
+            "Atomic publication must consume its temporary files"
+        );
+    }
+
+    #[test]
     fn project_binding_requires_current_writable_registration() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("repo");
@@ -5478,6 +5564,70 @@ for line in sys.stdin:
             "real Codex ACP produced no normalized activity: {:?}",
             observation.events
         );
+    }
+
+    #[test]
+    fn normalize_agent_message_phase_commentary_preserves_text() {
+        let normalized = normalize_update(&json!({
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Inspecting the acceptance evidence."},
+                "_meta": {"codex": {"phase": "commentary"}}
+            }}
+        }))
+        .unwrap();
+        assert_eq!(normalized.kind, CodingAgentEventKind::AgentMessage);
+        assert_eq!(normalized.label.as_deref(), Some("commentary"));
+        assert_eq!(
+            normalized.text.as_deref(),
+            Some("Inspecting the acceptance evidence.")
+        );
+    }
+
+    #[test]
+    fn normalize_agent_message_phase_final_answer_preserves_json() {
+        let answer = r#"{"checks":[{"criterion_id":"review","passed":true,"evidence":"Inspected result.txt"}]}"#;
+        let normalized = normalize_update(&json!({
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": answer},
+                "_meta": {"codex": {"phase": "final_answer"}}
+            }}
+        }))
+        .unwrap();
+        assert_eq!(normalized.kind, CodingAgentEventKind::AgentMessage);
+        assert_eq!(normalized.label.as_deref(), Some("final_answer"));
+        assert_eq!(normalized.text.as_deref(), Some(answer));
+    }
+
+    #[test]
+    fn normalize_agent_message_phase_unknown_plain_and_reasoning_remain_unlabelled() {
+        for meta in [
+            None,
+            Some(json!({"codex": {"phase": "future_phase"}})),
+            Some(json!({"codex": {"phase": 1}})),
+        ] {
+            let mut message = json!({"params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Provider response"}
+            }}});
+            if let Some(meta) = meta {
+                message["params"]["update"]["_meta"] = meta;
+            }
+            let normalized = normalize_update(&message).unwrap();
+            assert_eq!(normalized.kind, CodingAgentEventKind::AgentMessage);
+            assert_eq!(normalized.label, None);
+            assert_eq!(normalized.text.as_deref(), Some("Provider response"));
+        }
+        let thought = normalize_update(&json!({"params": {"update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "Reasoning remains separate"},
+            "_meta": {"codex": {"phase": "final_answer"}}
+        }}}))
+        .unwrap();
+        assert_eq!(thought.kind, CodingAgentEventKind::Reasoning);
+        assert_eq!(thought.label, None);
+        assert_eq!(thought.text.as_deref(), Some("Reasoning remains separate"));
     }
 
     #[test]

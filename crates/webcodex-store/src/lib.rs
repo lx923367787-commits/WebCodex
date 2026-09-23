@@ -15,6 +15,8 @@ mod audit;
 mod communication;
 mod execution_model;
 mod executions;
+mod goal;
+mod host_goal;
 mod memory;
 pub mod models;
 mod oauth;
@@ -22,6 +24,7 @@ mod schema;
 mod server_instance;
 mod task_kernel;
 mod window_activity;
+mod host_goal_context;
 
 pub use self::admin_project_lifecycle::{AdminProjectAudit, AdminProjectIdempotencyRecord};
 pub use self::agent_task::{
@@ -78,6 +81,9 @@ pub use self::memory::{
     validate_memory_summary, MAX_MEMORIES_PER_PROJECT, MEMORY_SCOPE_IDENTITY_ATTRIBUTED,
 };
 pub use self::oauth::RotateResult;
+pub use self::goal::{GoalMutation, GoalStoreError};
+pub use self::host_goal::{HostGoalCheckpointAction, HostGoalClaimMutation, HostGoalMutation, HostGoalOperationMutation, HostGoalPlanMutation};
+pub use self::host_goal_context::{HostContextMeter, HostGoalWindowBinding};
 pub use self::server_instance::ServerInstanceGuard;
 pub use self::task_kernel::{
     AppliedPaths, ConnectorApproval, ConnectorApprovalGate, ConnectorApprovalState,
@@ -140,3 +146,9 @@ mod db_tests;
 mod execution_intent_tests;
 #[cfg(test)]
 mod memory_tests;
+#[cfg(test)]
+mod goal_tests;
+#[cfg(test)]
+mod host_goal_tests;
+#[cfg(test)]
+mod host_goal_context_tests;

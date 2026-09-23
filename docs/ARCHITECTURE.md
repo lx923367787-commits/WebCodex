@@ -83,6 +83,7 @@ Maintainer-level lifecycle and Agent Task/TaskAttempt details live in [Durable A
 - **Connector Task** — project-first work created by the task-oriented Connector. It can be explicitly resumed by its task handle.
 - **Job** — a long-running command or validation that continues after the initiating call returns. Observe the same Job instead of starting another copy.
 - **Workflow Session** — bounded coding evidence/continuity used by the regular runtime for review, validation, collaboration, and closeout. It is not a credential.
+- **Goal** — an explicitly admitted, owner-scoped acceptance contract with durable rounds. Its Server controller runs existing ACP coding-agent executions and checks immutable criteria against artifact snapshots, continuing after a failed check within the original limits. A coding-agent `end_turn` does not complete a Goal. Cancellation retains project ownership until execution termination is confirmed. This is separate from Agent TaskAttempt ownership/retry semantics and does not wake an external ChatGPT conversation. See [Goal mode](GOAL_MODE.zh-CN.md) and its [acceptance evidence](GOAL_MODE_ACCEPTANCE.zh-CN.md).
 
 These objects have different lifecycles and are never inferred from one another merely because requests share a user, credential, project, or chat window. Their exact continuity protocols are maintainer details.
 

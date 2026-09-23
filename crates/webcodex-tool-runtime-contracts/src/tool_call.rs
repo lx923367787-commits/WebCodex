@@ -39,6 +39,38 @@ pub const TOOL_CALL_WRAPPER_FIELDS: &[&str] = &[TOOL_CALL_TOOL_FIELD, TOOL_CALL_
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct DocumentToolCall {
+    pub project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_file: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginToolCall {
     pub action: String,
     #[serde(default)]
@@ -434,6 +466,10 @@ pub struct ComputerSnapshotRegion {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "tool", content = "params", rename_all = "snake_case")]
 pub enum ToolCall {
+    PresentDocument(DocumentToolCall),
+    DocumentEdit(DocumentToolCall),
+    DocumentConvert(DocumentToolCall),
+    DocumentRestore(DocumentToolCall),
     /// List registered tool runtime tools.
     ListTools {
         #[serde(default)]
@@ -772,6 +808,125 @@ pub enum ToolCall {
     },
     CodingAgentCancel {
         run_id: String,
+    },
+
+    /// Explicit bounded execution-and-verification loop, independent of one ACP turn.
+    GoalStart {
+        project: String,
+        provider_id: String,
+        objective: String,
+        criteria: Vec<webcodex_core::goal::GoalCriterion>,
+        artifact_paths: Vec<String>,
+        #[serde(default)]
+        reviewer_provider_id: Option<String>,
+        #[serde(default)]
+        limits: Option<webcodex_core::goal::GoalLimits>,
+        #[serde(default)]
+        config: Option<BTreeMap<String, webcodex_core::coding_agent::CodingAgentConfigValue>>,
+        idempotency_key: String,
+    },
+    GoalRead {
+        goal_id: String,
+        #[serde(default)]
+        round_offset: Option<usize>,
+        #[serde(default)]
+        round_limit: Option<usize>,
+        #[serde(default)]
+        history_after: Option<u64>,
+        #[serde(default)]
+        history_limit: Option<usize>,
+        #[serde(default)]
+        history_kind: Option<String>,
+        #[serde(default)]
+        view: Option<String>,
+        #[serde(default)]
+        node_id: Option<String>,
+        #[serde(default)]
+        section: Option<String>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    GoalList {
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    GoalCancel {
+        goal_id: String,
+    },
+    GoalResume {
+        goal_id: String,
+    },
+
+    /// Web-hosted goal planning; persistence does not authorize execution.
+    GoalModeStart {
+        project: String,
+        objective: String,
+        idempotency_key: String,
+        #[serde(default)]
+        context_epoch: Option<String>,
+        #[serde(default)]
+        context_warning_tokens: Option<u64>,
+        #[serde(default)]
+        context_handoff_tokens: Option<u64>,
+    },
+    GoalPlanSave {
+        goal_id: String,
+        expected_revision: u64,
+        idempotency_key: String,
+        plan: Value,
+        #[serde(default)]
+        change_request: Option<String>,
+    },
+    GoalConfirmPlan {
+        goal_id: String,
+        expected_revision: u64,
+        plan_version: u64,
+        plan_sha256: String,
+        confirmation: String,
+        idempotency_key: String,
+    },
+    GoalBootstrap {
+        #[serde(default)]
+        goal_id: Option<String>,
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        context_epoch: Option<String>,
+        #[serde(default = "default_true")]
+        activate: bool,
+    },
+    GoalClaimNode {
+        goal_id: String,
+        node_id: String,
+        expected_revision: u64,
+        plan_version: u64,
+        idempotency_key: String,
+        #[serde(default)]
+        context_epoch: Option<String>,
+        #[serde(default)]
+        rework: bool,
+        #[serde(default)]
+        takeover_attempt_id: Option<String>,
+    },
+    GoalCheckpoint {
+        goal_id: String,
+        expected_revision: u64,
+        idempotency_key: String,
+        patch: Value,
+        #[serde(default)]
+        context_epoch: Option<String>,
+    },
+    GoalCheckNode {
+        goal_id: String,
+        node_id: String,
+        attempt_id: String,
+        expected_revision: u64,
+        plan_version: u64,
+        idempotency_key: String,
+        #[serde(default)]
+        evidence: Option<Value>,
     },
 
     /// Execute bounded script content transported as typed data and written to
@@ -2555,6 +2710,30 @@ fn validate_structured_validation_sync_wait(name: &str, arguments: &Value) -> Re
     Ok(())
 }
 
+fn reject_unknown_goal_fields(tool_name: &str, arguments: &Value) -> Result<(), String> {
+    let Some(object) = arguments.as_object() else {
+        return Ok(());
+    };
+    let definition = lookup_tool_definition(tool_name).expect("known Goal tool");
+    let schema = (definition.model_spec.expect("model-visible Goal tool").input_schema)();
+    let properties = schema["properties"]
+        .as_object()
+        .expect("Goal input properties");
+    let unknown = object
+        .keys()
+        .filter(|key| !properties.contains_key(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid arguments for tool '{tool_name}': unknown field(s) {}",
+            unknown.join(", ")
+        ))
+    }
+}
+
 impl ToolCall {
     pub fn from_tool_name(name: &str, arguments: Value) -> Result<Self, String> {
         Self::from_tool_name_with_recorder_metadata(name, arguments).map(|(call, _)| call)
@@ -2652,6 +2831,14 @@ impl ToolCall {
         }
         if matches!(
             name,
+            "goal_start" | "goal_read" | "goal_list" | "goal_cancel" | "goal_resume"
+                | "goal_mode_start" | "goal_plan_save" | "goal_confirm_plan" | "goal_bootstrap"
+                | "goal_claim_node" | "goal_checkpoint" | "goal_check_node"
+        ) {
+            reject_unknown_goal_fields(name, &arguments)?;
+        }
+        if matches!(
+            name,
             "list_projects"
                 | "list_runners"
                 | "runtime_status"
@@ -2736,6 +2923,10 @@ impl ToolCall {
 
     pub fn tool_name(&self) -> &'static str {
         match self {
+            Self::PresentDocument(_) => "present_document",
+            Self::DocumentEdit(_) => "document_edit",
+            Self::DocumentConvert(_) => "document_convert",
+            Self::DocumentRestore(_) => "document_restore",
             Self::ListTools { .. } => "list_tools",
             Self::StartSession { .. } => "start_session",
             Self::WorkOnProject { .. } => "work_on_project",
@@ -2762,6 +2953,18 @@ impl ToolCall {
             Self::CodingAgentStart { .. } => "coding_agent_start",
             Self::CodingAgentObserve { .. } => "coding_agent_observe",
             Self::CodingAgentCancel { .. } => "coding_agent_cancel",
+            Self::GoalStart { .. } => "goal_start",
+            Self::GoalRead { .. } => "goal_read",
+            Self::GoalList { .. } => "goal_list",
+            Self::GoalCancel { .. } => "goal_cancel",
+            Self::GoalResume { .. } => "goal_resume",
+            Self::GoalModeStart { .. } => "goal_mode_start",
+            Self::GoalPlanSave { .. } => "goal_plan_save",
+            Self::GoalConfirmPlan { .. } => "goal_confirm_plan",
+            Self::GoalBootstrap { .. } => "goal_bootstrap",
+            Self::GoalClaimNode { .. } => "goal_claim_node",
+            Self::GoalCheckpoint { .. } => "goal_checkpoint",
+            Self::GoalCheckNode { .. } => "goal_check_node",
             Self::RunScript { .. } => "run_script",
             Self::RunShell { .. } => "run_shell",
             Self::OpenSessionShell { .. } => "open_session_shell",
@@ -2891,6 +3094,10 @@ impl ToolCall {
 
     pub fn session_id(&self) -> Option<&str> {
         match self {
+            Self::PresentDocument(args)
+            | Self::DocumentEdit(args)
+            | Self::DocumentConvert(args)
+            | Self::DocumentRestore(args) => args.session_id.as_deref(),
             Self::RunProcess { session_id, .. }
             | Self::RunDetachedProcess { session_id, .. }
             | Self::RunScript { session_id, .. }
@@ -3019,9 +3226,15 @@ impl ToolCall {
 
     pub fn project(&self) -> Option<&str> {
         match self {
+            Self::PresentDocument(args)
+            | Self::DocumentEdit(args)
+            | Self::DocumentConvert(args)
+            | Self::DocumentRestore(args) => Some(&args.project),
             Self::RunProcess { project, .. }
             | Self::RunDetachedProcess { project, .. }
             | Self::CodingAgentStart { project, .. }
+            | Self::GoalStart { project, .. }
+            | Self::GoalModeStart { project, .. }
             | Self::StartAgentTaskCodingRun { project, .. }
             | Self::RunScript { project, .. }
             | Self::RunShell { project, .. }
@@ -3097,7 +3310,8 @@ impl ToolCall {
             Self::FinishCodingTask { project, .. } => Some(project.as_str()),
             Self::UpdateSessionContext { project, .. }
             | Self::ValidationSummary { project, .. } => Some(project.as_str()),
-            Self::SessionHandoffSummary { project, .. } => project.as_deref(),
+            Self::SessionHandoffSummary { project, .. }
+            | Self::GoalBootstrap { project, .. } => project.as_deref(),
             _ => None,
         }
     }

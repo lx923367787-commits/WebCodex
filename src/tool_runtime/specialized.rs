@@ -402,6 +402,25 @@ impl ToolRuntime {
             None
         };
 
+        if let Err(result) = self
+            .host_goal_admit_effect(
+                external_tool_name,
+                resolved_session_project.as_deref(),
+                identity,
+                auth,
+                policy.effect.consequential(),
+            )
+            .await
+        {
+            self.sessions.record_model_facing_tool_call_finished(
+                session_start,
+                false,
+                &denial_terminal_projection(policy, "goal_admission_denied"),
+                result.error.as_deref(),
+                Some("goal_admission_denied"),
+            );
+            return Err(SpecializedGovernanceDenial::Tool(result));
+        }
         Ok(SpecializedInvocationPermit {
             policy,
             session_start,

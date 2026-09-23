@@ -138,6 +138,19 @@ pub(crate) fn check_runtime_tool_scope(
 ) -> Result<(), ToolCallErrorStatus> {
     let policy = crate::auth::scopes::oauth_scope_policy_for_runtime_tool(tool_name);
     let Some(auth) = auth else {
+        // A durable Goal may continue after this request returns. Its public
+        // entry points therefore always require an explicit execution principal;
+        // the legacy local-dev compatibility below does not authorize Goal work.
+        if matches!(
+            tool_name,
+            "goal_start" | "goal_read" | "goal_list" | "goal_cancel" | "goal_resume"
+        ) {
+            return Err(ToolCallErrorStatus::InsufficientScope {
+                required_scope: Some(crate::auth::SCOPE_CODING_AGENT_RUN),
+                description: "missing explicit Goal execution authority: coding_agent:run"
+                    .to_string(),
+            });
+        }
         // Preserve historical unauthenticated compatibility for unrelated
         // internal tools, but explicit Memory and administrator authority is
         // intentionally never inferred from surface presence or a missing
@@ -296,7 +309,7 @@ impl ToolRuntime {
 
     pub(crate) async fn call_tool_with_invocation_metadata(
         &self,
-        request: ToolCallRequest,
+        mut request: ToolCallRequest,
         context: ToolCallContext<'_>,
         invocation_metadata: ToolInvocationMetadata,
         capabilities: ToolProtocolCapabilities,
@@ -309,9 +322,67 @@ impl ToolRuntime {
             &request.arguments,
             context_ack,
         );
-        let mut outcome = self
-            .call_tool_with_context_inner(request, context, invocation_metadata, capabilities)
+        let raw_arguments = request.arguments.clone();
+        let request_scope = match super::coding_agent::goal_owner_key(context.auth) {
+            Ok(owner) => match super::host_goal_context::RequestScope::new(
+                owner,
+                context.window,
+                &raw_arguments,
+            ) {
+                Ok(scope) => Some(scope),
+                Err(message) => {
+                    return ToolCallOutcome {
+                        success: false,
+                        result: None,
+                        error_status: Some(ToolCallErrorStatus::InvalidArguments { message }),
+                        project: None,
+                        model_ergonomics: None,
+                        correlation: Default::default(),
+                    }
+                }
+            },
+            Err(message) if raw_arguments.get("goal_context").is_some() => {
+                return ToolCallOutcome {
+                    success: false,
+                    result: Some(super::host_goal::failure(
+                        "goal_identity_unavailable",
+                        message,
+                    )),
+                    error_status: None,
+                    project: None,
+                    model_ergonomics: None,
+                    correlation: Default::default(),
+                }
+            }
+            Err(_) => None,
+        };
+        if let Some(arguments) = request.arguments.as_object_mut() {
+            arguments.remove("goal_context");
+            if !matches!(
+                request.tool_name.as_str(),
+                "goal_mode_start" | "goal_bootstrap" | "goal_claim_node" | "goal_checkpoint"
+            ) {
+                arguments.remove("context_epoch");
+            }
+        }
+        let tool_name = request.tool_name.clone();
+        let work = Box::pin(async {
+            let mut outcome = Box::pin(self.call_tool_with_context_inner(
+                request,
+                context,
+                invocation_metadata,
+                capabilities,
+            ))
             .await;
+            self.finish_host_goal_request(&tool_name, &raw_arguments, context.auth, &mut outcome)
+                .await;
+            outcome
+        });
+        let mut outcome = if let Some(request_scope) = request_scope {
+            Box::pin(super::host_goal_context::scope(request_scope, work)).await
+        } else {
+            work.await
+        };
         outcome.model_ergonomics = telemetry.map(ModelErgonomicsTimer::finish);
         outcome
     }

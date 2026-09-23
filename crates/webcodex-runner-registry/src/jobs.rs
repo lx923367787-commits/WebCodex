@@ -219,6 +219,7 @@ pub(super) fn job_view(job: &ShellJobRecord) -> ShellJobInfo {
         None
     };
     ShellJobInfo {
+        document: job.document.clone(),
         job_id: job.job_id.clone(),
         request_id: job.request_id.clone(),
         client_id: job.client_id.clone(),

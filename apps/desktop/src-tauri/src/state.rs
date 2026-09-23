@@ -3270,7 +3270,8 @@ mod tests {
                 .as_array_of_tables()
                 .unwrap()
                 .iter()
-                .find(|p| p["id"].as_str() == Some("mycodex-tools"))
+                .find(|p| p.get("cwd").and_then(toml_edit::Item::as_str)
+                    .map(|cwd| same_project(cwd, &second_project.to_string_lossy())).unwrap_or(false))
                 .unwrap();
             assert!(same_project(
                 provider["cwd"].as_str().unwrap(),
@@ -3301,7 +3302,9 @@ mod tests {
             assert!(failure.is_err(), "injected state publication failure must be observed");
             assert_eq!(core.snapshot.readiness.runner, RunnerReadiness::Stopped);
             let recovered = std::fs::read_to_string(&identity.runner_config).unwrap().parse::<toml_edit::DocumentMut>().unwrap();
-            let recovered_provider = recovered["plugins"]["providers"].as_array_of_tables().unwrap().iter().find(|p| p["id"].as_str() == Some("mycodex-tools")).unwrap();
+            let recovered_provider = recovered["plugins"]["providers"].as_array_of_tables().unwrap().iter().find(|p| p.get("cwd").and_then(toml_edit::Item::as_str).map(|cwd| same_project(cwd, &second_project.to_string_lossy())).unwrap_or(false)).unwrap();
+            assert_eq!(recovered["plugins"]["providers"].as_array_of_tables().unwrap().len(), 2,
+                "failed third-project setup must preserve both existing bindings");
             assert!(same_project(recovered_provider["cwd"].as_str().unwrap(), &second_project.to_string_lossy()));
             phase = "stop and resume";
             core.stop_local_runtime(&cancellation).await?;
