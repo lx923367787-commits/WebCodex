@@ -124,25 +124,63 @@ def docx_create(ctx, args):
 
 
 def docx_update(ctx, args):
-    doc, digest = _load(ctx, args, ".docx", Document)
+    from copy import deepcopy
+    from . import office_ooxml as ox
+    data, digest = ctx.read_bytes(args["path"], ".docx", expected_sha256=args["expected_sha256"])
+    doc = Document(BytesIO(data))
+    package = ox.Package(BytesIO(data))
+    root = package.get("word/document.xml")
+    nodes = list(root.iter(ox.q("w", "p")))
+    operations = []
+
+    def paragraph_target(element):
+        path = doc.element.getroottree().getpath(element)
+        found = root.getroottree().xpath(path, namespaces=ox.NS)
+        _check(len(found) == 1 and found[0] in nodes, "Cannot locate the selected Word paragraph")
+        return {"id": f"word/document.xml#p{nodes.index(found[0])}"}
+
     _check(any(args.get(k) for k in ("paragraph_updates", "cell_updates", "append_blocks")),
            "At least one edit or appended block is required")
     for update in args.get("paragraph_updates", []):
         index = _bounded(update["index"], 0, len(doc.paragraphs) - 1, "paragraph index")
+        operations.append({"op": "set_text", "target": paragraph_target(doc.paragraphs[index]._p), "text": update["text"]})
         doc.paragraphs[index].text = update["text"]
     for update in args.get("cell_updates", []):
         index = _bounded(update["table"], 0, len(doc.tables) - 1, "table index")
         table = doc.tables[index]
         row = _bounded(update["row"], 0, len(table.rows) - 1, "table row")
         column = _bounded(update["column"], 0, len(table.columns) - 1, "table column")
-        table.cell(row, column).text = update["text"]
+        cell = table.cell(row, column)
+        operations.append({"op": "replace_cell", "target": paragraph_target(cell.paragraphs[0]._p), "text": update["text"]})
+        cell.text = update["text"]
+    ox.edit_word(package, operations)
+    body_before = len(doc.element.body)
     _append_blocks(doc, args.get("append_blocks", []))
-    return {**_publish_docx(ctx, args["output_path"], doc), "source_sha256": digest,
-            "warnings": ["Replacing paragraph/cell text replaces its runs and inline formatting. Original file is retained; complex Word layout is outside the supported scope."]}
+    if args.get("append_blocks"):
+        root = package.get("word/document.xml")
+        body = root.find("w:body", ox.NS)
+        # python-docx inserts new blocks before the final section properties.
+        old_content_count = body_before - (1 if doc.element.body.sectPr is not None else 0)
+        generated = [n for n in doc.element.body if n.tag != ox.q("w", "sectPr")][old_content_count:]
+        section = body.find("w:sectPr", ox.NS)
+        offset = list(body).index(section) if section is not None else len(body)
+        for node in generated:
+            body.insert(offset, deepcopy(node))
+            offset += 1
+        package.put("word/document.xml", root)
+    if ox.features(package)["signed"]:
+        raise ToolError("signed_document", "Editing would invalidate the document signature")
+    expected = _docx_signature(doc)
+    def verify(path):
+        if _docx_signature(Document(path)) != expected:
+            raise ToolError("verification_failed", "Saved Word content differs from requested edits")
+    result = ctx.publish(args["output_path"], ".docx", lambda path: path.write_bytes(package.bytes()), verify)
+    return {**result, "source_sha256": digest, "paragraph_count": len(doc.paragraphs), "table_count": len(doc.tables),
+            "warnings": ["Surrounding formatting and unrelated package parts are preserved; replacement text inherits its first run's formatting. Source is retained."]}
 
 
 def _xlsx_load(stream):
-    return load_workbook(stream, data_only=False, keep_links=False)
+    return load_workbook(stream, data_only=False, keep_links=True)
 
 
 def _sheet_name(name):
@@ -176,6 +214,9 @@ def _set_cells(sheet, cells):
         elif kind == "formula":
             _check(item["formula"].startswith("=") and len(item["formula"]) > 1,
                    "Formula must start with '=' followed by an expression")
+            from .office_ooxml import formula_external_risk
+            if formula_external_risk(item["formula"], reject_new_workbook_links=True):
+                raise ToolError("active_content_rejected", "New formulas cannot reference external workbooks or execute data-source functions")
             cell.value = item["formula"]
         elif kind == "number":
             _check(type(item["number"]) in (int, float) and math.isfinite(item["number"]),
@@ -296,7 +337,9 @@ def xlsx_create(ctx, args):
 
 
 def xlsx_update(ctx, args):
-    workbook, digest = _load(ctx, args, ".xlsx", _xlsx_load)
+    from . import office_ooxml as ox
+    data, digest = ctx.read_bytes(args["path"], ".xlsx", expected_sha256=args["expected_sha256"])
+    workbook = _xlsx_load(BytesIO(data))
     try:
         _check(any(update["cells"] for update in args["updates"]), "At least one cell update is required")
         seen = set()
@@ -306,7 +349,29 @@ def xlsx_update(ctx, args):
             _check(name not in seen, "Only one update group per sheet is allowed")
             seen.add(name)
             _set_cells(workbook[name], update["cells"])
-        return {**_publish_xlsx(ctx, args["output_path"], workbook), "source_sha256": digest}
+        expected = _xlsx_cells(workbook, restore_empty_strings=True)
+        # Preserve the existing precision contract even though surgical writes
+        # no longer round-trip every unrelated worksheet through openpyxl.
+        for value, _ in expected.values():
+            if type(value) is float and float(format(value, ".16g")) != value:
+                raise ToolError("verification_failed", "Excel basic numeric precision cannot be preserved; no output was published")
+        package = ox.Package(BytesIO(data))
+        if ox.features(package)["signed"]:
+            raise ToolError("signed_document", "Editing would invalidate the workbook signature")
+        updates = [{"sheet": u["sheet"], "cells": [{"coordinate": c["coordinate"], "type": c["type"],
+                     "value": c.get(c["type"])} for c in u["cells"]]} for u in args["updates"]]
+        ox.edit_workbook_cells(package, updates)
+        names = workbook.sheetnames[:]
+        def verify(path):
+            saved = _xlsx_load(path)
+            try:
+                if saved.sheetnames != names or _xlsx_cells(saved) != expected:
+                    raise ToolError("verification_failed", "Saved Excel basic cell values or types differ; no output was published")
+            finally:
+                saved.close()
+        result = ctx.publish(args["output_path"], ".xlsx", lambda path: path.write_bytes(package.bytes()), verify)
+        return {**result, "source_sha256": digest, "sheet_count": len(names),
+                "warnings": ["Unrelated workbook objects and external-link parts are preserved. Formula expressions remain; stale caches are cleared and recalculation is requested on open. Use document_edit with recalculate for native Excel calculation."]}
     finally:
         workbook.close()
 
@@ -429,7 +494,7 @@ TOOL_SPECS = [
            **{f"{n}_{s}": integer() for n in ("paragraph", "table") for s in ("start", "count")}}, ["path"], True),
     _spec("docx_create", "Create a basic DOCX from ordered paragraph, heading and table blocks.",
           {"output_path": _PATH, "blocks": arr(_BLOCK, max_items=200)}, ["output_path", "blocks"], False),
-    _spec("docx_update", "Update DOCX into a new copy using 0-based paragraph/table/cell indexes or append blocks. Replacing text loses its inline run formatting; original is preserved.",
+    _spec("docx_update", "Update DOCX into a new copy using 0-based paragraph/table/cell indexes or append blocks. Surgical text changes preserve surrounding runs and unrelated package parts; new text inherits its first run's formatting. Use present_document/document_edit for complete stories, revisions and formatting.",
           {**_SOURCE, "paragraph_updates": arr(obj({"index": integer(), "text": string()}, ["index", "text"]), max_items=200),
            "cell_updates": arr(obj({"table": integer(), "row": integer(), "column": integer(), "text": string()},
                                    ["table", "row", "column", "text"]), max_items=500),
@@ -441,7 +506,7 @@ TOOL_SPECS = [
     _spec("xlsx_create", "Create an XLSX with named sheets and explicitly typed cells. Each cell requires exactly the value key named by type, or no value key for empty. Text starting '=' remains text; formulas are not calculated.",
           {"output_path": _PATH, "sheets": arr(obj({"name": string(max_length=31), "cells": arr(_CELL, max_items=2000)}, ["name", "cells"]), max_items=50)},
           ["output_path", "sheets"], False),
-    _spec("xlsx_update", "Write cell changes into a new XLSX copy. Each cell uses an explicit type and matching value key. Original remains unchanged. External workbook links and complex Excel objects may be lost; formulas are saved without recalculation.",
+    _spec("xlsx_update", "Write typed cell changes into a new XLSX copy while preserving unrelated package parts, external links and complex objects. Original remains unchanged. Formula expressions are preserved; stale caches are cleared. Use document_edit with recalculate for native Excel calculation.",
           {**_SOURCE, "updates": arr(obj({"sheet": string(max_length=31), "cells": arr(_CELL, max_items=2000)}, ["sheet", "cells"]), max_items=50)},
           ["path", "expected_sha256", "output_path", "updates"], False),
     _spec("pptx_read", "Read PPTX slide count, titles, text and tables including grouped shapes. 0-based slide_start/slide_count, default first 5 slides. Each slide uses a flattened shape_start/shape_count window (default first 20, max 100) with selected_shapes continuation. Does not read notes, images or charts.",

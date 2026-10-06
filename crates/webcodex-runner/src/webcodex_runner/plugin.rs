@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock, TryLockError};
@@ -403,6 +403,11 @@ impl PluginManager {
             );
         }
         match request {
+            PluginGatewayRequest::DocumentWorkerSpec { .. } => gateway_error(
+                PluginDispatchState::NotStarted,
+                "document_project_binding_required",
+                "Document worker resolution requires the current Runner project registry",
+            ),
             PluginGatewayRequest::Check { provider_id } => self.check_candidate(&provider_id),
             PluginGatewayRequest::Reload => self.reload_from_path(),
             PluginGatewayRequest::ProvidersList => {
@@ -463,6 +468,171 @@ impl PluginManager {
             .get(provider_id)
             .cloned()?;
         (provider.instance_id == provider_instance_id).then_some(provider)
+    }
+
+    pub(crate) fn document_worker_spec(
+        &self,
+        project_id: &str,
+        project_root: &str,
+        registry: &Path,
+        client_id: &str,
+    ) -> PluginGatewayResponse {
+        use super::projects::load_runner_project_summaries_from_dir;
+        use super::shell::canonicalize_existing;
+        use webcodex_runner_config::paths::paths_equal;
+        let reject = |code, message| gateway_error(PluginDispatchState::NotStarted, code, message);
+        let Ok(root) = canonicalize_existing(Path::new(project_root)) else {
+            return reject(
+                "document_project_unavailable",
+                "Registered document project root is unavailable",
+            );
+        };
+        if !root.is_dir()
+            || !load_runner_project_summaries_from_dir(registry)
+                .iter()
+                .any(|project| {
+                    !project.disabled
+                        && format!("agent:{client_id}:{}", project.id) == project_id
+                        && canonicalize_existing(Path::new(&project.path))
+                            .is_ok_and(|candidate| paths_equal(&candidate, &root))
+                })
+        {
+            return reject(
+                "document_project_changed",
+                "Document project identity no longer matches its registered root",
+            );
+        }
+        let committed = self
+            .committed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let matching: Vec<_> = committed
+            .providers
+            .values()
+            .filter(|provider| {
+                provider.config.document_worker.is_some()
+                    && provider
+                        .config
+                        .cwd
+                        .as_deref()
+                        .and_then(|cwd| canonicalize_existing(Path::new(cwd)).ok())
+                        .is_some_and(|cwd| paths_equal(&cwd, &root))
+            })
+            .collect();
+        if matching.len() != 1 {
+            return reject(
+                if matching.is_empty() {
+                    "document_provider_not_configured"
+                } else {
+                    "document_provider_ambiguous"
+                },
+                "Exactly one configured document provider must match this registered project root",
+            );
+        }
+        let provider = matching[0];
+        if self.stopping.load(Ordering::SeqCst) || provider.failed.load(Ordering::SeqCst) {
+            return reject(
+                "document_provider_unavailable",
+                "The configured document provider is not ready",
+            );
+        }
+        let worker = provider
+            .config
+            .document_worker
+            .as_ref()
+            .expect("filtered worker");
+        if !Path::new(worker).is_file() {
+            return reject(
+                "document_worker_missing",
+                "The operator-configured document worker file is unavailable",
+            );
+        }
+        let mut args = vec![worker.clone()];
+        args.extend(provider.config.document_worker_args.clone());
+        PluginGatewayResponse::success(PluginGatewayResponsePayload::DocumentWorker {
+            spec: webcodex_core::plugin::DocumentWorkerSpec {
+                provider_id: provider.config.id.clone(),
+                provider_instance_id: provider.instance_id.clone(),
+                executable: provider.config.command.clone(),
+                args,
+                cwd: root.to_string_lossy().into_owned(),
+            },
+        })
+    }
+
+    pub(crate) fn validate_document_process(
+        &self,
+        operation: &webcodex_core::runner_operation::RunnerJobProcessOperation,
+        registry: &Path,
+        client_id: &str,
+    ) -> Result<(), String> {
+        let Some(document) = operation.context.document.as_ref() else {
+            return Ok(());
+        };
+        if document.request_id.len() != 32
+            || !document
+                .request_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !matches!(
+                document.operation.as_str(),
+                "present_document" | "document_edit" | "document_convert" | "document_restore"
+            )
+        {
+            return Err("invalid document worker identity".into());
+        }
+        let project = operation
+            .context
+            .runtime_project_id
+            .as_deref()
+            .ok_or("document worker requires project identity")?;
+        let response =
+            self.document_worker_spec(project, &document.project_root, registry, client_id);
+        let Some(PluginGatewayResponsePayload::DocumentWorker { spec }) = response.payload else {
+            return Err("document provider binding changed before process admission".into());
+        };
+        let mut expected_args = spec.args;
+        expected_args.extend([
+            "--request".into(),
+            "-".into(),
+            "--result".into(),
+            format!(".webcodex-office/cache/{}/result.json", document.request_id),
+        ]);
+        if spec.provider_id != document.provider_id
+            || spec.provider_instance_id != document.provider_instance_id
+            || operation.process.executable != spec.executable
+            || operation.process.args != expected_args
+            || !operation
+                .cwd
+                .as_deref()
+                .and_then(|cwd| super::shell::canonicalize_existing(Path::new(cwd)).ok())
+                .is_some_and(|cwd| {
+                    webcodex_runner_config::paths::paths_equal(&cwd, Path::new(&spec.cwd))
+                })
+        {
+            return Err(
+                "document worker execution no longer matches the exact provider instance".into(),
+            );
+        }
+        let input: serde_json::Value = serde_json::from_str(
+            operation
+                .stdin
+                .as_deref()
+                .ok_or("document request is missing")?,
+        )
+        .map_err(|_| "invalid document request JSON")?;
+        if input.get("request_id").and_then(serde_json::Value::as_str)
+            != Some(document.request_id.as_str())
+            || input.get("operation").and_then(serde_json::Value::as_str)
+                != Some(document.operation.as_str())
+            || input
+                .pointer("/arguments/path")
+                .and_then(serde_json::Value::as_str)
+                != Some(document.source_path.as_str())
+        {
+            return Err("document request does not match Job continuation identity".into());
+        }
+        Ok(())
     }
 
     fn provider_views(&self) -> Vec<PluginProviderView> {

@@ -853,7 +853,7 @@ impl ToolRuntime {
             Ok(value) => value,
             Err(reason) => return git_review_failure(&project, &base, &head_commit, reason),
         };
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(error) => return error.into_tool_result(),
         };

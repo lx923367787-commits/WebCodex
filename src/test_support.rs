@@ -8,6 +8,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[path = "test_support/runner_project_files.rs"]
+pub(crate) mod runner_project_files;
+
 thread_local! {
     static TOOL_REQUEST_TRACE_ENV_READ_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }

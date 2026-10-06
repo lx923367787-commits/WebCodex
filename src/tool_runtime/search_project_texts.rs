@@ -527,7 +527,7 @@ impl ToolRuntime {
         project: String,
         queries: Vec<SearchProjectTextsQuery>,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(project) => project,
             Err(error) => return error.into_tool_result(),
         };
@@ -545,7 +545,7 @@ impl ToolRuntime {
 
         let runtime_project_id = resolved.resolved_id.clone();
         let requested_count = queries.len();
-        let deadline = Instant::now() + self.search_project_texts_deadline;
+        let deadline = Instant::now() + self.config.search_project_texts_deadline;
         // Validation, Runner enqueue, and response waiting all happen inside
         // the concurrency slot. A third query cannot enter the Runner queue
         // while two earlier queries still hold their slots.

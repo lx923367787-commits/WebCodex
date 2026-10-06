@@ -74,7 +74,8 @@ pub(crate) fn builtin_coding_workflow_projection() -> Value {
             "context_sidecar": "context_request adds bounded context after the main tool and never authorizes effects. Recover lost project.instructions with an observation call before dependent mutation.",
             "runner_targeting": "For exact Runner client_id, use runtime_status(client_id=...) or list_projects(client_id=...) before treating it as absent.",
             "persistent_shell": "Persistent shell is primarily for repeated remote commands on one named SSH resource, preserving remote cwd/env/exports/functions/umask. Ordinary local coding stays on structured tools -> run_process/run_script -> run_shell for shell syntax; use local persistent shell only when same-process state is required.",
-            "normal_closeout": "Normal success: finish_coding_task(summary_only=true); full closeout only for unresolved evidence or handoff/debug."
+            "normal_closeout": "Normal success: finish_coding_task(summary_only=true); full closeout only for unresolved evidence or handoff/debug.",
+            "goal_mode": "On request: 开启目标模式 -> goal_mode_start; 继续本地当前任务 -> goal_bootstrap. category=goal is a directory, not the full contract. Before first use, read tool_manifest(tool_name=<name>); never guess parameters/behavior from names or summaries. Reuse known unchanged contracts."
         },
         "roles": {
             "implementation_owner": {

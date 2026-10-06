@@ -1,0 +1,23 @@
+{
+  "kind": "flowchart",
+  "title": "日常办公任务流程",
+  "direction": "TB",
+  "nodes": [
+    {"id": "start", "label": "开始", "shape": "start"},
+    {"id": "collect", "label": "整理资料与任务要求"},
+    {"id": "prepare", "label": "制作内容初稿"},
+    {"id": "check", "label": "核对是否通过？", "shape": "decision"},
+    {"id": "revise", "label": "按反馈修改"},
+    {"id": "deliver", "label": "保存并交付结果"},
+    {"id": "end", "label": "完成", "shape": "end"}
+  ],
+  "edges": [
+    {"from": "start", "to": "collect"},
+    {"from": "collect", "to": "prepare"},
+    {"from": "prepare", "to": "check"},
+    {"from": "check", "to": "deliver", "label": "是"},
+    {"from": "check", "to": "revise", "label": "否"},
+    {"from": "revise", "to": "check"},
+    {"from": "deliver", "to": "end"}
+  ]
+}

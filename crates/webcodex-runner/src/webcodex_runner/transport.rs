@@ -1,9 +1,13 @@
+pub(crate) mod http;
+pub(crate) mod polling;
+
 use super::config::{
     max_concurrent_jobs, project_registry_dir, validate_quic_config, HotRunnerConfig,
     QuicClientConfig, ReloadableRunnerConfig, RunnerConfig,
 };
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use super::detached_job::DetachedJobStore;
+use super::dispatch_request_with_outcome;
 #[cfg(windows)]
 use super::exit_diagnostics::RunnerExitDiagnostics;
 use super::lsp::LspSupervisor;
@@ -26,11 +30,16 @@ use crate::runner_protocol::{
     ShellJobInventory, ShellProjectInventoryPage, ShellProjectInventoryStatus,
     PROJECT_INVENTORY_PAGE_MAX_SERIALIZED_BYTES, PROJECT_INVENTORY_PAGE_MAX_SUMMARIES,
 };
-use crate::{
-    build_register_request_with_provider_status, dispatch_request_with_outcome, handle_one_poll,
-    register, CommandResult, JobManager, PollingDispatchSupervisor, PollingRecoveryAction,
-    RegisterRecoveryAction, RunnerHttpError, RunnerHttpErrorKind,
-};
+use crate::webcodex_runner::jobs::JobManager;
+use crate::webcodex_runner::registration::build_register_request_with_provider_status;
+use crate::webcodex_runner::registration::register;
+use crate::webcodex_runner::registration::RegisterRecoveryAction;
+use crate::webcodex_runner::transport::http::RunnerHttpError;
+use crate::webcodex_runner::transport::http::RunnerHttpErrorKind;
+use crate::webcodex_runner::transport::polling::handle_one_poll;
+use crate::webcodex_runner::transport::polling::PollingDispatchSupervisor;
+use crate::webcodex_runner::transport::polling::PollingRecoveryAction;
+use crate::CommandResult;
 use reqwest::blocking::Client;
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -1449,7 +1458,9 @@ where
     T: serde::Serialize + ?Sized,
     R: serde::de::DeserializeOwned,
 {
-    crate::post_json_with_auth(client, server_url, token, path, body)
+    crate::webcodex_runner::transport::http::post_json_with_auth(
+        client, server_url, token, path, body,
+    )
 }
 
 pub(crate) fn non_empty_token(token: &str) -> Option<String> {
@@ -1482,12 +1493,12 @@ pub(crate) fn run_runner(
         .to_string();
     #[cfg(windows)]
     let exit_diagnostics = {
-        let build = crate::runner_build_info();
+        let build = crate::webcodex_runner::registration::runner_build_info();
         match RunnerExitDiagnostics::start(
             &cfg.client_id,
             &cfg.server_url,
             &transport,
-            crate::process_started_at(),
+            crate::webcodex_runner::registration::process_started_at(),
             build.version.as_deref(),
             build.git_commit.as_deref(),
             build.git_dirty,
@@ -2184,7 +2195,7 @@ enum PollFailureDirective {
 
 #[allow(clippy::too_many_arguments)]
 fn handle_poll_failure(
-    error: crate::PollError,
+    error: crate::webcodex_runner::transport::polling::PollError,
     cfg: &RunnerConfig,
     runtime: &RunnerRuntimeState,
     shutdown: &AtomicBool,

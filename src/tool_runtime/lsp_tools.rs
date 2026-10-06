@@ -190,7 +190,7 @@ impl ToolRuntime {
     }
 
     async fn call_agent_lsp(&self, project: String, request: RunnerLspRequest) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(p) => p,
             Err(e) => return e.into_tool_result(),
         };

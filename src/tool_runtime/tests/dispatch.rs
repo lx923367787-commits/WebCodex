@@ -675,6 +675,7 @@ async fn register_project_crosses_historical_64_threshold_and_is_immediately_res
     let task = tokio::spawn(async move {
         let bootstrap = bootstrap_auth_context();
         runtime_for_task
+            .execution()
             .register_project(
                 client_id.to_string(),
                 "project-0064".to_string(),
@@ -757,6 +758,7 @@ async fn register_project_projection_failure_returns_reconcile_required_without_
     let task = tokio::spawn(async move {
         let bootstrap = bootstrap_auth_context();
         runtime_for_task
+            .execution()
             .register_project(
                 client_id.to_string(),
                 "persisted-on-runner".to_string(),

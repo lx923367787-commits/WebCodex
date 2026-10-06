@@ -46,7 +46,24 @@ pub(in crate::tool_runtime::tests) fn sample_tool_args_for_spec(spec: &ToolSpec)
             let field = field
                 .as_str()
                 .unwrap_or_else(|| panic!("{} required field should be a string", spec.name));
-            (field.to_string(), sample_field_value(field))
+            let value = if field == "goal_id"
+                && matches!(
+                    spec.name.as_str(),
+                    "goal_plan_save"
+                        | "goal_confirm_plan"
+                        | "goal_claim_node"
+                        | "goal_checkpoint"
+                        | "goal_check_node"
+                ) {
+                json!(format!("hgoal_{}", "a".repeat(32)))
+            } else if field == "expected_revision" && spec.name.starts_with("goal_") {
+                json!(1)
+            } else if field == "patch" && spec.name == "goal_checkpoint" {
+                json!({"reason":"Progress checkpoint","state":{"next_step":"Run checks"}})
+            } else {
+                sample_field_value(field)
+            };
+            (field.to_string(), value)
         })
         .collect();
     // Conditional project-source schemas cannot express one representative
@@ -89,6 +106,23 @@ pub(in crate::tool_runtime::tests) fn sample_field_value(field: &str) -> Value {
         "text" => json!("// hi\n"),
         "content" => json!("fn main() {}\n"),
         "instruction" => json!("implement the requested change"),
+        "objective" => json!("Implement and verify the requested change"),
+        "criteria" => {
+            json!([{"kind":"file_exists","id":"deliverable","description":"Deliverable exists","path":"result.txt"}])
+        }
+        "artifact_paths" => json!(["result.txt"]),
+        "goal_id" => json!(format!("wc_goal_{}", "a".repeat(32))),
+        "node_id" => json!("deliver"),
+        "plan_version" => json!(1),
+        "plan_sha256" => json!("a".repeat(64)),
+        "confirmation" => json!("I reviewed the saved plan; start it."),
+        "plan" => json!({
+            "objective":"Deliver result","deliverables":["result.txt"],
+            "final_criteria":[{"kind":"file_exists","id":"result","description":"Result exists","path":"result.txt"}],
+            "nodes":[{"id":"deliver","title":"Deliver result","work":"Write result","outputs":["result.txt"],
+                "criterion_ids":["result"],"acceptance":[{"kind":"file_exists","id":"exists","description":"Result exists","path":"result.txt"}],"failure_action":"Rework and retest"}],
+            "state_management":{"facts":"Save facts","decisions":"Save rationale","issues":"Save blockers","artifacts":"Save fingerprints","checkpoint_triggers":["node boundary"],"resume_instructions":"Read current state before proceeding"}
+        }),
         "title" => json!("Durable agent work"),
         "include_project_instructions" | "include_workflow_guidance" => json!(false),
         "content_base64" => json!("AA=="),

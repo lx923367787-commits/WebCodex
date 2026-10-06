@@ -1,0 +1,19 @@
+WebCodex customized source distribution
+
+This project is derived from yyjeqhc/webcodex:
+https://github.com/yyjeqhc/webcodex
+
+Upstream WebCodex material remains under the Apache License, Version 2.0.
+Existing upstream copyright and attribution notices remain applicable.
+
+Local customizations include goal planning and acceptance workflows,
+conversation handoff and review feedback, document/PDF/OCR workflows,
+drawing tools, and related project documentation. Original additions and
+modifications owned by the customization contributors are offered under
+the accompanying LICENSE-MIT; this does not replace upstream or third-party
+terms. See LICENSING.md for the applicable scope.
+
+Copyright (c) 2026 WebCodex customization contributors, for their original
+contributions only.
+
+This notice provides attribution and does not alter any license terms.

@@ -2789,6 +2789,8 @@ impl ShellJobStructuredExecutionMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellJobContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<DocumentJobMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_session_id: Option<String>,
@@ -2920,6 +2922,8 @@ pub struct RunnerJobResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellJobInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<DocumentJobMetadata>,
     pub job_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
@@ -2990,6 +2994,54 @@ pub struct ShellJobInfo {
     pub stdout_log_truncated: bool,
     #[serde(default)]
     pub stderr_log_truncated: bool,
+}
+
+/// Small server-owned continuation binding, persisted with the existing Job.
+/// It contains no document content, raw command, credential, or model options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentJobMetadata {
+    pub request_id: String,
+    pub operation: String,
+    pub project_root: String,
+    pub source_path: String,
+    pub provider_id: String,
+    pub provider_instance_id: String,
+    pub export_file: bool,
+}
+
+impl DocumentJobMetadata {
+    pub fn is_valid(&self) -> bool {
+        self.request_id.len() == 32
+            && self
+                .request_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && matches!(
+                self.operation.as_str(),
+                "present_document" | "document_edit" | "document_convert" | "document_restore"
+            )
+            && (!self.export_file || self.operation == "present_document")
+            && self.project_root.len() <= 4096
+            && !self.project_root.chars().any(char::is_control)
+            && crate::runtime_contract::validate_project_op_path(&self.project_root).is_ok()
+            && !self.source_path.is_empty()
+            && self.source_path.len() <= 4096
+            && !self.source_path.contains(':')
+            && !self.source_path.chars().any(char::is_control)
+            && self
+                .source_path
+                .split(['/', '\\'])
+                .all(|part| !matches!(part, "" | "." | ".."))
+            && !self
+                .source_path
+                .replace('\\', "/")
+                .to_ascii_lowercase()
+                .starts_with(".webcodex-office/")
+            && !crate::sensitive_paths::is_secret_path(&self.source_path)
+            && crate::plugin::validate_provider_id(&self.provider_id).is_ok()
+            && crate::plugin::validate_provider_instance_id(&self.provider_instance_id).is_ok()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3517,6 +3569,7 @@ mod envelope_tests {
         request.kind = "start_process_job".to_string();
         request.job_id = Some("job-process-1".to_string());
         request.job_context = Some(ShellJobContext {
+            document: None,
             runtime_project_id: None,
             workflow_session_id: None,
             ssh_resource: None,
@@ -3582,6 +3635,7 @@ mod envelope_tests {
         request.kind = "start_script_job".to_string();
         request.job_id = Some("job-script-1".to_string());
         request.job_context = Some(ShellJobContext {
+            document: None,
             runtime_project_id: None,
             workflow_session_id: None,
             ssh_resource: None,
@@ -4046,6 +4100,7 @@ mod envelope_tests {
                 error: None,
                 command_execution_state: None,
                 context: ShellJobContext {
+                    document: None,
                     runtime_project_id: Some("agent:oe:demo".to_string()),
                     workflow_session_id: Some("wc_sess_reconcile".to_string()),
                     ssh_resource: None,

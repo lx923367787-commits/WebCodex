@@ -616,7 +616,7 @@ fn model_facing_structured_execution_metadata(
 /// Build a bounded job summary `Value` for an agent-known job. Never includes
 /// stdout/stderr bodies.
 pub(crate) fn agent_job_summary_value(job: &ShellJobInfo) -> Value {
-    json!({
+    let mut output = json!({
         "job_id": job.job_id,
         "kind": job.kind,
         "status": job.status,
@@ -643,7 +643,15 @@ pub(crate) fn agent_job_summary_value(job: &ShellJobInfo) -> Value {
             job.recovery_state.as_deref(),
             job.recovery_reason_code.as_deref(),
         ),
-    })
+    });
+    if let Some(document) = job.document.as_ref() {
+        output["document"] = document_job_summary(document);
+    }
+    output
+}
+
+fn document_job_summary(document: &webcodex_core::runner_protocol::DocumentJobMetadata) -> Value {
+    json!({"operation":document.operation,"path":document.source_path,"request_id":document.request_id})
 }
 
 fn invalid_job_observation_result(error_kind: &str, message: String) -> ToolResult {
@@ -982,7 +990,11 @@ impl ToolRuntime {
                 "use run_script for larger shell program text or stdin/files/artifacts for large data.",
             ));
         }
-        let resolved = match self.resolve_project_input_for_auth(&project, auth).await {
+        let resolved = match self
+            .execution()
+            .resolve_project_input_for_auth(&project, auth)
+            .await
+        {
             Ok(resolved) => resolved,
             Err(e) => return ToolResult::err(command_rejected_message(
                 e.to_message(),
@@ -1074,6 +1086,7 @@ impl ToolRuntime {
                     },
                     "tool_runtime".to_string(),
                     ShellJobStartMetadata {
+                        document: None,
                         project_id: Some(project_id.clone()),
                         session_id: session_id.clone(),
                         ssh_resource: ssh_resource.map(str::to_string),
@@ -1182,6 +1195,9 @@ impl ToolRuntime {
                 );
                 if include_command_preview {
                     add_command_preview_metadata(&mut output, job.command_preview.clone());
+                }
+                if let Some(document) = job.document.as_ref() {
+                    output["document"] = document_job_summary(document);
                 }
                 let validation_metadata = job.validation.as_ref();
                 let tool = validation_metadata.map(|metadata| metadata.tool.as_str());
@@ -1614,7 +1630,11 @@ impl ToolRuntime {
             return job_not_found_result(&project, &job_id);
         }
 
-        let resolved = match self.resolve_project_input_for_auth(&project, auth).await {
+        let resolved = match self
+            .execution()
+            .resolve_project_input_for_auth(&project, auth)
+            .await
+        {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };
@@ -2281,6 +2301,7 @@ mod recovery_projection_tests {
     fn agent_job_summary_hides_internal_validation_correlation_metadata() {
         use crate::runner_protocol::{ShellJobInfo, ShellJobStructuredExecutionMetadata};
         let job = ShellJobInfo {
+            document: None,
             job_id: "job-validation-summary".to_string(),
             request_id: Some("req-validation-summary".to_string()),
             client_id: "oe".to_string(),
@@ -2341,6 +2362,7 @@ mod recovery_projection_tests {
     fn agent_job_summary_includes_recovery_reason() {
         use crate::runner_protocol::ShellJobInfo;
         let job = ShellJobInfo {
+            document: None,
             job_id: "job-1".to_string(),
             request_id: Some("req-1".to_string()),
             client_id: "oe".to_string(),

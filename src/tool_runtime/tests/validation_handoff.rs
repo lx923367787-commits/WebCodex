@@ -1333,7 +1333,10 @@ async fn stale_validation_terminal_snapshot_cannot_evict_newer_materialization_m
         ));
     }
 
-    let hook = runtime.validation_terminal_reconciliation_test_hook.clone();
+    let hook = runtime
+        .validation
+        .validation_terminal_reconciliation_test_hook
+        .clone();
     hook.pause_next_snapshot();
     let older_reconciliation = tokio::spawn({
         let runtime = runtime.clone();
@@ -1350,6 +1353,7 @@ async fn stale_validation_terminal_snapshot_cannot_evict_newer_materialization_m
     assert_eq!(hook.snapshot_acquisition_count(), 1);
     assert!(
         runtime
+            .validation
             .validation_terminal_reconciliation
             .try_lock()
             .is_err(),

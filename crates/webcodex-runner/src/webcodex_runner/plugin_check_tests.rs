@@ -67,6 +67,8 @@ impl CheckFixture {
         let startup_plugins = PluginConfig {
             request_timeout_secs: timeout_secs,
             providers: vec![PluginProviderConfig {
+                document_worker: None,
+                document_worker_args: Vec::new(),
                 id: "fake".to_string(),
                 name: "Fake Plugin".to_string(),
                 command: fake.path.to_string_lossy().into_owned(),

@@ -123,7 +123,7 @@ fn set_raw(
     expected_revision: Option<String>,
 ) -> ToolResult {
     let auth = shared_key_auth_context("memory-test-writer");
-    runtime.memory_set(
+    runtime.memory.memory_set(
         project,
         memory_key,
         summary,
@@ -252,7 +252,7 @@ fn memory_runtime_search_read_cas_pagination_and_project_scope_are_explicit() {
         retried_create.output["current_revision"],
         intervening_revision
     );
-    let cleanup_retry_fixture = runtime.memory_delete(
+    let cleanup_retry_fixture = runtime.memory.memory_delete(
         &project_a,
         "create-retry-defaults".to_string(),
         intervening_revision,
@@ -260,7 +260,7 @@ fn memory_runtime_search_read_cas_pagination_and_project_scope_are_explicit() {
     assert!(cleanup_retry_fixture.success);
     assert_eq!(cleanup_retry_fixture.output["deleted"], true);
 
-    let body_match = runtime.memory_search(
+    let body_match = runtime.memory.memory_search(
         &project_a,
         Some("unique_body_match".to_string()),
         None,
@@ -278,13 +278,15 @@ fn memory_runtime_search_read_cas_pagination_and_project_scope_are_explicit() {
     assert!(!serialized_search.contains("Detailed body contains"));
     assert!(serialized_search.contains("Prefer bounded typed runtimes"));
 
-    let read = runtime.memory_read(&project_a, "architecture-decisions".to_string(), None);
+    let read = runtime
+        .memory
+        .memory_read(&project_a, "architecture-decisions".to_string(), None);
     assert!(read.success);
     assert!(read.output["body"]
         .as_str()
         .unwrap()
         .contains("UNIQUE_BODY_MATCH"));
-    let stale_read = runtime.memory_read(
+    let stale_read = runtime.memory.memory_read(
         &project_a,
         "architecture-decisions".to_string(),
         Some(format!("wc_memrev_{}", "0".repeat(64))),
@@ -312,7 +314,9 @@ fn memory_runtime_search_read_cas_pagination_and_project_scope_are_explicit() {
             .success
         );
     }
-    let page1 = runtime.memory_search(&project_a, None, None, Some(0), Some(2), None);
+    let page1 = runtime
+        .memory
+        .memory_search(&project_a, None, None, Some(0), Some(2), None);
     assert!(page1.success);
     assert_eq!(page1.output["returned_count"], 2);
     assert_eq!(
@@ -328,7 +332,7 @@ fn memory_runtime_search_read_cas_pagination_and_project_scope_are_explicit() {
         .as_str()
         .unwrap()
         .to_string();
-    let page2 = runtime.memory_search(
+    let page2 = runtime.memory.memory_search(
         &project_a,
         None,
         None,
@@ -353,25 +357,31 @@ fn memory_runtime_search_read_cas_pagination_and_project_scope_are_explicit() {
         )
         .success
     );
-    let stale_page = runtime.memory_search(&project_a, None, None, Some(2), Some(2), Some(catalog));
+    let stale_page =
+        runtime
+            .memory
+            .memory_search(&project_a, None, None, Some(2), Some(2), Some(catalog));
     assert!(!stale_page.success);
     assert_eq!(stale_page.output["error_kind"], "memory_catalog_changed");
     assert!(stale_page.output.get("memories").is_none());
 
     assert_eq!(
         runtime
+            .memory
             .memory_search(&project_a_rebound, None, None, None, None, None)
             .output["total_count"],
         0
     );
     assert_eq!(
         runtime
+            .memory
             .memory_search(&project_b, None, None, None, None, None)
             .output["total_count"],
         0
     );
     assert_eq!(
         runtime
+            .memory
             .memory_read(&project_b, "architecture-decisions".to_string(), None)
             .output["error_kind"],
         "memory_not_found"
@@ -422,7 +432,9 @@ fn stale_read_is_rejected_after_a_b_a_transition() {
     assert!(a3.success);
     assert_ne!(a3.output["revision"], r1);
 
-    let stale = runtime.memory_read(&project, "aba-policy".to_string(), Some(r1));
+    let stale = runtime
+        .memory
+        .memory_read(&project, "aba-policy".to_string(), Some(r1));
     assert!(!stale.success);
     assert_eq!(stale.output["error_kind"], "memory_changed");
     assert!(stale.output.get("body").is_none());
@@ -460,7 +472,9 @@ fn memory_set_cas_update_preserves_omitted_optional_fields() {
     assert!(updated.success);
     assert_eq!(updated.output["state_changed"], true);
     let updated_revision = updated.output["revision"].as_str().unwrap().to_string();
-    let read = runtime.memory_read(&project, "preserve-fields".to_string(), None);
+    let read = runtime
+        .memory
+        .memory_read(&project, "preserve-fields".to_string(), None);
     assert_eq!(read.output["summary"], "updated summary");
     assert_eq!(read.output["body"], "ORIGINAL_BODY");
     assert_eq!(read.output["priority"], "high");
@@ -519,6 +533,7 @@ async fn memory_bootstrap_is_lightweight_explicit_bounded_and_post_tool() {
     );
 
     let bootstrap = runtime
+        .memory
         .memory_bootstrap_context_projection(&project)
         .unwrap();
     assert_eq!(bootstrap["total_count"], 3);
@@ -549,6 +564,7 @@ async fn memory_bootstrap_is_lightweight_explicit_bounded_and_post_tool() {
         );
     }
     let bounded = runtime
+        .memory
         .memory_bootstrap_context_projection(&project)
         .unwrap();
     assert_eq!(bounded["truncated"], true);
@@ -830,6 +846,7 @@ async fn memory_bootstrap_is_explicit_and_never_inferred_from_session_ack_recove
     let project_id =
         register_runner_project_at_path(&runtime, "memory-ack", "demo", root.path()).await;
     let project = runtime
+        .execution()
         .resolve_project_input_for_auth(&project_id, None)
         .await
         .unwrap();
@@ -1224,6 +1241,7 @@ async fn memory_scope_lifecycle_is_offline_safe_unregister_explicit_and_purge_on
     .await;
     let project_id = crate::tool_runtime::runner_project_runtime_id(client_id, "demo");
     let project = runtime
+        .execution()
         .resolve_project_input_for_auth(&project_id, Some(&admin))
         .await
         .unwrap();
@@ -1249,15 +1267,18 @@ async fn memory_scope_lifecycle_is_offline_safe_unregister_explicit_and_purge_on
         .last_mutated_at_unix_ms;
     assert!(
         runtime
+            .memory
             .memory_read(&project, "lifecycle-policy".to_string(), None)
             .success
     );
     assert!(
         runtime
+            .memory
             .memory_search(&project, None, None, None, None, None)
             .success
     );
     runtime
+        .memory
         .memory_bootstrap_context_projection(&project)
         .unwrap();
     let current = runtime.memory_scope_list(Some(&admin), None, None).await;
@@ -1345,6 +1366,7 @@ async fn memory_scope_lifecycle_is_offline_safe_unregister_explicit_and_purge_on
         let revision = revision.clone();
         async move {
             runtime
+                .execution()
                 .unregister_project(project_id, revision, Some(&admin))
                 .await
         }
@@ -1371,6 +1393,7 @@ async fn memory_scope_lifecycle_is_offline_safe_unregister_explicit_and_purge_on
     assert!(unregister.await.unwrap().success);
     assert!(
         runtime
+            .memory
             .memory_read(&project, "lifecycle-policy".to_string(), None)
             .success
     );
@@ -1396,6 +1419,7 @@ async fn memory_scope_lifecycle_is_offline_safe_unregister_explicit_and_purge_on
     assert!(db.get_project_memory_scope(&scope_id).unwrap().is_none());
     assert!(
         !runtime
+            .memory
             .memory_read(&project, "lifecycle-policy".to_string(), None)
             .success
     );
@@ -1420,6 +1444,7 @@ async fn memory_scope_same_project_id_new_root_does_not_migrate_old_memory() {
     .await;
     let project_id = crate::tool_runtime::runner_project_runtime_id(client_id, "demo");
     let project_a = runtime
+        .execution()
         .resolve_project_input_for_auth(&project_id, Some(&admin))
         .await
         .unwrap();
@@ -1448,6 +1473,7 @@ async fn memory_scope_same_project_id_new_root_does_not_migrate_old_memory() {
     )
     .await;
     let project_b = runtime
+        .execution()
         .resolve_project_input_for_auth(&project_id, Some(&admin))
         .await
         .unwrap();
@@ -1455,6 +1481,7 @@ async fn memory_scope_same_project_id_new_root_does_not_migrate_old_memory() {
     assert_ne!(scope_a, scope_b);
     assert!(
         !runtime
+            .memory
             .memory_read(&project_b, "root-policy".to_string(), None)
             .success
     );
@@ -1626,7 +1653,7 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
     );
     assert!(!creator_attr.principal_digest.contains("key-alice"));
 
-    let created = runtime.memory_set(
+    let created = runtime.memory.memory_set(
         &project,
         "provenance".to_string(),
         "Initial guidance".to_string(),
@@ -1641,6 +1668,7 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
     let created_revision = created.output["revision"].as_str().unwrap().to_string();
     let scope_id = super::super::memory::memory_scope_id(&project);
     let stored_created = runtime
+        .memory
         .memory_db
         .as_ref()
         .unwrap()
@@ -1657,6 +1685,7 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
         stored_created.created_by_principal_digest
     );
     let persisted_provenance: (String, Option<String>, String, Option<String>) = runtime
+        .memory
         .memory_db
         .as_ref()
         .unwrap()
@@ -1673,7 +1702,9 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
     assert!(!persisted_provenance_text.contains("key-alice"));
     assert!(!persisted_provenance_text.contains("user-alice"));
 
-    let read = runtime.memory_read(&project, "provenance".to_string(), None);
+    let read = runtime
+        .memory
+        .memory_read(&project, "provenance".to_string(), None);
     assert_eq!(
         read.output["provenance"]["created_by_kind"],
         creator.principal_kind()
@@ -1686,17 +1717,19 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
     assert!(!read_text.contains("wc_memprincipal_"));
     assert!(!read_text.contains("key-alice"));
     let search_text = runtime
+        .memory
         .memory_search(&project, None, None, None, None, None)
         .output
         .to_string();
     let bootstrap_text = runtime
+        .memory
         .memory_bootstrap_context_projection(&project)
         .unwrap()
         .to_string();
     assert!(!search_text.contains("wc_memprincipal_"));
     assert!(!bootstrap_text.contains("wc_memprincipal_"));
 
-    let no_op_other = runtime.memory_set(
+    let no_op_other = runtime.memory.memory_set(
         &project,
         "provenance".to_string(),
         "Initial guidance".to_string(),
@@ -1711,6 +1744,7 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
     assert_eq!(no_op_other.output["state_changed"], false);
     assert_eq!(no_op_other.output["revision"], created_revision);
     let after_no_op = runtime
+        .memory
         .memory_db
         .as_ref()
         .unwrap()
@@ -1722,7 +1756,7 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
         stored_created.updated_by_principal_digest
     );
 
-    let updated = runtime.memory_set(
+    let updated = runtime.memory.memory_set(
         &project,
         "provenance".to_string(),
         "Updated guidance".to_string(),
@@ -1737,6 +1771,7 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
     assert_eq!(updated.output["state_changed"], true);
     let updated_revision = updated.output["revision"].as_str().unwrap().to_string();
     let stored_updated = runtime
+        .memory
         .memory_db
         .as_ref()
         .unwrap()
@@ -1753,7 +1788,7 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
         stored_updated.updated_by_principal_digest.as_deref(),
         Some(other_kind_attr.principal_digest.as_str())
     );
-    let no_op_cas = runtime.memory_set(
+    let no_op_cas = runtime.memory.memory_set(
         &project,
         "provenance".to_string(),
         "Updated guidance".to_string(),
@@ -1769,6 +1804,7 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
     assert_eq!(no_op_cas.output["revision"], updated_revision);
     assert_eq!(
         runtime
+            .memory
             .memory_db
             .as_ref()
             .unwrap()
@@ -1778,7 +1814,9 @@ fn memory_provenance_digest_is_stable_private_and_updates_only_on_real_content_c
             .updated_by_principal_digest,
         stored_updated.updated_by_principal_digest
     );
-    let final_read = runtime.memory_read(&project, "provenance".to_string(), None);
+    let final_read = runtime
+        .memory
+        .memory_read(&project, "provenance".to_string(), None);
     assert_eq!(final_read.output["provenance"]["created_by_kind"], "user");
     assert_eq!(final_read.output["provenance"]["updated_by_kind"], "oauth2");
 }
@@ -1933,6 +1971,7 @@ async fn session_and_skill_observations_do_not_automatically_create_memory() {
     let project_id =
         register_runner_project_at_path(&runtime, "memory-no-auto", "demo", root.path()).await;
     let project = runtime
+        .execution()
         .resolve_project_input_for_auth(&project_id, None)
         .await
         .unwrap();
@@ -1954,6 +1993,7 @@ async fn session_and_skill_observations_do_not_automatically_create_memory() {
         .unwrap();
     assert_eq!(
         runtime
+            .memory
             .memory_search(&project, None, None, None, None, None)
             .output["total_count"],
         0
@@ -2015,6 +2055,7 @@ async fn session_and_skill_observations_do_not_automatically_create_memory() {
     assert_eq!(skill_result.output["total_count"], 0);
     assert_eq!(
         runtime
+            .memory
             .memory_search(&project, None, None, None, None, None)
             .output["total_count"],
         0,

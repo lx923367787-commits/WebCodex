@@ -203,6 +203,7 @@ export function projectReadinessLabel(value: ProjectReadiness, t: Translate) {
 const operationKeys: Record<DesktopOperationKind, MessageKey> = {
   local_setup: "operation.localSetup",
   local_project_activate: "operation.localProjectActivate",
+  project_management: "operation.projectManagement",
   remote_setup: "operation.remoteSetup",
   quick_share_start: "operation.quickShareStart",
   quick_share_stop: "operation.quickShareStop",

@@ -10,6 +10,8 @@ Daily self-hosted setup:\n\
   login                         Log the project machine in with that code\n\
   project register              Add an existing project for a stopped/legacy Runner\n\
   project activate              Activate an existing project on the current Runner\n\
+  project list                  List projects on one saved Runner connection\n\
+  project enable|disable|unregister  Manage project registrations with admin authority\n\
   runner                        Configure and operate the Runner\n\
   See `webcodex server --help` and `webcodex runner --help` for full lifecycle commands.\n\n\
 Existing Server:\n\

@@ -844,7 +844,7 @@ impl ToolRuntime {
         items: Vec<ReadFilesItem>,
         with_line_numbers: Option<bool>,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(project) => project,
             Err(error) => return ToolResult::err(error),
         };
@@ -867,7 +867,7 @@ impl ToolRuntime {
         let runtime_project_id = resolved.resolved_id.clone();
         let requested_count = items.len();
         let with_line_numbers = with_line_numbers.unwrap_or(false);
-        let deadline = Instant::now() + self.read_files_deadline;
+        let deadline = Instant::now() + self.config.read_files_deadline;
 
         // The concurrency slot covers validation, enqueue, and response wait.
         // No request can reach the Runner until its future is polled by

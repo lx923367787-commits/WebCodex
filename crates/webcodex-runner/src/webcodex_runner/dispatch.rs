@@ -18,7 +18,9 @@ use crate::runner_protocol::{
     RunnerJobUpdateRequest, RunnerRequest, EXTERNAL_SEARCH_REQUEST_PREFIX,
     RUNNER_CONFIG_RESPONSE_MAX_BYTES,
 };
-use crate::{handle_file_operation, JobManager, PendingJobStart};
+use crate::webcodex_runner::files::dispatch::handle_file_operation;
+use crate::webcodex_runner::jobs::JobManager;
+use crate::webcodex_runner::jobs::PendingJobStart;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use webcodex_core::runner_operation::{
@@ -180,7 +182,8 @@ fn submit_invalid_job_start(sink: &RunnerSink, request: &RunnerRequest, error: S
     } else {
         format!("invalid Runner Job request: {error}")
     };
-    let command_execution_state = crate::decode_failure_prestart_lifecycle(request);
+    let command_execution_state =
+        crate::webcodex_runner::jobs::lifecycle::decode_failure_prestart_lifecycle(request);
     let _ = sink.send_job_update(&RunnerJobUpdateRequest {
         client_id: sink.client_id().to_string(),
         runner_instance_id: sink.runner_instance_id().to_string(),
@@ -368,6 +371,21 @@ pub(crate) fn dispatch_request_with_outcome(
             })
         }
     };
+    if let RunnerOperation::Job(RunnerJobOperation::StartProcess(operation)) = &invocation.operation
+    {
+        if let Err(error) = runtime.plugins().validate_document_process(
+            operation,
+            project_registry_dir,
+            &invocation.metadata.client_id,
+        ) {
+            return submit_decode_failure(sink, config, runtime, request, error).map(|handled| {
+                RunnerDispatchOutcome {
+                    handled,
+                    project_cache_invalidation_required: false,
+                }
+            });
+        }
+    }
     let project_cache_invalidation_required =
         matches!(&invocation.operation, RunnerOperation::Project(_));
     let invocation_metadata = invocation.metadata.clone();
@@ -394,9 +412,22 @@ pub(crate) fn dispatch_request_with_outcome(
         RunnerOperation::McpGateway(operation) => sink
             .submit_mcp_gateway_result(request_id, runtime.mcp_gateway().handle(operation))
             .map(|_| true),
-        RunnerOperation::PluginGateway(operation) => sink
-            .submit_plugin_gateway_result(request_id, runtime.plugins().handle(operation))
-            .map(|_| true),
+        RunnerOperation::PluginGateway(operation) => {
+            let result = match operation {
+                webcodex_core::plugin::PluginGatewayRequest::DocumentWorkerSpec {
+                    project_id,
+                    project_root,
+                } => runtime.plugins().document_worker_spec(
+                    &project_id,
+                    &project_root,
+                    project_registry_dir,
+                    &client_id,
+                ),
+                other => runtime.plugins().handle(other),
+            };
+            sink.submit_plugin_gateway_result(request_id, result)
+                .map(|_| true)
+        }
         RunnerOperation::RunnerConfig(operation) => {
             let result = handle_runner_config_operation(runtime, &operation);
             // A reload may have replaced the snapshot passed into dispatch_request.

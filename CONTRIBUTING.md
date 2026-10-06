@@ -71,5 +71,8 @@ a change affects authentication, authorization, process lifecycle, persistence,
 public protocol behavior, or another trust boundary, include focused regression
 evidence for that boundary.
 
-By contributing, you agree that your contribution is licensed under the
-repository's [Apache License 2.0](LICENSE).
+Original contributions to this customized repository that you own are offered
+under [MIT](LICENSE-MIT), unless explicitly agreed otherwise. Inherited upstream
+material retains [Apache License 2.0](LICENSE), and copied third-party material
+retains its existing terms. Do not relicense another author's work. See
+[LICENSING.md](LICENSING.md) for the applicable scope.

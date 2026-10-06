@@ -49,6 +49,7 @@ impl SessionShellRecord {
     /// ControlPath, credentials, or command text.
     fn job_context(&self) -> Option<ShellJobContext> {
         self.resource.as_ref().map(|resource| ShellJobContext {
+            document: None,
             runtime_project_id: Some(self.runtime_project_id.clone()),
             workflow_session_id: Some(self.workflow_session_id.clone()),
             ssh_resource: Some(resource.clone()),
@@ -389,7 +390,7 @@ impl ToolRuntime {
         shell: Option<ExecutionShell>,
         ssh_resource: Option<&str>,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(error) => return error.into_tool_result(),
         };
@@ -411,6 +412,7 @@ impl ToolRuntime {
                 Err(error) => return shell_tool_error("persistent_shell_cwd_invalid", error, None),
             };
             let shell_id = match self
+                .execution_state
                 .session_shells
                 .reserve_open(
                     &session_id,
@@ -427,6 +429,7 @@ impl ToolRuntime {
                 Err(error) => return shell_tool_error_from_message(error, None),
             };
             let job_context = ShellJobContext {
+                document: None,
                 runtime_project_id: Some(runtime_project_id.clone()),
                 workflow_session_id: Some(session_id.clone()),
                 ssh_resource: Some(resource.to_string()),
@@ -457,6 +460,7 @@ impl ToolRuntime {
                 Ok(result) => result,
                 Err(error) => {
                     if let Ok(record) = self
+                        .execution_state
                         .session_shells
                         .record_for_operation(&session_id, &runtime_project_id, &shell_id)
                         .await
@@ -467,7 +471,10 @@ impl ToolRuntime {
                     return shell_tool_lost_error_from_message(error, Some(&shell_id));
                 }
             };
-            self.session_shells.apply_result(&result).await;
+            self.execution_state
+                .session_shells
+                .apply_result(&result)
+                .await;
             if let Some(error) = self
                 .close_opened_shell_if_session_inactive(&session_id, &runtime_project_id, &shell_id)
                 .await
@@ -491,6 +498,7 @@ impl ToolRuntime {
             Err(error) => return shell_tool_error("persistent_shell_cwd_invalid", error, None),
         };
         let shell_id = match self
+            .execution_state
             .session_shells
             .reserve_open(
                 &session_id,
@@ -524,6 +532,7 @@ impl ToolRuntime {
             Ok(result) => result,
             Err(error) => {
                 if let Ok(record) = self
+                    .execution_state
                     .session_shells
                     .record_for_operation(&session_id, &runtime_project_id, &shell_id)
                     .await
@@ -534,7 +543,10 @@ impl ToolRuntime {
                 return shell_tool_lost_error_from_message(error, Some(&shell_id));
             }
         };
-        self.session_shells.apply_result(&result).await;
+        self.execution_state
+            .session_shells
+            .apply_result(&result)
+            .await;
         if let Some(error) = self
             .close_opened_shell_if_session_inactive(&session_id, &runtime_project_id, &shell_id)
             .await
@@ -562,7 +574,7 @@ impl ToolRuntime {
         timeout_secs: Option<u64>,
         purpose: Option<ExecutionPurpose>,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(error) => return error.into_tool_result(),
         };
@@ -576,6 +588,7 @@ impl ToolRuntime {
             );
         }
         let record = match self
+            .execution_state
             .session_shells
             .begin_exec(&session_id, &runtime_project_id, &shell_id)
             .await
@@ -617,7 +630,10 @@ impl ToolRuntime {
                 return shell_tool_lost_error_from_message(error, Some(&shell_id));
             }
         };
-        self.session_shells.apply_result(&result).await;
+        self.execution_state
+            .session_shells
+            .apply_result(&result)
+            .await;
         persistent_result_to_tool(
             result,
             &project_config,
@@ -636,13 +652,14 @@ impl ToolRuntime {
         session_id: String,
         shell_id: String,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(error) => return error.into_tool_result(),
         };
         let runtime_project_id = resolved.resolved_id;
         let project_config = resolved.config;
         let record = match self
+            .execution_state
             .session_shells
             .record_for_operation(&session_id, &runtime_project_id, &shell_id)
             .await
@@ -679,7 +696,10 @@ impl ToolRuntime {
                 return shell_tool_lost_error_from_message(error, Some(&shell_id));
             }
         };
-        self.session_shells.apply_result(&result).await;
+        self.execution_state
+            .session_shells
+            .apply_result(&result)
+            .await;
         persistent_result_to_tool(
             result,
             &project_config,
@@ -698,13 +718,14 @@ impl ToolRuntime {
         session_id: String,
         shell_id: String,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(error) => return error.into_tool_result(),
         };
         let runtime_project_id = resolved.resolved_id;
         let project_config = resolved.config;
         let record = match self
+            .execution_state
             .session_shells
             .record_for_operation(&session_id, &runtime_project_id, &shell_id)
             .await
@@ -718,7 +739,10 @@ impl ToolRuntime {
         let result = self.close_record(&record, "explicit_close").await;
         match result {
             Ok(result) => {
-                self.session_shells.apply_result(&result).await;
+                self.execution_state
+                    .session_shells
+                    .apply_result(&result)
+                    .await;
                 persistent_result_to_tool(
                     result,
                     &project_config,
@@ -731,7 +755,10 @@ impl ToolRuntime {
                 )
             }
             Err(error) => {
-                self.session_shells.mark_lost(&shell_id, &error).await;
+                self.execution_state
+                    .session_shells
+                    .mark_lost(&shell_id, &error)
+                    .await;
                 shell_tool_lost_error_from_message(error, Some(&shell_id))
             }
         }
@@ -762,7 +789,11 @@ impl ToolRuntime {
     }
 
     async fn reconcile_active_shell_before_open(&self, session_id: &str, runtime_project_id: &str) {
-        let records = self.session_shells.active_for_session(session_id).await;
+        let records = self
+            .execution_state
+            .session_shells
+            .active_for_session(session_id)
+            .await;
         for record in records
             .into_iter()
             .filter(|record| record.runtime_project_id == runtime_project_id)
@@ -786,9 +817,15 @@ impl ToolRuntime {
                 )
                 .await;
             match result {
-                Ok(result) => self.session_shells.apply_result(&result).await,
+                Ok(result) => {
+                    self.execution_state
+                        .session_shells
+                        .apply_result(&result)
+                        .await
+                }
                 Err(error) => {
-                    self.session_shells
+                    self.execution_state
+                        .session_shells
                         .mark_lost(&record.shell_id, &error)
                         .await
                 }
@@ -810,6 +847,7 @@ impl ToolRuntime {
             return None;
         }
         if let Ok(record) = self
+            .execution_state
             .session_shells
             .record_for_operation(session_id, runtime_project_id, shell_id)
             .await
@@ -819,11 +857,17 @@ impl ToolRuntime {
                 .await
             {
                 Ok(result) => {
-                    self.session_shells.apply_result(&result).await;
+                    self.execution_state
+                        .session_shells
+                        .apply_result(&result)
+                        .await;
                     self.record_session_close_shell_result(session_id, &result);
                 }
                 Err(error) => {
-                    self.session_shells.mark_lost(shell_id, &error).await;
+                    self.execution_state
+                        .session_shells
+                        .mark_lost(shell_id, &error)
+                        .await;
                     self.sessions
                         .record_session_close_persistent_shell_evidence(
                             session_id,
@@ -852,15 +896,20 @@ impl ToolRuntime {
         match self.close_record(record, reason).await {
             Ok(result) => {
                 let close_failed = result.error_code.is_some();
-                self.session_shells.apply_result(&result).await;
+                self.execution_state
+                    .session_shells
+                    .apply_result(&result)
+                    .await;
                 if close_failed {
-                    self.session_shells
+                    self.execution_state
+                        .session_shells
                         .mark_lost(&record.shell_id, original_error)
                         .await;
                 }
             }
             Err(_) => {
-                self.session_shells
+                self.execution_state
+                    .session_shells
                     .mark_lost(&record.shell_id, original_error)
                     .await
             }
@@ -868,19 +917,27 @@ impl ToolRuntime {
     }
 
     pub(crate) async fn close_persistent_shells_for_session(&self, session_id: &str) -> usize {
-        let records = self.session_shells.active_for_session(session_id).await;
+        let records = self
+            .execution_state
+            .session_shells
+            .active_for_session(session_id)
+            .await;
         let mut closed = 0usize;
         for record in records {
             match self.close_record(&record, "workflow_session_closed").await {
                 Ok(result) => {
-                    self.session_shells.apply_result(&result).await;
+                    self.execution_state
+                        .session_shells
+                        .apply_result(&result)
+                        .await;
                     self.record_session_close_shell_result(session_id, &result);
                     if result.error_code.is_none() {
                         closed = closed.saturating_add(1);
                     }
                 }
                 Err(error) => {
-                    self.session_shells
+                    self.execution_state
+                        .session_shells
                         .mark_lost(&record.shell_id, &error)
                         .await;
                     self.sessions

@@ -1890,7 +1890,7 @@ impl ToolRuntime {
             Ok(paths) => paths,
             Err(e) => return ToolResult::err(e),
         };
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(project) => project,
             Err(error) => return ToolResult::err(error),
         };
@@ -2143,7 +2143,7 @@ impl ToolRuntime {
         }
 
         // ---- Project resolution (Runner-registered only) ----
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
@@ -2296,7 +2296,7 @@ impl ToolRuntime {
             }
         };
 
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(project) => project,
             Err(error) => return ToolResult::err(error),
         };
@@ -2532,7 +2532,7 @@ impl ToolRuntime {
             }
         };
 
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };

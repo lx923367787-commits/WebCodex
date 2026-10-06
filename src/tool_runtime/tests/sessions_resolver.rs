@@ -4,10 +4,35 @@ use super::super::*;
 use super::support::*;
 use crate::runner_protocol::RunnerResultRequest;
 
+/// The existing public field remains the single registry even after callers
+/// replace it. A service must not retain an independently mutable stale Arc.
+#[tokio::test]
+async fn execution_service_uses_replaced_public_registry_and_clone_keeps_its_registry() {
+    let mut runtime = runtime_with_resolver_projects().await;
+    let original = runtime.clone();
+    runtime.runner_registry = std::sync::Arc::new(crate::runner_http::RunnerRegistry::default());
+
+    assert!(runtime
+        .execution()
+        .resolve_project_input("other-repo")
+        .await
+        .is_err());
+    assert_eq!(
+        original
+            .execution()
+            .resolve_project_input("other-repo")
+            .await
+            .unwrap()
+            .resolved_id,
+        "agent:workstation:other-repo"
+    );
+}
+
 #[tokio::test]
 async fn project_resolver_resolves_full_id() {
     let runtime = runtime_with_resolver_projects().await;
     let resolved = runtime
+        .execution()
         .resolve_project_input("agent:workstation:my-repo")
         .await
         .unwrap();
@@ -20,6 +45,7 @@ async fn project_resolver_resolves_full_id() {
 async fn project_resolver_resolves_client_project_shorthand() {
     let runtime = runtime_with_resolver_projects().await;
     let resolved = runtime
+        .execution()
         .resolve_project_input("workstation:my-repo")
         .await
         .unwrap();
@@ -29,14 +55,22 @@ async fn project_resolver_resolves_client_project_shorthand() {
 #[tokio::test]
 async fn project_resolver_resolves_unique_short_id() {
     let runtime = runtime_with_resolver_projects().await;
-    let resolved = runtime.resolve_project_input("other-repo").await.unwrap();
+    let resolved = runtime
+        .execution()
+        .resolve_project_input("other-repo")
+        .await
+        .unwrap();
     assert_eq!(resolved.resolved_id, "agent:workstation:other-repo");
 }
 
 #[tokio::test]
 async fn project_resolver_ambiguous_short_id_returns_candidates() {
     let runtime = runtime_with_resolver_projects().await;
-    let err = runtime.resolve_project_input("my-repo").await.unwrap_err();
+    let err = runtime
+        .execution()
+        .resolve_project_input("my-repo")
+        .await
+        .unwrap_err();
     assert_eq!(err.kind, ProjectResolverErrorKind::AmbiguousProject);
     assert_eq!(err.project, "my-repo");
     let ids: Vec<String> = err
@@ -57,6 +91,7 @@ async fn project_resolver_ambiguous_short_id_returns_candidates() {
 async fn project_resolver_unknown_id_returns_candidates() {
     let runtime = runtime_with_resolver_projects().await;
     let err = runtime
+        .execution()
         .resolve_project_input("missing-repo")
         .await
         .unwrap_err();
@@ -196,6 +231,7 @@ async fn read_file_short_id_continuation_binds_resolved_project_across_registry_
     )
     .await;
     let ambiguous = runtime
+        .execution()
         .resolve_project_input("other-repo")
         .await
         .unwrap_err();

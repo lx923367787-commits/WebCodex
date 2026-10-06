@@ -36,6 +36,10 @@ pub const PLUGIN_CATALOG_DIGEST_PREFIX: &str = "sha256:";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginGatewayRequest {
+    DocumentWorkerSpec {
+        project_id: String,
+        project_root: String,
+    },
     Check {
         provider_id: String,
     },
@@ -66,7 +70,10 @@ impl PluginGatewayRequest {
                 provider_instance_id,
                 ..
             } => Some((provider_id, provider_instance_id)),
-            Self::Check { .. } | Self::Reload | Self::ProvidersList => None,
+            Self::Check { .. }
+            | Self::Reload
+            | Self::ProvidersList
+            | Self::DocumentWorkerSpec { .. } => None,
         }
     }
 }
@@ -244,6 +251,9 @@ pub struct PluginCheckReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginGatewayResponsePayload {
+    DocumentWorker {
+        spec: DocumentWorkerSpec,
+    },
     Checked {
         report: PluginCheckReport,
     },
@@ -260,6 +270,18 @@ pub enum PluginGatewayResponsePayload {
     ToolResult {
         result: PluginToolResult,
     },
+}
+
+/// Runner-authoritative execution configuration, only used internally by the
+/// document facade. A model never receives or supplies these argv fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentWorkerSpec {
+    pub provider_id: String,
+    pub provider_instance_id: String,
+    pub executable: String,
+    pub args: Vec<String>,
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +378,23 @@ fn validate_identifier(
 
 pub fn validate_request(request: &PluginGatewayRequest) -> Result<(), String> {
     match request {
+        PluginGatewayRequest::DocumentWorkerSpec {
+            project_id,
+            project_root,
+        } => {
+            if project_id.is_empty()
+                || project_id.len() > 256
+                || project_root.is_empty()
+                || project_root.len() > 4096
+                || project_id
+                    .chars()
+                    .chain(project_root.chars())
+                    .any(char::is_control)
+            {
+                return Err("invalid document project binding".into());
+            }
+            Ok(())
+        }
         PluginGatewayRequest::Check { provider_id } => validate_provider_id(provider_id),
         PluginGatewayRequest::Reload | PluginGatewayRequest::ProvidersList => Ok(()),
         PluginGatewayRequest::ToolsList {
@@ -1075,6 +1114,22 @@ pub fn validate_response(response: &PluginGatewayResponse) -> Result<(), String>
     }
     if let Some(payload) = response.payload.as_ref() {
         match payload {
+            PluginGatewayResponsePayload::DocumentWorker { spec } => {
+                validate_provider_id(&spec.provider_id)?;
+                validate_provider_instance_id(&spec.provider_instance_id)?;
+                if spec.executable.is_empty()
+                    || spec.executable.len() > 4096
+                    || spec.cwd.is_empty()
+                    || spec.cwd.len() > 4096
+                    || spec.args.len() > 64
+                    || spec
+                        .args
+                        .iter()
+                        .any(|arg| arg.len() > 4096 || arg.contains('\0'))
+                {
+                    return Err("invalid document worker specification".into());
+                }
+            }
             PluginGatewayResponsePayload::Checked { report } => validate_check_report(report)?,
             PluginGatewayResponsePayload::Providers { providers } => {
                 validate_provider_views(providers)?
@@ -1109,6 +1164,10 @@ pub fn validate_response_for_request(
         return Ok(());
     }
     match (request, response.payload.as_ref()) {
+        (
+            PluginGatewayRequest::DocumentWorkerSpec { .. },
+            Some(PluginGatewayResponsePayload::DocumentWorker { .. }),
+        ) => {}
         (
             PluginGatewayRequest::Check { provider_id },
             Some(PluginGatewayResponsePayload::Checked { report }),

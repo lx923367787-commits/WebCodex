@@ -254,7 +254,7 @@ async fn audit_request_with_identity(
         .filter(|object| object.get("action").and_then(Value::as_str) == Some("call"))
         .and_then(|object| object.get("binding"))
         .and_then(Value::as_str)
-        .and_then(|binding| runtime.plugin_gateway.binding(binding))
+        .and_then(|binding| runtime.gateways.plugin_gateway.binding(binding))
     else {
         return audit;
     };
@@ -277,15 +277,10 @@ fn audit_arguments_with_resolved_binding(mut audit: Value, binding: &PluginBindi
 
 #[derive(Debug, Clone)]
 pub(crate) struct PluginInvocationResult {
-    operation: PluginOperation,
     result: Result<GatewaySuccess, GatewayError>,
 }
 
 impl PluginInvocationResult {
-    pub(crate) fn policy(&self) -> SpecializedOperationPolicy {
-        self.operation.policy()
-    }
-
     pub(crate) fn success(&self) -> bool {
         match &self.result {
             Ok(GatewaySuccess::Metadata(_)) => true,
@@ -311,10 +306,6 @@ impl PluginInvocationResult {
             Err(error) => Some(error.code.as_str()),
             _ => None,
         }
-    }
-
-    pub(crate) fn to_mcp_result(&self) -> Value {
-        render_gateway_result(self.result.clone())
     }
 
     pub(crate) fn to_tool_result(&self) -> ToolResult {
@@ -370,7 +361,7 @@ pub(crate) async fn invoke(
         .await?;
 
     let result = execute_business(runtime, operation, request, auth).await;
-    let invocation = PluginInvocationResult { operation, result };
+    let invocation = PluginInvocationResult { result };
     runtime.finish_specialized_invocation(
         permit,
         invocation.success(),
@@ -569,7 +560,7 @@ async fn describe(
                 "the requested tool is not present on the current effective Plugin provider",
             )
         })?;
-    let binding = runtime.plugin_gateway.remember(PluginBinding {
+    let binding = runtime.gateways.plugin_gateway.remember(PluginBinding {
         client_id: runner.client_id.clone(),
         runner_instance_id: runner.runner_instance_id.clone(),
         provider_id: provider.provider_id.clone(),
@@ -670,6 +661,7 @@ async fn call_plugin(
         GatewayError::local("invalid_arguments", "tool arguments exceed Plugin bounds")
     })?;
     let observed = runtime
+        .gateways
         .plugin_gateway
         .binding(&binding_id)
         .ok_or_else(describe_required_error)?;
@@ -681,7 +673,7 @@ async fn call_plugin(
         .await
         .map_err(|_| describe_required_error())?;
     if runner.runner_instance_id != observed.runner_instance_id {
-        runtime.plugin_gateway.forget(&binding_id);
+        runtime.gateways.plugin_gateway.forget(&binding_id);
         return Err(GatewayError::local(
             "plugin_replaced",
             "the exact Runner instance described by this binding is no longer current",
@@ -709,7 +701,7 @@ async fn call_plugin(
         Ok(response) => response,
         Err(mut error) => {
             if error.code == "plugin_replaced" {
-                runtime.plugin_gateway.forget(&binding_id);
+                runtime.gateways.plugin_gateway.forget(&binding_id);
                 error.recovery = Some(
                     "Re-describe this Plugin tool. WebCodex did not retarget or replay the call.",
                 );
@@ -726,7 +718,7 @@ async fn call_plugin(
                 | "stale_plugin_provider"
                 | "plugin_provider_unavailable"
         ) {
-            runtime.plugin_gateway.forget(&binding_id);
+            runtime.gateways.plugin_gateway.forget(&binding_id);
         }
         let mut error = response_error(state, error);
         if matches!(
@@ -1035,21 +1027,6 @@ fn describe_required_error() -> GatewayError {
     )
 }
 
-fn render_gateway_result(result: Result<GatewaySuccess, GatewayError>) -> Value {
-    match result {
-        Ok(GatewaySuccess::Metadata(value)) => gateway_success_result(value),
-        Ok(GatewaySuccess::ToolResult(result)) => {
-            serde_json::to_value(result).unwrap_or_else(|_| {
-                gateway_error_result(GatewayError::local(
-                    "invalid_plugin_result",
-                    "Plugin result could not be encoded",
-                ))
-            })
-        }
-        Err(error) => gateway_error_result(error),
-    }
-}
-
 fn gateway_error_tool_result(error: &GatewayError) -> ToolResult {
     let state = error
         .dispatch_state
@@ -1066,34 +1043,6 @@ fn gateway_error_tool_result(error: &GatewayError) -> ToolResult {
         output["recovery"] = Value::String(recovery.to_string());
     }
     ToolResult::err_with_output(error.message.clone(), output)
-}
-
-fn gateway_success_result(value: Value) -> Value {
-    let text = serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string());
-    json!({
-        "content": [{"type": "text", "text": text}],
-        "structuredContent": value,
-        "isError": false
-    })
-}
-
-fn gateway_error_result(error: GatewayError) -> Value {
-    let dispatch_state = error.dispatch_state.map(dispatch_state_name);
-    let mut structured = json!({
-        "error": {"code": error.code, "message": error.message}
-    });
-    if let Some(state) = dispatch_state {
-        structured["dispatchState"] = Value::String(state.to_string());
-    }
-    if let Some(recovery) = error.recovery {
-        structured["recovery"] = Value::String(recovery.to_string());
-    }
-    let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{}".to_string());
-    json!({
-        "content": [{"type": "text", "text": text}],
-        "structuredContent": structured,
-        "isError": true
-    })
 }
 
 fn dispatch_state_name(state: PluginDispatchState) -> &'static str {

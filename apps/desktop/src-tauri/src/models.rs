@@ -235,6 +235,42 @@ pub struct ProjectSelection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegisteredProject {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub revision: String,
+    pub enabled: bool,
+    pub connected: bool,
+    pub agent_status: String,
+    pub active_jobs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectRegistrySnapshot {
+    pub projects: Vec<RegisteredProject>,
+    pub can_manage: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectAction {
+    Enable,
+    Disable,
+    Unregister,
+}
+
+impl ProjectAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+            Self::Unregister => "unregister",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BinaryInfo {
     pub directory: String,
     pub version: String,
@@ -274,6 +310,7 @@ pub struct RegularTunnelState {
 pub enum DesktopOperationKind {
     LocalSetup,
     LocalProjectActivate,
+    ProjectManagement,
     RemoteSetup,
     QuickShareStart,
     QuickShareStop,
@@ -291,6 +328,7 @@ impl DesktopOperationKind {
         match self {
             Self::LocalSetup => "local_setup",
             Self::LocalProjectActivate => "local_project_activate",
+            Self::ProjectManagement => "project_management",
             Self::RemoteSetup => "remote_setup",
             Self::QuickShareStart => "quick_share_start",
             Self::QuickShareStop => "quick_share_stop",

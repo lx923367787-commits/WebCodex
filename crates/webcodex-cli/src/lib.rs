@@ -106,6 +106,7 @@ enum CliAction {
     Project(Vec<String>),
     ProjectRegister(ProjectRegisterOptions),
     ProjectActivate(ProjectActivateOptions),
+    ProjectManagement(webcodex_cli::project_management::Options),
     Connect(ConnectOptions),
     Disconnect(DisconnectOptions),
     HostedLogWriter(PathBuf),
@@ -650,6 +651,15 @@ fn parse_disconnect(args: &[String]) -> CliAction {
 
 fn parse_project_subcommand(args: &[String]) -> CliAction {
     match args.first().map(String::as_str) {
+        Some("list" | "enable" | "disable" | "unregister") => {
+            if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h")) {
+                return CliAction::Exit { code: 0, stdout: webcodex_cli::project_management::USAGE.into(), stderr: String::new() };
+            }
+            match webcodex_cli::project_management::parse(args) {
+                Ok(options) => CliAction::ProjectManagement(options),
+                Err(error) => cli_parse_error(error),
+            }
+        }
         Some("activate") => {
             if args[1..]
                 .iter()
@@ -768,7 +778,7 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
         }
         Some("--help" | "-h") => CliAction::Exit {
             code: 0,
-            stdout: "Usage: webcodex project <COMMAND>\n\nCommands:\n  activate    Activate a project on the current Runner without restarting it\n  register    Add a project for a stopped/legacy Runner\n".to_string(),
+            stdout: "Usage: webcodex project <COMMAND>\n\nCommands:\n  activate    Activate a project on the current Runner without restarting it\n  register    Add a project for a stopped/legacy Runner\n  list        List projects on an exact saved Runner connection\n  enable      Enable a registered project (admin credential required)\n  disable     Disable new project work; existing Jobs may continue\n  unregister  Remove registration only; preserve all source files\n".to_string(),
             stderr: String::new(),
         },
         Some(other) => cli_parse_error(format!("unknown project subcommand: {other}")),
@@ -2624,6 +2634,18 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         },
+        CliAction::ProjectManagement(opts) => {
+            match webcodex_cli::project_management::run(opts).await {
+                Ok(output) => {
+                    println!("{output}");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         CliAction::Connect(opts) => match run_connect(opts).await {
             Ok(result) => {
                 let stdout = std::io::stdout();

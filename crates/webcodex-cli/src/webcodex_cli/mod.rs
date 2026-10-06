@@ -8,6 +8,7 @@ pub(crate) mod output;
 pub(crate) mod pairing;
 pub(crate) mod profiles;
 pub(crate) mod project;
+pub(crate) mod project_management;
 pub(crate) mod runner_service;
 pub(crate) mod server;
 pub(crate) mod service;

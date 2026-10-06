@@ -1,3 +1,4 @@
+import { GoalPanel, GOAL_ZH_TEXT } from "./goal_panel.js";
 import {
   workflowSessionOverviewPresentation,
   workflowSessionLivenessPresentation,
@@ -80,6 +81,7 @@ type RuntimeLanguage = "en" | "zh-CN";
 type RuntimeWorkspaceView = "sessions" | "operations" | "windows";
 
 const RUNTIME_ZH_TEXT: Record<string, string> = {
+  ...GOAL_ZH_TEXT,
   "Your workspace": "你的工作空间",
   "Pick up where work happens": "从这里继续工作",
   "Find a project": "查找项目",
@@ -533,6 +535,13 @@ let pendingAgentCreate: { fingerprint: string; key: string } | null = null;
 let pendingConversationCreate: { fingerprint: string; key: string } | null = null;
 let pendingConversationMessage: { fingerprint: string; key: string } | null = null;
 const pageAttachmentId = "runtime-console-" + operationKey("page");
+const goalPanel = new GoalPanel(document.getElementById("runtime-operations-goals")!, {
+  context: () => ({ key: String(state.credentialGeneration), project: String(state.selectedProject || ""), connected: !!token }),
+  call: (tool, params) => api("tools/call", { tool, params }, undefined, "/api/"),
+  translate: tr,
+  operationKey: () => operationKey("goal"),
+  unauthorized: () => lock("Runtime credential expired or was rejected."),
+});
 
 function el(id: string): HTMLElement | null {
   return document.getElementById(id);
@@ -605,6 +614,7 @@ function renderLanguageSensitiveUi(): void {
   else if (!state.workflow?.selectedSessionId) hideDetail();
   if (!snapshot) renderCollaboration(undefined, false);
   renderCommunicationSurface();
+  goalPanel.sync();
   syncCollaborationComposer();
   renderWorkspaceHeading();
   setRuntimeConnectionState(token ? "connected" : "disconnected");
@@ -750,6 +760,7 @@ function revealOperationsSection(targetId: string): void {
   const scroll = document.querySelector(".operations-scroll");
   if (scroll) scroll.scrollTop = 0;
   el(targetId)?.focus({ preventScroll: true });
+  if (targetId === "runtime-operations-goals") void goalPanel.refresh();
 }
 
 type RuntimeConnectionState = "connected" | "connecting" | "stale" | "disconnected";
@@ -1277,9 +1288,9 @@ function abortAll(): void {
   windowDetailAbort = null;
 }
 
-async function api(path: string, payload: any, signal?: AbortSignal): Promise<any> {
+async function api(path: string, payload: any, signal?: AbortSignal, base = API_BASE): Promise<any> {
   try {
-    const response = await fetch(API_BASE + path, {
+    const response = await fetch(base + path, {
       method: "POST",
       headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1705,6 +1716,7 @@ function lock(message = "", clearRemembered = true): void {
   }
   abortAll();
   invalidateRuntimeCredential(state);
+  goalPanel.sync();
   projectRows = [];
   homeProjectRows = [];
   runnerRows = [];
@@ -2005,6 +2017,7 @@ function renderWorkspaceBreadcrumb(): void {
 }
 
 function renderSelectedProjectIdentity(): void {
+  goalPanel.sync();
   const project = selectedProjectRow();
   renderWorkspaceBreadcrumb();
   if (runtimeLanguage !== "zh-CN") {
@@ -4311,6 +4324,7 @@ async function refreshAll(): Promise<void> {
       fetchOverview(overviewRequest),
       fetchProjects(projectsRequest),
       refreshCommunication(),
+      goalPanel.refresh(),
     ]);
     if (!token) return;
     if (overviewOk && projectsOk && communicationOk) {
@@ -4337,6 +4351,7 @@ function refreshAutoSurfaces(): void {
   const request = refreshRuntimeSessionList(state);
   if (request) void fetchSessions(request);
   void refreshCommunication(workspaceView === "operations");
+  if (!el("runtime-operations-goals")?.hidden && workspaceView === "operations") void goalPanel.refresh();
 }
 
 function startAuto(): void {

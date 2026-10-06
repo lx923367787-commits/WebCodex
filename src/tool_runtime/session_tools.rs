@@ -180,6 +180,7 @@ impl ToolRuntime {
         };
         let resolved = match project {
             Some(project_input) => match self
+                .execution()
                 .resolve_project_input_for_auth(&project_input, auth)
                 .await
             {
@@ -271,7 +272,11 @@ impl ToolRuntime {
         {
             return result;
         }
-        let resolved = match self.resolve_project_input_for_auth(&project, auth).await {
+        let resolved = match self
+            .execution()
+            .resolve_project_input_for_auth(&project, auth)
+            .await
+        {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };
@@ -411,6 +416,7 @@ impl ToolRuntime {
             // but still has the same canonical authority fence as every caller.
             let resolved = if let Some(auth) = auth {
                 let resolved = match self
+                    .execution()
                     .resolve_project_input_for_auth(&project, Some(auth))
                     .await
                 {

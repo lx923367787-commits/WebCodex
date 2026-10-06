@@ -13,11 +13,12 @@
 //! (`allow_cwd_anywhere` / `allowed_roots`) remain the real boundary; there is
 //! no workspace abstraction.
 
+use super::services::ExecutionService;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+use super::runner_project_runtime_id;
 use super::tool_result::{RecoveryKind, ToolResult};
-use super::{runner_project_runtime_id, ToolRuntime};
 use crate::auth::AuthContext;
 use crate::runner_http::{RunnerFeature, RunnerSemanticView};
 use crate::runner_protocol::{RunnerProjectSummary, RUNNER_CAPABILITY_PROJECT_PATH_REGISTRATION};
@@ -138,7 +139,7 @@ fn project_candidates(
     candidates
 }
 
-impl ToolRuntime {
+impl ExecutionService<'_> {
     pub(crate) async fn list_projects(&self, auth: Option<&AuthContext>) -> ToolResult {
         self.list_projects_with_options(auth, ListProjectsOptions::default())
             .await
@@ -359,7 +360,7 @@ impl ToolRuntime {
         auth: Option<&AuthContext>,
     ) -> ToolResult {
         let response = crate::admin_project_lifecycle::unregister_project_runtime(
-            self,
+            self.runner_registry,
             auth,
             &project,
             &expected_revision,

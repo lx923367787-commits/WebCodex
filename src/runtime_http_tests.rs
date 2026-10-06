@@ -848,6 +848,28 @@ fn extract_tool_call_params_precede_flattened_fields() {
 }
 
 #[test]
+fn host_goal_http_wrapper_metadata_survives_both_argument_envelopes() {
+    let context = json!({"goal_id":"wc_goal_test","node_id":"step","attempt_id":"attempt","plan_version":1,"fence":1,"operation_id":"op"});
+    let nested = json!({"tool":"plugin_tool","params":{"action":"list"},"goal_context":context,"context_epoch":"conversation-1"});
+    let flattened = json!({"tool":"plugin_tool","action":"list","goal_context":context,"context_epoch":"conversation-1"});
+    for input in [nested, flattened] {
+        let (tool, arguments) = extract_tool_call(&input).unwrap();
+        assert_eq!(tool, "plugin_tool");
+        assert_eq!(arguments["goal_context"], context);
+        assert_eq!(arguments["context_epoch"], "conversation-1");
+        assert_eq!(arguments["action"], "list");
+    }
+    for field in ["goal_context", "context_epoch"] {
+        let mut input = json!({"tool":"plugin_tool","params":{"action":"list"}});
+        input[field] = json!("private-outer");
+        input["params"][field] = json!("private-inner");
+        let error = extract_tool_call(&input).unwrap_err();
+        assert!(error.contains("both outside and inside"));
+        assert!(!error.contains("private-"));
+    }
+}
+
+#[test]
 fn extract_tool_call_plugin_tool_preserves_provider_local_tool_inside_params() {
     let body = json!({
         "tool": "plugin_tool",

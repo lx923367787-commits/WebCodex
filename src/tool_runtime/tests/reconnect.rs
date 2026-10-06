@@ -332,6 +332,7 @@ async fn meaningful_activity_is_scoped_and_not_refreshed_by_status_calls() {
     // Reading forensic trace data is itself observability and must not become
     // meaningful activity even if the operator call succeeds.
     runtime
+        .observation
         .observations
         .record_successful_tool_call(ToolCallObservation {
             principal_kind: "bootstrap".to_string(),

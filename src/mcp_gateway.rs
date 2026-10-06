@@ -301,7 +301,7 @@ async fn describe(
             "the requested tool is not present on the current MCP server",
         ));
     };
-    runtime.mcp_gateway.remember(
+    runtime.gateways.mcp_gateway.remember(
         ObservationKey {
             client_id: provider.client_id.clone(),
             provider_id: provider.provider_id.clone(),
@@ -345,7 +345,7 @@ async fn call_upstream(
         tool_name: tool_name.to_string(),
     };
     let expected_schema = runtime
-        .mcp_gateway
+        .gateways.mcp_gateway
         .observed(&observation_key)
         .ok_or_else(|| {
             GatewayError::local(
@@ -374,7 +374,7 @@ async fn call_upstream(
             error.code.as_str(),
             "provider_schema_changed" | "provider_tool_missing"
         ) {
-            runtime.mcp_gateway.forget(&observation_key);
+            runtime.gateways.mcp_gateway.forget(&observation_key);
         }
     }
     let dispatch_state = response.dispatch_state;

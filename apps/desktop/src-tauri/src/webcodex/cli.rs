@@ -317,6 +317,51 @@ pub async fn run_project_activation_json<T: DeserializeOwned>(
     })
 }
 
+pub async fn run_project_management_json<T: DeserializeOwned>(
+    executable: &Path,
+    args: &[String],
+    cancellation: &CancellationContext,
+) -> DesktopResult<T> {
+    let output = run_bounded_until(
+        executable,
+        args,
+        None,
+        false,
+        cancellation,
+        Deadline::after(CLI_TIMEOUT),
+    )
+    .await?;
+    if output.exit_code != Some(0) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let code = [
+            "project_connection_changed",
+            "project_revision_conflict",
+            "project_active_jobs_conflict",
+            "project_idempotency_conflict",
+            "project_unsupported_runner_version",
+            "project_agent_unavailable",
+            "project_invalid_request",
+            "project_unauthorized",
+            "project_forbidden",
+        ]
+        .into_iter()
+        .find(|code| stderr.trim_start().starts_with(&format!("{code}:")))
+        .unwrap_or("project_operation_indeterminate");
+        return Err(DesktopError::new(
+            code,
+            "The project operation could not be verified",
+            "Refresh the project list before retrying.",
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|_| {
+        DesktopError::new(
+            "project_operation_indeterminate",
+            "Invalid project operation response",
+            "Refresh the project list before retrying.",
+        )
+    })
+}
+
 pub async fn run_json_until<T: DeserializeOwned>(
     executable: &Path,
     args: &[String],

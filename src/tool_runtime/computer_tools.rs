@@ -697,7 +697,11 @@ impl ToolRuntime {
                 json!({"error_kind": "artifact_policy", "project": project, "path": path, "message": bounded_text(&error)}),
             );
         }
-        let resolved = match self.resolve_project_input_for_auth(&project, auth).await {
+        let resolved = match self
+            .execution()
+            .resolve_project_input_for_auth(&project, auth)
+            .await
+        {
             Ok(resolved) => resolved,
             Err(error) => return error.into_tool_result(),
         };

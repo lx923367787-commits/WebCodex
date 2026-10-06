@@ -991,7 +991,7 @@ async fn plugin_tool_list_provider_and_tools_is_bounded_and_binding_free() {
     assert!(provider_view.get("source").is_none());
     assert!(provider_view.get("startupAdmission").is_none());
 
-    let bindings_before = runtime.plugin_gateway.binding_count();
+    let bindings_before = runtime.gateways.plugin_gateway.binding_count();
     let tools_task = spawn_plugin_metadata_call(
         &runtime,
         &auth,
@@ -1049,7 +1049,10 @@ async fn plugin_tool_list_provider_and_tools_is_bounded_and_binding_free() {
     assert_eq!(discovery["tools"][0]["name"], "search_symbol");
     assert_eq!(discovery["tools"][0]["title"], "Repository Search");
     assert!(discovery.get("firstClassRestartRequired").is_none());
-    assert_eq!(runtime.plugin_gateway.binding_count(), bindings_before);
+    assert_eq!(
+        runtime.gateways.plugin_gateway.binding_count(),
+        bindings_before
+    );
     let encoded = serde_json::to_string(discovery).unwrap();
     for forbidden in [
         "inputSchema",
@@ -1209,7 +1212,7 @@ async fn plugin_tool_list_provider_replacement_fails_closed_without_reresolve_or
         .as_str()
         .unwrap_or_default()
         .contains("did not retarget or replay"));
-    assert_eq!(runtime.plugin_gateway.binding_count(), 0);
+    assert_eq!(runtime.gateways.plugin_gateway.binding_count(), 0);
     assert!(runtime
         .runner_registry
         .poll(RunnerPollRequest {
@@ -1376,7 +1379,7 @@ async fn plugin_tool_list_runner_replacement_fails_closed_and_never_replays_on_r
         .await
         .unwrap()
         .is_none());
-    assert_eq!(runtime.plugin_gateway.binding_count(), 0);
+    assert_eq!(runtime.gateways.plugin_gateway.binding_count(), 0);
 }
 
 #[tokio::test]

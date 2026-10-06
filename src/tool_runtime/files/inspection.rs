@@ -495,7 +495,7 @@ impl ToolRuntime {
         // to get a `.env` or a private key back verbatim. Only the narrow
         // secret policy applies here — reading `.git/HEAD` or a file under
         // `target/` by explicit path stays allowed.
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
@@ -874,7 +874,7 @@ impl ToolRuntime {
         path: Option<String>,
         limit: Option<usize>,
     ) -> ToolResult {
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
@@ -990,7 +990,7 @@ impl ToolRuntime {
         let offset = offset.unwrap_or(0);
         let depth = depth.map(|depth| depth.clamp(1, 16));
 
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(project) => project,
             Err(error) => return ToolResult::err(error),
         };
@@ -1086,7 +1086,7 @@ impl ToolRuntime {
         };
         let max_depth = effective_project_overview_max_depth(max_depth);
         let limit = effective_project_overview_limit(limit);
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(project) => project,
             Err(error) => return ToolResult::err(error),
         };

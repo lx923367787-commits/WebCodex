@@ -46,4 +46,4 @@ Pull request 应说明改了什么、为什么需要这项改动，以及执行�
 
 每个 pull request 应保持可评审，并只解决一个完整而集中的目标。如果改动涉及认证、授权、process lifecycle、持久化、公共协议行为或其他 trust boundary，请提供针对该边界的 focused regression evidence。
 
-提交贡献即表示你同意按照仓库的 [Apache License 2.0](LICENSE) 对该贡献进行许可。
+除非另有明确约定，你向本定制仓库提交且拥有版权的原创贡献使用 [MIT](LICENSE-MIT)。继承的上游部分继续使用 [Apache License 2.0](LICENSE)，复制的第三方资料保留原许可；不得擅自更改其他作者的许可。详见[许可范围](LICENSING.md)。

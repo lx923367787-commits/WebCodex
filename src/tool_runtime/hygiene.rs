@@ -726,7 +726,7 @@ impl ToolRuntime {
         let include_tracked = include_tracked.unwrap_or(false);
 
         // Resolve the project to get the canonical resolved id for the output.
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };

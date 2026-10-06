@@ -950,6 +950,7 @@ async fn replacement_runner_pending_inventory_has_zero_project_routing_authority
     )
     .await;
     let initial = runtime
+        .execution()
         .resolve_project_input_for_auth(&project_id, Some(&auth))
         .await
         .unwrap();
@@ -1059,6 +1060,7 @@ async fn replacement_runner_pending_inventory_has_zero_project_routing_authority
         .unwrap();
     assert_eq!(completed.sync_state, "complete");
     let resolved = runtime
+        .execution()
         .resolve_project_input_for_auth(&project_id, Some(&auth))
         .await
         .unwrap();
@@ -2018,7 +2020,13 @@ async fn tool_manifest_model_fields_and_hidden_start_compatibility_stay_separate
     }
 
     for field in properties.keys() {
-        if TOOL_CALL_WRAPPER_FIELDS.contains(&field.as_str()) {
+        if TOOL_CALL_WRAPPER_FIELDS.contains(&field.as_str())
+            || matches!(
+                field.as_str(),
+                webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD
+                    | webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD
+            )
+        {
             continue;
         }
         assert!(
@@ -2026,6 +2034,14 @@ async fn tool_manifest_model_fields_and_hidden_start_compatibility_stay_separate
             "ToolCallRequest.properties declares flattened field {field}, but no model-visible manifest entry accepts it"
         );
     }
+    assert_eq!(
+        properties[webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD],
+        webcodex_tool_contracts::goal_context_input_schema()
+    );
+    assert_eq!(
+        properties[webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD],
+        webcodex_tool_contracts::context_epoch_input_schema()
+    );
 }
 
 #[tokio::test]

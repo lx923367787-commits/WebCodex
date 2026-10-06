@@ -2,6 +2,7 @@ mod http_metadata;
 mod protocol;
 mod resources;
 mod response;
+mod schema_projection;
 mod tasks;
 mod tools;
 
@@ -123,11 +124,14 @@ fn finalize_mcp_tool_observability(
         .is_some_and(|(event, _)| event.window_meaningful);
 
     if let Some(record) = model_ergonomics {
-        crate::tool_runtime::runtime_metrics::observe_tool_call(runtime.metrics.as_ref(), record);
+        crate::tool_runtime::runtime_metrics::observe_tool_call(
+            runtime.observation.metrics.as_ref(),
+            record,
+        );
     }
     if audit_event.is_some() {
         crate::tool_runtime::runtime_metrics::observe_mcp_call(
-            runtime.metrics.as_ref(),
+            runtime.observation.metrics.as_ref(),
             crate::tool_runtime::runtime_metrics::McpCallMetricObservation {
                 elapsed_ms: timing.elapsed_ms,
                 outcome_class,
@@ -138,7 +142,7 @@ fn finalize_mcp_tool_observability(
         if meaningful {
             if let Some(transition) = transition {
                 crate::tool_runtime::runtime_metrics::observe_window_transition(
-                    runtime.metrics.as_ref(),
+                    runtime.observation.metrics.as_ref(),
                     transition,
                 );
             }

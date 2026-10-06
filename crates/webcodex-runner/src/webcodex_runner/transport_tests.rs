@@ -2,7 +2,7 @@ use super::super::config::{RunnerPolicy, ShellConfig};
 use super::*;
 use crate::runner_protocol::{RunnerCapabilities, RunnerRequest, RUNNER_PROTOCOL_GENERATION_V2};
 #[cfg(unix)]
-use crate::POLLING_DISPATCH_MAX_IN_FLIGHT;
+use crate::webcodex_runner::transport::polling::POLLING_DISPATCH_MAX_IN_FLIGHT;
 use futures_util::{SinkExt, StreamExt};
 use std::io::{Read, Write};
 use std::net::{TcpListener as StdTcpListener, TcpStream};
@@ -800,7 +800,10 @@ fn polling_job_request(
     let mut request = polling_shell_request(request_id, cwd, command);
     request.kind = "start_job".to_string();
     request.job_id = Some(job_id.to_string());
-    request.job_context = Some(crate::test_job_context(cwd, Vec::new()));
+    request.job_context = Some(crate::webcodex_runner::jobs::test_job_context(
+        cwd,
+        Vec::new(),
+    ));
     request
 }
 
@@ -2362,7 +2365,8 @@ fn polling_oversized_response_is_terminal_without_loading_the_body() {
     let server = start_scripted_runner_server(vec![
         ScriptStep::Register,
         ScriptStep::PollOversized {
-            declared_len: crate::RUNNER_HTTP_RESPONSE_BODY_MAX_BYTES + 1,
+            declared_len:
+                crate::webcodex_runner::transport::http::RUNNER_HTTP_RESPONSE_BODY_MAX_BYTES + 1,
         },
     ]);
     let error = run_polling_runner_against_scripted_server(&server, false)
@@ -3284,7 +3288,10 @@ fn start_job_request(cwd: &Path, command: &str) -> RunnerRequest {
         created_at: 0,
         validation: None,
         lsp: None,
-        job_context: Some(crate::test_job_context(cwd, Vec::new())),
+        job_context: Some(crate::webcodex_runner::jobs::test_job_context(
+            cwd,
+            Vec::new(),
+        )),
         mcp_gateway: None,
         plugin_gateway: None,
         coding_agent: None,
@@ -3658,7 +3665,7 @@ fn polling_502_html_is_transient_and_sanitized() {
         reqwest::StatusCode::BAD_GATEWAY,
         nginx_html,
     );
-    let poll_error = crate::PollError::from_http(error, "oe");
+    let poll_error = crate::webcodex_runner::transport::polling::PollError::from_http(error, "oe");
     assert_eq!(
         poll_error.recovery_action(),
         PollingRecoveryAction::RetryPoll
@@ -3688,7 +3695,8 @@ fn polling_503_and_504_are_transient_server_unavailable() {
         ),
     ] {
         let error = RunnerHttpError::status("/api/shell/agent/poll", status, "proxy unavailable");
-        let poll_error = crate::PollError::from_http(error, "oe");
+        let poll_error =
+            crate::webcodex_runner::transport::polling::PollError::from_http(error, "oe");
         assert_eq!(
             poll_error.recovery_action(),
             PollingRecoveryAction::RetryPoll

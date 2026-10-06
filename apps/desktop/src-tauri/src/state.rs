@@ -46,6 +46,9 @@ const DESKTOP_MCP_MODEL_SURFACE: &str = "adaptive-runtime-v1";
 const DESKTOP_MCP_COMPACT_SCHEMAS: &str = "true";
 static NEXT_STATE_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
+#[path = "project_management.rs"]
+mod project_management;
+
 type SharedSupervisor = Arc<Mutex<ProcessSupervisor>>;
 
 #[derive(Debug, Clone)]
@@ -146,10 +149,8 @@ impl AppState {
         if self.operations.current().is_some() {
             return Ok(self.get_state());
         }
-        let cancellation = CancellationContext::new(
-            CancellationSignal::new(),
-            self.shutdown_signal.clone(),
-        );
+        let cancellation =
+            CancellationContext::new(CancellationSignal::new(), self.shutdown_signal.clone());
         let probe = {
             let slot = self.core.lock().await;
             let Some(core) = slot.as_ref() else {
@@ -710,6 +711,9 @@ impl DesktopCore {
             return self.get_state().await;
         }
 
+        if self.config.project.is_none() && self.config.runtime.is_some() {
+            return self.refresh_unselected_runtime(cancellation).await;
+        }
         let Some(identity) = identity_from_config(&self.config) else {
             self.snapshot.chatgpt_activity = None;
             self.snapshot.topology = self.config.topology.clone();
@@ -763,19 +767,18 @@ impl DesktopCore {
             Err(_) => ProjectReadiness::Unknown,
         };
         cancellation.check()?;
-        self.snapshot.chatgpt_activity = if server == ServerReadiness::Ready
-            && project == ProjectReadiness::Ready
-        {
-            match self.adapter.chatgpt_activity(&identity, cancellation).await {
-                Ok(last_meaningful_activity_at_ms) => Some(ChatGptActivitySnapshot {
-                    observed: last_meaningful_activity_at_ms.is_some(),
-                    last_meaningful_activity_at_ms,
-                }),
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
+        self.snapshot.chatgpt_activity =
+            if server == ServerReadiness::Ready && project == ProjectReadiness::Ready {
+                match self.adapter.chatgpt_activity(&identity, cancellation).await {
+                    Ok(last_meaningful_activity_at_ms) => Some(ChatGptActivitySnapshot {
+                        observed: last_meaningful_activity_at_ms.is_some(),
+                        last_meaningful_activity_at_ms,
+                    }),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
         cancellation.check()?;
         let tunnel_active = self
             .process_snapshot(ProcessKind::RegularTunnel)
@@ -931,6 +934,9 @@ impl DesktopCore {
         if topology.experience != Experience::Full {
             return self.get_state().await;
         }
+        if self.config.project.is_none() && self.config.runtime.is_some() {
+            return self.resume_unselected_runtime(cancellation).await;
+        }
         let project_path = self
             .config
             .project
@@ -988,7 +994,9 @@ impl DesktopCore {
                 "Use the full runtime setup flow before activating another project.",
             ));
         }
-        if !self.snapshot.readiness.runtime_ready {
+        if self.snapshot.readiness.server != ServerReadiness::Ready
+            || self.snapshot.readiness.runner != RunnerReadiness::Ready
+        {
             return Err(DesktopError::new(
                 "runtime_not_ready",
                 "The local Full Runtime is not ready for an in-place project activation",
@@ -999,20 +1007,33 @@ impl DesktopCore {
         // The packaged document provider is bound to the selected project. Use
         // the existing owned-process transaction when its working root changes.
         if self.bundled_tools.is_some() {
-            return self
-                .configure_local_setup(Some(project_path), cancellation)
-                .await;
+            if self
+                .registry_projects(cancellation)
+                .await?
+                .iter()
+                .any(|p| p.active_jobs > 0)
+            {
+                return Err(project_management::project_error(
+                    "project_active_jobs_conflict",
+                ));
+            }
+            if self.config.project.is_some() {
+                return self
+                    .configure_local_setup(Some(project_path), cancellation)
+                    .await;
+            }
         }
 
         let project = self.adapter.inspect_project(project_path).await?;
         cancellation.check()?;
-        let identity = identity_from_config(&self.config).ok_or_else(|| {
-            DesktopError::new(
-                "runtime_not_ready",
-                "The saved local Runner identity is incomplete",
-                "Restore or reconfigure the local runtime before activating another project.",
-            )
-        })?;
+        let identity =
+            project_management::connection_from_config(&self.config).ok_or_else(|| {
+                DesktopError::new(
+                    "runtime_not_ready",
+                    "The saved local Runner identity is incomplete",
+                    "Restore or reconfigure the local runtime before activating another project.",
+                )
+            })?;
         let runner_client_id = stored_runner_client_id(&self.config).ok_or_else(|| {
             DesktopError::new(
                 "runner_offline",
@@ -1022,7 +1043,7 @@ impl DesktopCore {
         })?;
         let runner = self
             .adapter
-            .observe_runner_connection(&identity, Some(&runner_client_id), cancellation)
+            .observe_connection_until(&identity, Some(&runner_client_id), cancellation, None)
             .await?;
         cancellation.check()?;
         if !runner.online {
@@ -1035,7 +1056,7 @@ impl DesktopCore {
 
         let identity = self
             .adapter
-            .activate_project(&identity, &runner_client_id, &project, cancellation)
+            .activate_connection_project(&identity, &runner_client_id, &project, cancellation)
             .await?;
         self.wait_for_project(&identity, cancellation).await?;
         cancellation.check()?;
@@ -1078,6 +1099,11 @@ impl DesktopCore {
             self.snapshot.readiness.exposure.clone(),
             ProjectReadiness::Ready,
         );
+        if self.bundled_tools.is_some() && previous_config.project.is_none() {
+            return self
+                .configure_local_setup(Some(project_path), cancellation)
+                .await;
+        }
         self.get_state().await
     }
 
@@ -2393,6 +2419,24 @@ impl DesktopCore {
         deadline: Deadline,
         cleanup_owned_process: bool,
     ) -> DesktopResult<()> {
+        self.wait_for_connection(
+            &identity.connection(),
+            None,
+            cancellation,
+            deadline,
+            cleanup_owned_process,
+        )
+        .await
+    }
+
+    async fn wait_for_connection(
+        &mut self,
+        connection: &crate::webcodex::RuntimeConnection,
+        expected_client_id: Option<&str>,
+        cancellation: &CancellationContext,
+        deadline: Deadline,
+        cleanup_owned_process: bool,
+    ) -> DesktopResult<()> {
         loop {
             cancellation.check()?;
             if deadline.is_elapsed() {
@@ -2425,9 +2469,14 @@ impl DesktopCore {
             }
             if self
                 .adapter
-                .runner_ready_until(identity, cancellation, deadline)
+                .observe_connection_until(
+                    connection,
+                    expected_client_id,
+                    cancellation,
+                    Some(deadline),
+                )
                 .await
-                .unwrap_or(false)
+                .is_ok_and(|observed| observed.online)
             {
                 return Ok(());
             }
@@ -3270,7 +3319,12 @@ mod tests {
                 .as_array_of_tables()
                 .unwrap()
                 .iter()
-                .find(|p| p["id"].as_str() == Some("mycodex-tools"))
+                .find(|p| {
+                    p.get("cwd")
+                        .and_then(toml_edit::Item::as_str)
+                        .map(|cwd| same_project(cwd, &second_project.to_string_lossy()))
+                        .unwrap_or(false)
+                })
                 .unwrap();
             assert!(same_project(
                 provider["cwd"].as_str().unwrap(),
@@ -3296,13 +3350,42 @@ mod tests {
             std::fs::create_dir_all(&blocked_state_path).unwrap();
             let saved_config_path = core.config_path.clone();
             core.config_path = blocked_state_path;
-            let failure = core.activate_local_project(&third_project.to_string_lossy(), &cancellation).await;
+            let failure = core
+                .activate_local_project(&third_project.to_string_lossy(), &cancellation)
+                .await;
             core.config_path = saved_config_path;
-            assert!(failure.is_err(), "injected state publication failure must be observed");
+            assert!(
+                failure.is_err(),
+                "injected state publication failure must be observed"
+            );
             assert_eq!(core.snapshot.readiness.runner, RunnerReadiness::Stopped);
-            let recovered = std::fs::read_to_string(&identity.runner_config).unwrap().parse::<toml_edit::DocumentMut>().unwrap();
-            let recovered_provider = recovered["plugins"]["providers"].as_array_of_tables().unwrap().iter().find(|p| p["id"].as_str() == Some("mycodex-tools")).unwrap();
-            assert!(same_project(recovered_provider["cwd"].as_str().unwrap(), &second_project.to_string_lossy()));
+            let recovered = std::fs::read_to_string(&identity.runner_config)
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap();
+            let recovered_provider = recovered["plugins"]["providers"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .find(|p| {
+                    p.get("cwd")
+                        .and_then(toml_edit::Item::as_str)
+                        .map(|cwd| same_project(cwd, &second_project.to_string_lossy()))
+                        .unwrap_or(false)
+                })
+                .unwrap();
+            assert_eq!(
+                recovered["plugins"]["providers"]
+                    .as_array_of_tables()
+                    .unwrap()
+                    .len(),
+                2,
+                "failed third-project setup must preserve both existing bindings"
+            );
+            assert!(same_project(
+                recovered_provider["cwd"].as_str().unwrap(),
+                &second_project.to_string_lossy()
+            ));
             phase = "stop and resume";
             core.stop_local_runtime(&cancellation).await?;
             core.configure_local_setup(Some(&second_project.to_string_lossy()), &cancellation)
@@ -3319,7 +3402,10 @@ mod tests {
         if outcome.is_ok() {
             let _ = std::fs::remove_dir_all(&data_dir);
         } else {
-            eprintln!("failed fixture retained at {} (phase: {phase})", data_dir.display());
+            eprintln!(
+                "failed fixture retained at {} (phase: {phase})",
+                data_dir.display()
+            );
         }
         outcome.expect("native bundled-tools automatic setup and real MCP acceptance");
     }
@@ -3428,7 +3514,8 @@ mod tests {
             runtime_project_id: Some("agent:desktop:project-b".to_string()),
         });
 
-        let current_identity = identity_from_config(&core.config).expect("current project identity");
+        let current_identity =
+            identity_from_config(&core.config).expect("current project identity");
         let mut stale_identity = current_identity.clone();
         stale_identity.project_id = "project-a".to_string();
         stale_identity.runtime_project_id = "agent:desktop:project-a".to_string();

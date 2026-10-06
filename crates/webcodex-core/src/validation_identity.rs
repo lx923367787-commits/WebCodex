@@ -76,7 +76,7 @@ pub fn structured_validation_target_identity(
     let tool_name = kind.tool_name()?;
     let obj = arguments.as_object()?;
     let cwd = normalized_validation_target_cwd(obj.get("cwd"))?;
-    let semantic = match kind {
+    let mut semantic = match kind {
         ToolValidationIdentityKind::CargoFmt => serde_json::json!({
             "tool": tool_name,
             "kind": "format",
@@ -145,6 +145,9 @@ pub fn structured_validation_target_identity(
         }
         ToolValidationIdentityKind::None => return None,
     };
+    // Preserve the original sorted-map encoding even when another workspace
+    // dependency enables serde_json's preserve_order feature.
+    semantic.sort_all_objects();
     let encoded = serde_json::to_vec(&semantic).ok()?;
     let digest = format!("{:x}", Sha256::digest(encoded));
     Some(format!(
@@ -263,6 +266,44 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn structured_validation_target_identity_normalizes_inputs_and_preserves_scope() {
+        let kind = ToolValidationIdentityKind::CargoCheck;
+        let arguments = serde_json::json!({"package": "webcodex", "features": "serde"});
+        let expected = structured_validation_target_identity(kind, &arguments);
+        assert_eq!(expected.as_deref(), Some("target:1db935c208ff30ab1716b2ab"));
+        let reordered_and_normalized = serde_json::json!({
+            "features": " serde ",
+            "package": " webcodex ",
+            "cwd": " ./ ",
+            "all_targets": true,
+            "all_features": false,
+            "no_default_features": false,
+            "timeout_secs": 120,
+            "max_output_bytes": 4096
+        });
+        assert_eq!(
+            structured_validation_target_identity(kind, &reordered_and_normalized),
+            expected
+        );
+        for (field, value) in [
+            ("cwd", serde_json::json!("crates/webcodex-core")),
+            ("package", serde_json::json!("webcodex-core")),
+            ("features", serde_json::json!("other")),
+            ("all_targets", serde_json::json!(false)),
+            ("all_features", serde_json::json!(true)),
+            ("no_default_features", serde_json::json!(true)),
+        ] {
+            let mut changed = arguments.clone();
+            changed[field] = value;
+            assert_ne!(
+                structured_validation_target_identity(kind, &changed),
+                expected,
+                "changing {field} must change the validation target"
+            );
+        }
     }
 
     #[test]

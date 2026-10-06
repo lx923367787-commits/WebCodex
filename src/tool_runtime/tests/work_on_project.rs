@@ -1684,7 +1684,10 @@ async fn managed_worktree_bootstrap_recovers_same_operation_and_binds_session_to
     let session = runtime.sessions.summary(&session_id, Some(50)).unwrap();
     assert_eq!(session.project.as_deref(), Some(project));
 
-    let listed = runtime.list_projects(Some(&auth_context(None, true))).await;
+    let listed = runtime
+        .execution()
+        .list_projects(Some(&auth_context(None, true)))
+        .await;
     assert!(listed.output["projects"]
         .as_array()
         .unwrap()
@@ -1933,7 +1936,10 @@ async fn source_project_session_cannot_resume_a_managed_worktree() {
     );
     assert_eq!(result.output["state_changed"], false);
     assert_eq!(instruction_events(&runtime, &session_id).len(), 1);
-    assert_eq!(runtime.list_projects(Some(&auth)).await.output["count"], 1);
+    assert_eq!(
+        runtime.execution().list_projects(Some(&auth)).await.output["count"],
+        1
+    );
 }
 
 #[tokio::test]
@@ -2016,7 +2022,10 @@ async fn path_source_auto_registers_reuses_and_supports_canonical_coding_entry()
     );
     assert_eq!(instruction_events(&runtime, &session_id).len(), 2);
 
-    let listed = runtime.list_projects(Some(&auth_context(None, true))).await;
+    let listed = runtime
+        .execution()
+        .list_projects(Some(&auth_context(None, true)))
+        .await;
     assert!(listed.success);
     assert!(listed.output["projects"]
         .as_array()
@@ -2116,7 +2125,10 @@ async fn path_source_explicit_session_mismatch_fails_before_registration() {
     );
     assert_eq!(instruction_events(&runtime, session_id).len(), 1);
 
-    let listed = runtime.list_projects(Some(&auth_context(None, true))).await;
+    let listed = runtime
+        .execution()
+        .list_projects(Some(&auth_context(None, true)))
+        .await;
     assert_eq!(listed.output["count"], 1);
 }
 
@@ -2163,7 +2175,10 @@ async fn path_source_unknown_session_fails_before_registration() {
     assert_eq!(result.output["error_kind"], "unknown_session_id");
     assert!(result.output.get("permission").is_none());
     assert!(result.output.get("project_resolution").is_none());
-    let listed = runtime.list_projects(Some(&auth_context(None, true))).await;
+    let listed = runtime
+        .execution()
+        .list_projects(Some(&auth_context(None, true)))
+        .await;
     assert_eq!(listed.output["count"], 0);
 }
 
@@ -2297,7 +2312,7 @@ async fn path_source_cross_project_recording_session_fails_before_registration()
         result.output["request_project"],
         format!("path:{target_client}:{target_path}")
     );
-    let listed = runtime.list_projects(Some(&auth)).await;
+    let listed = runtime.execution().list_projects(Some(&auth)).await;
     assert_eq!(listed.output["count"], 1);
     let summary = runtime
         .sessions
@@ -3365,9 +3380,9 @@ async fn work_on_project_sizes_and_runner_request_reduction_are_stable() {
     );
     // The sparse projection itself remains below 1 KiB when static workflow
     // guidance is omitted. With Session ACK/recording/sidecar guidance plus the
-    // v9 early-validation-handoff rule included, this fixture is about 4.5 KiB
-    // fresh and 4.6 KiB on unchanged continuation. Keep the default tightly
-    // bounded and still far below the standard startup hard cap while leaving
+    // early-validation-handoff rule and compact Goal discovery included, this
+    // fixture is about 4.7 KiB fresh and 4.8 KiB on unchanged continuation. Keep
+    // the default tightly bounded and below the standard startup hard cap, leaving
     // only modest protocol headroom.
     assert!(
         fresh_bytes <= 4800,

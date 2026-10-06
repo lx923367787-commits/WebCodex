@@ -724,6 +724,144 @@ async fn import_http_existing_png_pdf_zip_text_formats_still_import() {
     }
 }
 
+#[test]
+fn import_http_batch_keeps_successes_around_a_failed_download() {
+    run_import_http_in_large_stack_test_thread(
+        import_http_batch_keeps_successes_around_a_failed_download_impl,
+    );
+}
+
+async fn import_http_batch_keeps_successes_around_a_failed_download_impl() {
+    let _guard = lock_import_http_test().await;
+    let server = start_mock_http_server(vec![
+        http_response("200 OK", &[("Content-Length", "5".to_string())], b"first"),
+        http_response(
+            "503 Service Unavailable",
+            &[("Content-Length", "0".to_string())],
+            b"",
+        ),
+        http_response("200 OK", &[("Content-Length", "5".to_string())], b"third"),
+    ])
+    .await;
+    let _download_base = ImportDownloadBaseUrlGuard::set(server.base_url.clone());
+    let tmp = tempfile::tempdir().unwrap();
+    let (runtime, registry) = super::register_import_agent_with_capabilities(
+        tmp.path(),
+        Some(crate::runner_protocol::RunnerCapabilities {
+            file_write: true,
+            ..Default::default()
+        }),
+    )
+    .await;
+    let config = super::test_config(Some("secret"));
+    let (_db_tmp, db) = super::test_db();
+    let service = Service::new(super::build_projects_router(config, db, runtime));
+    let agent = tokio::spawn(complete_import_artifact_uploads(registry, 2));
+    let refs: Vec<Value> = ["first.txt", "failed.txt", "third.txt"].iter().map(|name| json!({
+        "name": name, "mime_type": "text/plain", "download_link": format!("https://files.oaiusercontent.com/PRIVATE_TOKEN/{name}")
+    })).collect();
+    let mut response = TestClient::post("http://localhost/api/artifacts/import")
+        .bearer_auth("secret")
+        .json(&json!({"project": "agent:importer:demo", "output_dir": "docs/assets", "openaiFileIdRefs": refs}))
+        .send(&service).await;
+    let outcomes = tokio::time::timeout(Duration::from_secs(10), agent)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcomes.iter().all(|outcome| outcome.finished));
+    let body: Value = response.take_json().await.unwrap();
+    assert_eq!(body["success"], false);
+    assert_eq!(body["output"]["status"], "partial");
+    assert_eq!(body["output"]["count"], 2);
+    assert_eq!(body["output"]["items"][1]["status"], "failed");
+    assert_eq!(
+        body["output"]["imported"][0]["path"],
+        "docs/assets/first.txt"
+    );
+    assert_eq!(
+        body["output"]["imported"][1]["path"],
+        "docs/assets/third.txt"
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join("docs/assets/first.txt")).unwrap(),
+        b"first"
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join("docs/assets/third.txt")).unwrap(),
+        b"third"
+    );
+    assert!(!tmp.path().join("docs/assets/failed.txt").exists());
+    assert!(!serde_json::to_string(&body)
+        .unwrap()
+        .contains("PRIVATE_TOKEN"));
+}
+
+#[test]
+fn import_http_batch_stops_after_global_authority_denial() {
+    run_import_http_in_large_stack_test_thread(
+        import_http_batch_stops_after_global_authority_denial_impl,
+    );
+}
+
+async fn import_http_batch_stops_after_global_authority_denial_impl() {
+    let _guard = lock_import_http_test().await;
+    let server = start_mock_http_server(vec![http_response(
+        "200 OK",
+        &[("Content-Length", "5".to_string())],
+        b"first",
+    )])
+    .await;
+    let _download_base = ImportDownloadBaseUrlGuard::set(server.base_url.clone());
+    let tmp = tempfile::tempdir().unwrap();
+    let (runtime, registry) = super::register_import_agent_with_capabilities(
+        tmp.path(),
+        Some(crate::runner_protocol::RunnerCapabilities::default()),
+    )
+    .await;
+    // The current protocol fixture intentionally enables baseline file_write.
+    // Exercise a real global authority denial instead of pretending that a
+    // valid generation-2 Runner can omit its mandatory file-write capability.
+    let runtime = Arc::new(
+        Arc::try_unwrap(runtime)
+            .ok()
+            .expect("fresh fixture Runtime must have one owner")
+            .with_permission_evaluator(crate::tool_runtime::PermissionEvaluator::with_mode(
+                crate::tool_runtime::AuthorityMode::Restricted,
+            )),
+    );
+    let config = super::test_config(Some("secret"));
+    let (_db_tmp, db) = super::test_db();
+    let service = Service::new(super::build_projects_router(config, db, runtime));
+    let refs: Vec<Value> = ["first.txt", "second.txt"].iter().map(|name| json!({
+        "name": name, "mime_type": "text/plain", "download_link": format!("https://files.oaiusercontent.com/{name}")
+    })).collect();
+    let mut response = tokio::time::timeout(
+        IMPORT_TEST_AGENT_REQUEST_TIMEOUT,
+        TestClient::post("http://localhost/api/artifacts/import")
+            .bearer_auth("secret")
+            .json(&json!({"project": "agent:importer:demo", "openaiFileIdRefs": refs}))
+            .send(&service),
+    )
+    .await
+    .expect("global authority denial must finish before any Runner request wait");
+    let body: Value = response.take_json().await.unwrap();
+    assert_eq!(body["success"], false);
+    assert_eq!(body["output"]["count"], 0);
+    assert_eq!(
+        body["output"]["items"][0]["error_kind"],
+        "permission_denied"
+    );
+    assert_eq!(body["output"]["items"][1]["status"], "skipped");
+    assert!(registry
+        .poll(crate::runner_protocol::RunnerPollRequest {
+            client_id: "importer".to_string(),
+            runner_instance_id: "inst-import".to_string(),
+        })
+        .await
+        .unwrap()
+        .is_none());
+}
+
 #[tokio::test]
 async fn import_http_streams_download_in_bounded_upload_chunks() {
     let _guard = lock_import_http_test().await;

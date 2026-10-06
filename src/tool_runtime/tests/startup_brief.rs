@@ -108,7 +108,7 @@ fn instruction_source<'a>(output: &'a Value, path: &str) -> &'a Value {
 fn assert_builtin_workflow(output: &Value) {
     let workflow = &output["workflow"];
     assert_eq!(workflow["contract"], "webcodex.coding_workflow");
-    assert_eq!(workflow["version"], 9);
+    assert_eq!(workflow["version"], 10);
     assert_eq!(workflow["authority"], "model_guidance_only");
     assert!(workflow["role_selection"]
         .as_str()
@@ -199,6 +199,28 @@ fn assert_builtin_workflow(output: &Value) {
         .expect("normal closeout guidance");
     assert!(closeout_guidance.contains("finish_coding_task(summary_only=true)"));
     assert!(closeout_guidance.contains("full closeout only"));
+    let goal_guidance = workflow["model_protocol"]["goal_mode"]
+        .as_str()
+        .expect("host goal discovery guidance");
+    for phrase in [
+        "On request",
+        "开启目标模式",
+        "goal_mode_start",
+        "继续本地当前任务",
+        "goal_bootstrap",
+        "category=goal",
+        "directory, not the full contract",
+        "Before first use, read tool_manifest(tool_name=<name>)",
+        "never guess parameters/behavior from names or summaries",
+        "Reuse known unchanged contracts",
+    ] {
+        assert!(
+            goal_guidance.contains(phrase),
+            "goal mode guidance: {phrase}"
+        );
+    }
+    assert!(goal_guidance.chars().count() < 350);
+    assert!(!goal_guidance.contains("goal_plan_save"));
     for role in ["implementation_owner", "independent_review"] {
         let role = &workflow["roles"][role];
         assert!(role["purpose"]

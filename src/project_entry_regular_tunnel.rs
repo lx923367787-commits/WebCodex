@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn authorization_file_rejects_empty_bootstrap_credentials() {
+    fn authorization_file_rejects_empty_mcp_credentials() {
         let temp = tempfile::tempdir().unwrap();
         for value in ["", "   "] {
             let session = RegularTunnelSession::create(temp.path()).unwrap();
@@ -233,7 +233,7 @@ mod tests {
             assert_eq!(error.code, "tunnel_auth_invalid");
             assert_eq!(
                 error.message,
-                "the local Server bootstrap credential is unavailable"
+                "the local Server MCP credential is unavailable"
             );
             drop(session);
         }

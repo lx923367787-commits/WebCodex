@@ -198,7 +198,7 @@ impl ToolRuntime {
                         "memory.bootstrap" => {
                             let project =
                                 resolved_project.expect("registry requires project target");
-                            match self.memory_bootstrap_context_projection(project) {
+                            match self.memory.memory_bootstrap_context_projection(project) {
                                 Ok(projection) => json!({
                                     "key": key,
                                     "status": "available",

@@ -1,7 +1,9 @@
 use crate::activity::ActivityEntry;
 use crate::desktop_shell;
 use crate::error::DesktopError;
-use crate::models::{DesktopStateSnapshot, ProjectSelection, TunnelProxyMode};
+use crate::models::{
+    DesktopStateSnapshot, ProjectAction, ProjectRegistrySnapshot, ProjectSelection, TunnelProxyMode,
+};
 use crate::state::AppState;
 use crate::tray;
 use serde::Deserialize;
@@ -20,6 +22,69 @@ pub async fn update_tunnel_config(
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRequest {
     pub project_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegisteredProjectRequest {
+    pub project_id: String,
+    pub expected_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectMutationRequest {
+    pub project_id: String,
+    pub expected_revision: String,
+    pub action: ProjectAction,
+}
+
+#[tauri::command]
+pub async fn list_desktop_projects(
+    state: State<'_, AppState>,
+) -> Result<ProjectRegistrySnapshot, DesktopError> {
+    state.list_projects().await
+}
+
+#[tauri::command]
+pub async fn add_desktop_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: ProjectRequest,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(&app, state.add_project(&request.project_path).await)
+}
+
+#[tauri::command]
+pub async fn switch_desktop_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: RegisteredProjectRequest,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(
+        &app,
+        state
+            .switch_project(&request.project_id, &request.expected_revision)
+            .await,
+    )
+}
+
+#[tauri::command]
+pub async fn mutate_desktop_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: ProjectMutationRequest,
+) -> Result<DesktopStateSnapshot, DesktopError> {
+    project_state_result(
+        &app,
+        state
+            .mutate_project(
+                &request.project_id,
+                &request.expected_revision,
+                request.action,
+            )
+            .await,
+    )
 }
 
 #[derive(Deserialize)]

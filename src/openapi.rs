@@ -1306,6 +1306,14 @@ fn insert_tool_call_request_reserved_properties(schemas: &mut Value) {
             "description": "Optional recorder metadata for the generic wrapper call. Pass an existing explicit wc_sess_* id to record this call in that exact Session ledger and preserve trusted provenance/project-boundary checks. This field is stripped before concrete tool parsing and never supplies business Session guards or execution_context. Use top-level session_id only when the selected model-visible tool declares it as business input."
         }),
     );
+    properties.insert(
+        webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD.to_string(),
+        webcodex_tool_contracts::goal_context_input_schema(),
+    );
+    properties.insert(
+        webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD.to_string(),
+        webcodex_tool_contracts::context_epoch_input_schema(),
+    );
 }
 
 #[cfg(test)]

@@ -30,6 +30,34 @@ fn builtin_coding_workflow_defaults_are_required_and_bounded() {
         invalid["guidance"] = guidance;
         assert!(validate_schema_instance_for_test(&invalid, &schema).is_err());
     }
+
+    let mut overlong_goal_guidance = workflow;
+    overlong_goal_guidance["model_protocol"]["goal_mode"] = json!("x".repeat(1801));
+    assert!(validate_schema_instance_for_test(&overlong_goal_guidance, &schema).is_err());
+}
+
+#[test]
+fn builtin_coding_workflow_goal_entrypoints_have_discoverable_closed_schemas() {
+    let specs = registry::registered_tool_specs();
+    for (name, fields) in [
+        (
+            "goal_mode_start",
+            vec!["project", "objective", "idempotency_key"],
+        ),
+        (
+            "goal_bootstrap",
+            vec!["goal_id", "project", "context_epoch", "activate"],
+        ),
+    ] {
+        let spec = specs.iter().find(|spec| spec.name == name).unwrap();
+        assert_eq!(spec.input_schema["additionalProperties"], false, "{name}");
+        for field in fields {
+            assert!(
+                spec.input_schema["properties"][field].is_object(),
+                "{name} discovery must expose {field}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -1,3 +1,7 @@
+pub(crate) mod cli;
+pub(crate) mod jobs;
+pub(crate) mod registration;
+
 pub(crate) mod artifacts;
 pub(crate) mod checkpoints;
 pub(crate) mod coding_agent;

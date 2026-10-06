@@ -14,6 +14,10 @@ const api = vi.hoisted(() => ({
   activity: vi.fn(),
   configureLocal: vi.fn(),
   activateLocalProject: vi.fn(),
+  listProjects: vi.fn(),
+  addProject: vi.fn(),
+  switchProject: vi.fn(),
+  mutateProject: vi.fn(),
   configureRemote: vi.fn(),
   startQuickShare: vi.fn(),
   stopQuickShare: vi.fn(),
@@ -204,6 +208,7 @@ describe("semantic Desktop UI", () => {
       },
     );
     api.activity.mockResolvedValue([]);
+    api.listProjects.mockResolvedValue({ projects: [], can_manage: true });
     api.getLaunchAtLogin.mockResolvedValue(false);
     api.openPowerShellInstallGuide.mockResolvedValue(undefined);
     api.setLaunchAtLogin.mockImplementation(async (enabled: boolean) => enabled);
@@ -415,25 +420,29 @@ describe("semantic Desktop UI", () => {
     const switched: DesktopState = { ...tunneledState, project: projectC };
     api.getState.mockResolvedValue(tunneledState);
     api.observeChatgptActivity.mockResolvedValue(tunneledState);
-    api.activateLocalProject.mockResolvedValue(switched);
-    vi.mocked(open).mockResolvedValue(projectC.path);
+    api.switchProject.mockResolvedValue(switched);
+    api.listProjects.mockResolvedValue({ can_manage: true, projects: [
+      { id: readyState.project!.runtime_project_id, name: "Current", path: readyState.project!.path, revision: "sha256:current", enabled: true, connected: true, agent_status: "online", active_jobs: 0 },
+      { id: projectC.runtime_project_id, name: "Next", path: projectC.path, revision: "sha256:next", enabled: true, connected: true, agent_status: "online", active_jobs: 0 },
+    ] });
 
     renderApp();
     fireEvent.click(await screen.findByRole("button", { name: "项目" }));
     expect(screen.getByRole("heading", { level: 1, name: "此电脑上的项目" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveFocus();
-    fireEvent.click(screen.getByRole("button", { name: "选择其他项目" }));
+    fireEvent.click(await screen.findByRole("button", { name: "设为当前" }));
 
-    await waitFor(() => expect(api.activateLocalProject).toHaveBeenCalledWith(projectC.path));
+    await waitFor(() => expect(api.switchProject).toHaveBeenCalledWith(projectC.runtime_project_id, "sha256:next"));
     expect(api.configureLocal).not.toHaveBeenCalled();
-    await waitFor(() => expect(screen.getAllByText(projectC.path)).toHaveLength(2));
+    await waitFor(() => expect(within(screen.getByRole("article", { name: "Next" })).getByRole("button", { name: "当前项目" })).toBeDisabled());
+    expect(screen.getByText(projectC.path)).toBeVisible();
     expect(screen.queryByRole("button", { name: /在此电脑使用 WebCodex/ })).not.toBeInTheDocument();
     expect(screen.getByText("Tunnel 已就绪，等待 ChatGPT")).toBeInTheDocument();
     expect(api.startRegularTunnel).not.toHaveBeenCalled();
   });
 
-  it("uses full setup when no saved local project identity exists", async () => {
-    const noProject: DesktopState = { ...readyState, project: null };
+  it("uses full setup when the local runtime has not been prepared", async () => {
+    const noProject: DesktopState = { ...readyState, project: null, readiness: { ...readyState.readiness, server: "stopped", runner: "stopped", runtime_ready: false, ready_for_chatgpt: false } };
     api.getState.mockResolvedValue(noProject);
     api.observeChatgptActivity.mockResolvedValue(noProject);
 
@@ -472,8 +481,7 @@ describe("semantic Desktop UI", () => {
     vi.mocked(open).mockResolvedValue(projectC.path);
 
     renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: "项目" }));
-    fireEvent.click(screen.getByRole("button", { name: "选择其他项目" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择其他项目" }));
 
     await waitFor(() => expect(api.activateLocalProject).toHaveBeenCalledWith(projectC.path));
     await waitFor(() => expect(api.configureLocal).toHaveBeenCalledWith(projectC.path));

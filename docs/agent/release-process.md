@@ -24,6 +24,14 @@ runtime semantics while disabling LTO and enabling incremental compilation for
 faster rebuilds. Formal release and publication artifacts continue to use the
 `release` profile.
 
+Windows Desktop is a separate Cargo workspace. Build its frontend first, then
+use `cargo build --profile dogfood --features tauri/custom-protocol --manifest-path
+apps/desktop/src-tauri/Cargo.toml --bin webcodex-desktop`. Before deployment, run
+the resulting executable with `--check-embedded-assets` and require exit code 0.
+This probe does not create windows or start runtime processes. A successful Cargo
+build without `tauri/custom-protocol` can still depend on the Vite development
+server and will not resume the saved runtime after installation.
+
 For that development deployment:
 
 1. Change only the explicitly named targets. Do not create staging resources,

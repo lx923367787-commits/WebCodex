@@ -247,8 +247,8 @@ export default function App() {
       !topology ||
       topology.experience !== "full" ||
       topology.server.kind !== "local" ||
-      !state.project ||
-      !state.readiness.runtime_ready
+      state.readiness.server !== "ready" ||
+      state.readiness.runner !== "ready"
     ) {
       openSetup();
       return;
@@ -453,7 +453,7 @@ export default function App() {
           />
         ))}
         {navigation === "projects" && (
-          <ProjectsPanel state={state} onChooseProject={() => void chooseLocalProject()} />
+          <ProjectsPanel state={state} onState={commitState} onChooseProject={() => void chooseLocalProject()} />
         )}
         {navigation === "connection" && <ConnectionPanel state={state} onState={commitState} />}
         {navigation === "activity" && <ActivityPanel activity={activity} />}

@@ -12,6 +12,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use url::Url;
 
+#[path = "project_management.rs"]
+mod project_management;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConnection {
+    pub runner_config: PathBuf,
+    pub user_token_file: PathBuf,
+    pub server_url: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectRuntimeIdentity {
     pub project_id: String,
@@ -20,6 +30,16 @@ pub struct ProjectRuntimeIdentity {
     pub runner_config: PathBuf,
     pub user_token_file: PathBuf,
     pub server_url: String,
+}
+
+impl ProjectRuntimeIdentity {
+    pub fn connection(&self) -> RuntimeConnection {
+        RuntimeConnection {
+            runner_config: self.runner_config.clone(),
+            user_token_file: self.user_token_file.clone(),
+            server_url: self.server_url.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -478,6 +498,22 @@ impl WebCodexAdapter {
         cancellation: &CancellationContext,
         deadline: Option<Deadline>,
     ) -> DesktopResult<RunnerConnectionObservation> {
+        self.observe_connection_until(
+            &identity.connection(),
+            expected_client_id,
+            cancellation,
+            deadline,
+        )
+        .await
+    }
+
+    pub async fn observe_connection_until(
+        &mut self,
+        identity: &RuntimeConnection,
+        expected_client_id: Option<&str>,
+        cancellation: &CancellationContext,
+        deadline: Option<Deadline>,
+    ) -> DesktopResult<RunnerConnectionObservation> {
         let webcodex = match deadline {
             Some(deadline) => self
                 .ensure_binaries_until(cancellation, deadline)
@@ -551,6 +587,22 @@ impl WebCodexAdapter {
     pub async fn activate_project(
         &mut self,
         identity: &ProjectRuntimeIdentity,
+        expected_client_id: &str,
+        project: &ProjectSelection,
+        cancellation: &CancellationContext,
+    ) -> DesktopResult<ProjectRuntimeIdentity> {
+        self.activate_connection_project(
+            &identity.connection(),
+            expected_client_id,
+            project,
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn activate_connection_project(
+        &mut self,
+        identity: &RuntimeConnection,
         expected_client_id: &str,
         project: &ProjectSelection,
         cancellation: &CancellationContext,

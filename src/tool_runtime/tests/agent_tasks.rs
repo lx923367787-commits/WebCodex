@@ -28,7 +28,7 @@ fn runtime_with_db() -> (tempfile::TempDir, Arc<crate::db::Database>, ToolRuntim
 }
 
 fn create_agent(runtime: &ToolRuntime, handle: &str) -> String {
-    let result = runtime.create_agent_identity(
+    let result = runtime.communication.create_agent_identity(
         None,
         handle.to_string(),
         format!("{handle} display"),
@@ -561,7 +561,7 @@ async fn coding_run_executes_then_reconciles_from_reopened_db_and_fresh_runtime(
         CodingAgentRunInventory::default(),
     )
     .await;
-    let agent_result = runtime.create_agent_identity(
+    let agent_result = runtime.communication.create_agent_identity(
         Some(&auth),
         "a4a-runtime-agent".to_string(),
         "A4a Runtime Agent".to_string(),
@@ -871,7 +871,7 @@ fn foreign_runtime_task_ids_are_existence_hidden_and_project_reference_grants_no
     let (_temp, _db, runtime) = runtime_with_db();
     let bob = auth_context(Some("bob"), false);
     let alice = auth_context(Some("alice"), false);
-    let bob_agent = runtime.create_agent_identity(
+    let bob_agent = runtime.communication.create_agent_identity(
         Some(&bob),
         "bob-task-agent".to_string(),
         "Bob Task Agent".to_string(),

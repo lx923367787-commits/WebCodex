@@ -8,8 +8,11 @@ mod common;
 mod communication;
 mod computer;
 mod discovery;
+mod documents;
 mod files;
 mod git;
+pub(crate) mod goals;
+pub(crate) mod host_goals;
 mod hygiene;
 mod jobs;
 mod line_edits;
@@ -82,6 +85,10 @@ pub use discovery::{
     list_tools_input_schema, read_tool_trace_input_schema, runtime_status_input_schema,
     tool_manifest_input_schema,
 };
+pub use documents::{
+    document_convert_input_schema, document_edit_input_schema, document_restore_input_schema,
+    present_document_input_schema,
+};
 pub use files::{
     list_project_files_input_schema, list_project_tracked_files_input_schema,
     project_overview_input_schema, read_file_input_schema, read_files_input_schema,
@@ -91,6 +98,16 @@ pub use git::{
     git_commit_paths_input_schema, git_diff_hunks_input_schema, git_diff_input_schema,
     git_diff_summary_input_schema, git_log_input_schema, git_review_summary_input_schema,
     git_status_input_schema, show_changes_input_schema,
+};
+pub use goals::{
+    goal_cancel_input_schema, goal_list_input_schema, goal_read_input_schema,
+    goal_resume_input_schema, goal_start_input_schema,
+};
+pub use host_goals::{
+    context_epoch_input_schema, goal_bootstrap_input_schema, goal_check_node_input_schema,
+    goal_checkpoint_input_schema, goal_claim_node_input_schema, goal_confirm_plan_input_schema,
+    goal_context_input_schema, goal_mode_start_input_schema, goal_plan_save_input_schema,
+    TOOL_CALL_CONTEXT_EPOCH_FIELD, TOOL_CALL_GOAL_CONTEXT_FIELD,
 };
 pub use hygiene::workspace_hygiene_check_input_schema;
 pub use jobs::{

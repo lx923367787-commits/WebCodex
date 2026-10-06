@@ -230,7 +230,7 @@ impl ToolRuntime {
         cwd: Option<String>,
         internal_posix_script: bool,
     ) -> Result<ProjectCommandOutput, String> {
-        let proj = self.resolve_project(project).await?;
+        let proj = self.execution().resolve_project(project).await?;
         // Shared root of the sync agent-wait contract: wait_timeout_secs and
         // command timeout must both stay within 1..=120 before enqueue so
         // Runner HTTP validation never rejects with implementation-detail
@@ -461,7 +461,7 @@ impl ToolRuntime {
                 )
             }
         };
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => {
                 return Self::run_shell_tool_failure_result(
@@ -616,6 +616,7 @@ impl ToolRuntime {
                 }
             };
             let wait = self
+                .config
                 .structured_execution_sync_wait
                 .min(Duration::from_secs(STRUCTURED_EXECUTION_SYNC_WAIT_SECS));
             let handoff = await_hidden_structured_job(

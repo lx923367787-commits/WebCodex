@@ -1360,6 +1360,20 @@ fn validate_job_context_coherence(
     cwd: Option<&str>,
     context: &ShellJobContext,
 ) -> Result<(), String> {
+    if let Some(document) = context.document.as_ref() {
+        if !document.is_valid()
+            || context.runtime_project_id.is_none()
+            || context.ssh_resource.is_some()
+            || context.project_cwd.as_deref() != Some(".")
+            || context.shell.as_deref() != Some("direct_argv")
+            || context
+                .structured_execution
+                .as_ref()
+                .is_none_or(|metadata| metadata.execution_source != "run_process")
+        {
+            return Err("invalid document Job recovery context".into());
+        }
+    }
     if context.cwd.as_deref() != cwd {
         return Err("job recovery context cwd does not match operation cwd".to_string());
     }
@@ -1649,6 +1663,7 @@ mod tests {
 
     fn job_context(cwd: Option<&str>) -> ShellJobContext {
         ShellJobContext {
+            document: None,
             runtime_project_id: None,
             workflow_session_id: None,
             ssh_resource: None,

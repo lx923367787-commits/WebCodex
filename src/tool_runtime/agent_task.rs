@@ -345,7 +345,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.create_agent_task(
@@ -376,7 +376,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         let offset = offset.unwrap_or(0);
@@ -406,7 +406,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.read_agent_task(&principal, &task_id) {
@@ -425,7 +425,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.assign_agent_task(&principal, &task_id, &assignee_agent_id) {
@@ -445,7 +445,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.start_agent_task_attempt(
@@ -477,7 +477,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         let context = match db.agent_task_coding_run_start_context(
@@ -611,7 +611,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         let binding = match db.read_agent_task_coding_run_binding(&principal, &task_id, &attempt_id)
@@ -719,7 +719,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.heartbeat_agent_task_attempt(
@@ -767,7 +767,7 @@ impl ToolRuntime {
                 .with_recovery(RecoveryKind::FixInput, None)
             }
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.complete_agent_task_attempt(

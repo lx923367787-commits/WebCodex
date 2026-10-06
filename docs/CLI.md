@@ -64,6 +64,19 @@ After connecting an MCP coding client, see the [Coding Workflow](CODING_WORKFLOW
 canonical `work_on_project` model bootstrap, behavioral guidance, validation, and closeout
 evidence.
 
+### Desktop project registry
+
+Desktop's Projects page lists folders registered on its Runner, the current selection, enabled/connection state, and active Jobs.
+Adding registers a folder without switching the selection. Switching changes the working folder; when bundled tools require a Runner restart, active Jobs across that Runner block the switch.
+Disabling preserves registration and running Jobs. Removal requires confirmation and unregisters only: local files, source and Git branches remain intact.
+Disabling or removing the current project durably clears the selection. Restart preserves the saved connection without re-registering that folder or inventing a replacement project; an empty list still supports adding projects.
+Full management controls apply to local Full Runtime. Use the remote Server's authorized administration interface for remote management.
+
+Desktop uses `webcodex project list|enable|disable|unregister`. All require `--config`, `--server-url`, `--client-id`, and `--token-file` for the same exact connection.
+Mutations additionally require `--project`, `--expected-revision`, and `--idempotency-key`, and retain the existing admin API's authorization, revision and active-job checks.
+Listing uses user credentials; mutations use administrator credentials, which never enter the WebView. Re-list uncertain outcomes before retrying; mutations are not automatically replayed.
+Unregister does not modify Runner `allowed_roots`; later explicit registration remains subject to existing path authority.
+
 ### Enrollment
 
 | Command | Purpose | Notes |

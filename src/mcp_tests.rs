@@ -197,8 +197,12 @@ fn mcp_export_api_auth(api_key_id: &str, username: &str) -> crate::auth::AuthCon
 mod artifact_export;
 #[path = "mcp_tests/computer_app.rs"]
 mod computer_app;
+#[path = "mcp_tests/documents.rs"]
+mod documents;
 #[path = "mcp_tests/file_import.rs"]
 mod file_import;
+#[path = "mcp_tests/host_goal_transport.rs"]
+mod host_goal_transport;
 #[path = "mcp_tests/http_transport.rs"]
 mod http_transport;
 #[path = "mcp_tests/model_ergonomics.rs"]
@@ -217,6 +221,8 @@ mod project_connector;
 mod protocol;
 #[path = "mcp_tests/runtime_tools.rs"]
 mod runtime_tools;
+#[path = "mcp_tests/schema_projection.rs"]
+mod schema_projection;
 #[path = "mcp_tests/ssh_resource.rs"]
 mod ssh_resource;
 #[path = "mcp_tests/tools.rs"]

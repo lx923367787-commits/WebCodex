@@ -11,6 +11,11 @@ pub fn validate_schema_instance(instance: &Value, schema: &Value) -> Result<(), 
 }
 
 fn validate_schema_instance_at(instance: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    if let Some(negated) = schema.get("not") {
+        if validate_schema_instance_at(instance, negated, path).is_ok() {
+            return Err(format!("{path}: matched forbidden schema"));
+        }
+    }
     if let Some(schemas) = schema.get("allOf").and_then(Value::as_array) {
         for child in schemas {
             validate_schema_instance_at(instance, child, path)?;
@@ -99,11 +104,16 @@ fn validate_schema_instance_at(instance: &Value, schema: &Value, path: &str) -> 
                 }
             }
         }
-        if let Some(properties) = properties {
-            for (field, value) in object {
-                if let Some(child_schema) = properties.get(field) {
-                    validate_schema_instance_at(value, child_schema, &format!("{path}.{field}"))?;
-                }
+        for (field, value) in object {
+            let child_schema = properties
+                .and_then(|properties| properties.get(field))
+                .or_else(|| {
+                    schema
+                        .get("additionalProperties")
+                        .filter(|schema| schema.is_object())
+                });
+            if let Some(child_schema) = child_schema {
+                validate_schema_instance_at(value, child_schema, &format!("{path}.{field}"))?;
             }
         }
     }
@@ -132,6 +142,13 @@ fn validate_schema_instance_at(instance: &Value, schema: &Value, path: &str) -> 
         }
     }
     if let Some(value) = instance.as_str() {
+        if schema
+            .get("minLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|minimum| value.chars().count() < minimum as usize)
+        {
+            return Err(format!("{path}: below minLength"));
+        }
         if schema
             .get("maxLength")
             .and_then(Value::as_u64)
@@ -169,6 +186,23 @@ fn validate_schema_instance_at(instance: &Value, schema: &Value, path: &str) -> 
         schema.get("pattern").and_then(Value::as_str),
     ) {
         let matches = match pattern {
+            "^hgoal_[A-Za-z0-9_.-]+$"
+            | "^wc_goal_[A-Za-z0-9_.-]+$"
+            | "^(wc_goal_|hgoal_)[A-Za-z0-9_.-]+$" => {
+                let suffix = match pattern {
+                    "^hgoal_[A-Za-z0-9_.-]+$" => value.strip_prefix("hgoal_"),
+                    "^wc_goal_[A-Za-z0-9_.-]+$" => value.strip_prefix("wc_goal_"),
+                    _ => value
+                        .strip_prefix("hgoal_")
+                        .or_else(|| value.strip_prefix("wc_goal_")),
+                };
+                suffix.is_some_and(|tail| {
+                    !tail.is_empty()
+                        && tail.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
+                        })
+                })
+            }
             "^wc_sess_[A-Za-z0-9_]+$" => value.strip_prefix("wc_sess_").is_some_and(|tail| {
                 !tail.is_empty()
                     && tail

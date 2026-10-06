@@ -14,6 +14,8 @@ pub use tool_inputs::*;
 pub use tool_result::*;
 
 #[cfg(test)]
+mod goal_contract_tests;
+#[cfg(test)]
 mod tool_call_test_support;
 #[cfg(test)]
 mod tool_call_tests;

@@ -12,6 +12,106 @@ use webcodex_core::plugin::{
 
 static FAKE_PLUGIN: OnceLock<Mutex<Weak<FakeBinary>>> = OnceLock::new();
 
+#[test]
+fn document_provider_binding_is_exact_and_rejects_ambiguity_and_stale_instances() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("office");
+    let other = temp.path().join("other");
+    let registry = temp.path().join("projects");
+    for path in [&root, &other, &registry] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::write(
+        registry.join("office.toml"),
+        format!("id='office'\npath='{}'\n", root.display()),
+    )
+    .unwrap();
+    let worker = temp.path().join("document_worker.py");
+    fs::write(&worker, "# operator configured worker").unwrap();
+    let fake = fake_binary();
+    let provider = PluginProviderConfig {
+        id: "office-a".into(),
+        name: "Office".into(),
+        command: fake.path.to_string_lossy().into_owned(),
+        args: vec![
+            "normal".into(),
+            temp.path().join("marker-a").to_string_lossy().into_owned(),
+        ],
+        cwd: Some(root.to_string_lossy().into_owned()),
+        profile: None,
+        timeout_secs: Some(2),
+        document_worker: Some(worker.to_string_lossy().into_owned()),
+        document_worker_args: vec![],
+    };
+    let config = runner_config(
+        PluginConfig {
+            request_timeout_secs: 2,
+            providers: vec![provider.clone()],
+        },
+        ShellConfig::default(),
+        &registry,
+    );
+    let manager = PluginManager::new(&config, temp.path().join("runner.toml"));
+    let project = "agent:plugin-test:office";
+    let response =
+        manager.document_worker_spec(project, &root.to_string_lossy(), &registry, "plugin-test");
+    let Some(PluginGatewayResponsePayload::DocumentWorker { spec }) = response.payload else {
+        panic!("{response:?}")
+    };
+    assert_eq!(spec.executable, provider.command);
+    assert_eq!(spec.args, vec![worker.to_string_lossy().into_owned()]);
+    let wrong =
+        manager.document_worker_spec(project, &other.to_string_lossy(), &registry, "plugin-test");
+    assert_eq!(wrong.error.unwrap().code, "document_project_changed");
+    let mut context = crate::webcodex_runner::jobs::test_job_context(&root, vec![]);
+    context.runtime_project_id = Some(project.into());
+    let id = "a".repeat(32);
+    context.document = Some(webcodex_core::runner_protocol::DocumentJobMetadata {
+        request_id: id.clone(),
+        operation: "present_document".into(),
+        project_root: root.to_string_lossy().into_owned(),
+        source_path: "report.pdf".into(),
+        provider_id: spec.provider_id.clone(),
+        provider_instance_id: spec.provider_instance_id.clone(),
+        export_file: false,
+    });
+    let mut argv = spec.args.clone();
+    argv.extend([
+        "--request".into(),
+        "-".into(),
+        "--result".into(),
+        format!(".webcodex-office/cache/{id}/result.json"),
+    ]);
+    let mut operation=webcodex_core::runner_operation::RunnerJobProcessOperation {job_id:"document-job".into(),cwd:Some(root.to_string_lossy().into_owned()),process:webcodex_core::runner_protocol::ShellProcessArgv {executable:spec.executable,args:argv},stdin:Some(json!({"request_id":id,"operation":"present_document","arguments":{"path":"report.pdf"}}).to_string()),timeout_secs:300,context};
+    manager
+        .validate_document_process(&operation, &registry, "plugin-test")
+        .unwrap();
+    operation
+        .context
+        .document
+        .as_mut()
+        .unwrap()
+        .provider_instance_id = "replacement".into();
+    assert!(manager
+        .validate_document_process(&operation, &registry, "plugin-test")
+        .is_err());
+    let mut duplicate = provider.clone();
+    duplicate.id = "office-b".into();
+    duplicate.args[1] = temp.path().join("marker-b").to_string_lossy().into_owned();
+    let config = runner_config(
+        PluginConfig {
+            request_timeout_secs: 2,
+            providers: vec![provider, duplicate],
+        },
+        ShellConfig::default(),
+        &registry,
+    );
+    let ambiguous = PluginManager::new(&config, temp.path().join("duplicate.toml"));
+    let response =
+        ambiguous.document_worker_spec(project, &root.to_string_lossy(), &registry, "plugin-test");
+    assert_eq!(response.error.unwrap().code, "document_provider_ambiguous");
+}
+
 struct FakeBinary {
     _temp: TempDir,
     path: PathBuf,
@@ -68,6 +168,8 @@ impl Fixture {
         let marker = temp.path().join("marker.log");
         let fake = fake_binary();
         let provider = PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "fake".to_string(),
             name: "Fake Plugin".to_string(),
             command: fake.path.to_string_lossy().into_owned(),
@@ -579,6 +681,8 @@ fn prepared_environment_reuses_shell_env_default_profile_and_clears_sensitive_va
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "fake".to_string(),
             name: "Fake Plugin".to_string(),
             command: fake.path.to_string_lossy().into_owned(),
@@ -637,6 +741,8 @@ fn runner_real_process_bare_plugin_command_resolves_from_prepared_path_with_expl
         // behavior. Keep provider startup tolerant of a heavily loaded CI host.
         request_timeout_secs: 10,
         providers: vec![PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "fake".to_string(),
             name: "Fake Plugin".to_string(),
             command: command_name,
@@ -678,6 +784,8 @@ fn plugin_profile_init_script_is_captured_into_native_child_environment() {
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "fake".to_string(),
             name: "Fake Plugin".to_string(),
             command: fake.path.to_string_lossy().into_owned(),
@@ -706,6 +814,8 @@ fn reload_replaces_committed_provider_and_invalidates_old_instance() {
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "fake".to_string(),
             name: "Fake Plugin".to_string(),
             command: fake.path.to_string_lossy().into_owned(),
@@ -782,6 +892,8 @@ fn concurrent_reload_is_busy_while_existing_calls_continue_and_later_reload_wins
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "fake".to_string(),
             name: "Fake Plugin".to_string(),
             command: fake.path.to_string_lossy().into_owned(),
@@ -1013,6 +1125,8 @@ fn shutdown_during_blocked_reload_does_not_wait_for_gate_or_allow_late_commit() 
     let startup_plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "fake".to_string(),
             name: "Fake Plugin".to_string(),
             command: fake.path.to_string_lossy().into_owned(),
@@ -1076,6 +1190,8 @@ fn failed_candidate_keeps_previous_instance_and_removal_has_no_fallback() {
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "fake".to_string(),
             name: "Fake Plugin".to_string(),
             command: fake.path.to_string_lossy().into_owned(),
@@ -1234,6 +1350,8 @@ fn write_runner_toml_without_plugins(path: &Path, project_registry_dir: &Path) {
 fn plugin_environment_projection_tracks_explicit_isolation() {
     let plugins = PluginConfig {
         providers: vec![PluginProviderConfig {
+            document_worker: None,
+            document_worker_args: Vec::new(),
             id: "projection-test".into(),
             name: "Projection test".into(),
             command: "node".into(),

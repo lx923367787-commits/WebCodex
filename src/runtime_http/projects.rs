@@ -213,6 +213,7 @@ pub async fn projects_resolve_or_register(
     };
     let auth = depot.obtain::<crate::auth::AuthContext>().ok().cloned();
     let result = runtime
+        .execution()
         .resolve_or_register_project(body.client_id, body.path, auth.as_ref())
         .await;
     render_result(res, &audit, "resolve_or_register_project", None, result);

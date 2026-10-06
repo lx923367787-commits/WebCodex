@@ -62,7 +62,7 @@ pub(super) fn connector_window(window: &ClientWindow) -> ConnectorWindowId {
 pub(super) fn connector_execution_authority(
     tools: &crate::tool_runtime::ToolRuntime,
 ) -> ConnectorExecutionAuthority {
-    let authority = tools.permission_evaluator.config();
+    let authority = tools.config.permission_evaluator.config();
     ConnectorExecutionAuthority {
         auto_authorize: authority.auto_authorize(),
         mode: authority.mode_name().to_string(),

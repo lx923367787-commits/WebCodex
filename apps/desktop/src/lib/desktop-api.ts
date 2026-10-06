@@ -3,10 +3,17 @@ import type {
   ActivityEntry,
   DesktopState,
   ProjectSelection,
+  ProjectAction,
+  ProjectRegistrySnapshot,
   TunnelProxyMode,
 } from "../models/topology";
 
 export const desktopApi = {
+  listProjects: () => invoke<ProjectRegistrySnapshot>("list_desktop_projects"),
+  addProject: (projectPath: string) => invoke<DesktopState>("add_desktop_project", { request: { projectPath } }),
+  switchProject: (projectId: string, expectedRevision: string) => invoke<DesktopState>("switch_desktop_project", { request: { projectId, expectedRevision } }),
+  mutateProject: (projectId: string, expectedRevision: string, action: ProjectAction) =>
+    invoke<DesktopState>("mutate_desktop_project", { request: { projectId, expectedRevision, action } }),
   updateTunnelConfig: (request: { action: "save"; tunnelId: string; apiKey: string | null } | { action: "use_environment" }) =>
     invoke<DesktopState>("update_tunnel_config", { request }),
   getState: () => invoke<DesktopState>("get_desktop_state"),
@@ -57,4 +64,3 @@ export const desktopApi = {
 };
 
 export type QuickShareProvider = "cloudflare" | "openai" | "none";
-

@@ -17,6 +17,26 @@ use state::AppState;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 
+/// Packaging-only probe: no window, plugins, credentials or runtime processes.
+/// A Cargo build without tauri/custom-protocol can compile successfully while
+/// still pointing at the development server, which cannot resume a saved runtime.
+pub fn has_embedded_frontend() -> bool {
+    if tauri::is_dev() {
+        return false;
+    }
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let names: Vec<_> = context
+        .assets()
+        .iter()
+        .map(|(name, _)| name.into_owned())
+        .collect();
+    names
+        .iter()
+        .any(|name| name.trim_start_matches('/') == "index.html")
+        && names.iter().any(|name| name.ends_with(".js"))
+        && names.iter().any(|name| name.ends_with(".css"))
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
         // Tauri recommends registering single-instance first so a secondary
@@ -58,6 +78,10 @@ pub fn run() {
             commands::inspect_project,
             commands::configure_local_setup,
             commands::activate_local_project,
+            commands::list_desktop_projects,
+            commands::add_desktop_project,
+            commands::switch_desktop_project,
+            commands::mutate_desktop_project,
             commands::configure_remote_setup,
             commands::start_quick_share,
             commands::stop_quick_share,

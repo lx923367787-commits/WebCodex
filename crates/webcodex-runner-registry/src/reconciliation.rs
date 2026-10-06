@@ -62,6 +62,32 @@ fn validate_context(
     snapshot: &ShellJobSnapshot,
 ) -> Result<(), String> {
     let context = &snapshot.context;
+    if let Some(document) = context.document.as_ref() {
+        if !document.is_valid()
+            || context.runtime_project_id.is_none()
+            || context.ssh_resource.is_some()
+            || context.project_cwd.as_deref() != Some(".")
+            || context.shell.as_deref() != Some("direct_argv")
+            || context
+                .structured_execution
+                .as_ref()
+                .is_none_or(|metadata| metadata.execution_source != "run_process")
+        {
+            return Err("job inventory document context is invalid".into());
+        }
+        if require_project_membership
+            && !projects.iter().any(|project| {
+                !project.disabled
+                    && context.runtime_project_id.as_deref()
+                        == Some(format!("agent:{client_id}:{}", project.id).as_str())
+                    && project.path == document.project_root
+            })
+        {
+            return Err(
+                "job inventory document project root does not match its registration".into(),
+            );
+        }
+    }
     if command_preview(&context.command_preview) != context.command_preview
         || context.command_preview.chars().count() > COMMAND_PREVIEW_MAX_CHARS + 1
     {
@@ -502,6 +528,7 @@ fn same_context(job: &ShellJobRecord, snapshot: &ShellJobSnapshot) -> bool {
         && job.validation_steps == context.validation_steps
         && job.validation == context.validation
         && job.structured_execution == context.structured_execution
+        && job.document == context.document
 }
 
 fn detached_instance_transfer_allowed(job: &ShellJobRecord, snapshot: &ShellJobSnapshot) -> bool {
@@ -647,6 +674,7 @@ fn record_from_snapshot(
 ) -> ShellJobRecord {
     let context = &snapshot.context;
     let mut record = ShellJobRecord {
+        document: context.document.clone(),
         job_id: snapshot.job_id.clone(),
         request_id: Some(snapshot.request_id.clone()),
         client_id: client_id.to_string(),

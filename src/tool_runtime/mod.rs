@@ -18,11 +18,19 @@ mod continuation_feedback;
 pub(crate) mod conversation_import;
 mod discovery_tools;
 mod dispatch;
+pub(crate) mod documents;
 mod edit_tool_telemetry;
 mod file_listing;
 mod file_tools;
 pub(crate) mod files;
 mod git;
+mod goal;
+mod host_goal;
+mod host_goal_checks;
+mod host_goal_context;
+mod host_goal_files;
+mod host_goal_project_files;
+mod host_goal_review;
 mod runner_authorization;
 mod runner_config;
 #[cfg(test)]
@@ -63,11 +71,12 @@ pub(crate) mod runtime_metrics;
 mod script;
 mod search_project_texts;
 mod semantic_navigation;
+mod services;
 mod session_context;
 pub(crate) use observations::is_meaningful_activity_tool;
 pub(crate) use session_context::runtime_observation_principal;
 pub(crate) use window_activity::{
-    ToolCallCorrelation, WindowActivityGuard, WindowLoopTransition, WorkflowSessionCorrelation,
+    ToolCallCorrelation, WindowActivityGuard, WindowLoopTransition,
     WorkflowSessionCorrelationRelation,
 };
 mod session_shell;

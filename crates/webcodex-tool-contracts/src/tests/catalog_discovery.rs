@@ -252,6 +252,7 @@ fn tool_categories_and_recommended_flows_are_well_formed() {
     for name in [
         "read_file",
         "read_files",
+        "present_document",
         "run_shell",
         "search_project_text",
         "search_project_texts",
@@ -443,6 +444,9 @@ fn tool_categories_include_edit_group() {
         "apply_patch",
         "write_project_file",
         "apply_unified_diff",
+        "document_edit",
+        "document_convert",
+        "document_restore",
     ] {
         assert!(edit.iter().any(|value| value == present));
     }

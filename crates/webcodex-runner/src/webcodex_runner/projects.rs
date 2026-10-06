@@ -1,12 +1,17 @@
+pub(crate) mod creation;
+
 use super::config::{
     default_true, project_registry_dir, validate_shell_profile_name, RunnerConfig, RunnerPolicy,
 };
 use super::shell::canonicalize_existing;
+use crate::err_cmd;
+use crate::ok_cmd;
 use crate::runner_protocol::RunnerProjectSummary;
 #[cfg(test)]
 use crate::runner_protocol::RunnerRequest;
-use crate::{err_cmd, ok_cmd, write_created_file};
-use crate::{CommandResult, CreatedProjectPaths};
+use crate::webcodex_runner::projects::creation::write_created_file;
+use crate::webcodex_runner::projects::creation::CreatedProjectPaths;
+use crate::CommandResult;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};

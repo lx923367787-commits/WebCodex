@@ -18,11 +18,10 @@ use crate::tool_runtime::kernel::{
 use crate::tool_runtime::model_ergonomics_telemetry::{
     ModelErgonomicsRecord, ModelErgonomicsTimer,
 };
-use crate::tool_runtime::specialized::SpecializedGovernanceDenial;
 use crate::tool_runtime::tool_definition::{
     is_adaptive_runtime_direct_tool, runtime_tool_accepts_context_ack, LOCAL_CODING_TOOL_NAMES,
 };
-use crate::tool_runtime::{registered_tool_specs, ToolCall, ToolResult, ToolRuntime, ToolSpec};
+use crate::tool_runtime::{registered_tool_specs, ToolResult, ToolRuntime, ToolSpec};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -173,7 +172,7 @@ pub(crate) fn adaptive_runtime_gateway_target_admitted_for_test(
     )
 }
 
-fn unwrap_adaptive_runtime_gateway_arguments(
+pub(super) fn unwrap_adaptive_runtime_gateway_arguments(
     arguments: Value,
     stateless_2026: bool,
 ) -> Result<(String, Value), String> {
@@ -196,7 +195,10 @@ fn unwrap_adaptive_runtime_gateway_arguments(
         "adaptive runtime gateway field 'arguments' must be an object".to_string()
     })?;
 
-    let mut allowed_wrapper_fields = Vec::new();
+    let mut allowed_wrapper_fields = vec![
+        webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD,
+        webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD,
+    ];
     if stateless_2026 {
         allowed_wrapper_fields.extend([
             crate::tool_runtime::sessions::TOOL_CALL_RECORDING_SESSION_ID_FIELD,
@@ -232,6 +234,76 @@ fn adaptive_runtime_gateway_unknown_target(target: &str) -> ToolResult {
             "recovery_kind": "fix_input"
         }),
     )
+}
+
+// Keep provider content blocks and their structured payload intact while the
+// shared kernel owns admission, operation receipts and context metering.
+pub(super) fn specialized_runtime_result_for_mcp(tool_name: &str, mut result: ToolResult) -> Value {
+    let meter = result
+        .output
+        .as_object_mut()
+        .and_then(|output| output.remove("context_meter"));
+    let mut rendered = if tool_name == crate::plugin_gateway::PLUGIN_TOOL_NAME
+        && result.output.get("content").is_some_and(Value::is_array)
+        && result.output.get("isError").is_some_and(Value::is_boolean)
+    {
+        let mut native = serde_json::Map::new();
+        for field in ["content", "structuredContent", "isError"] {
+            if let Some(value) = result.output.get(field) {
+                native.insert(field.to_string(), value.clone());
+            }
+        }
+        Value::Object(native)
+    } else if tool_name == crate::plugin_gateway::PLUGIN_TOOL_NAME
+        && result.output.pointer("/error/code").is_some()
+    {
+        let mut output = json!({"error":result.output["error"]});
+        if let Some(state) = result.output.get("dispatch_certainty") {
+            output["dispatchState"] = state.clone();
+        }
+        if let Some(recovery) = result.output.get("recovery") {
+            output["recovery"] = recovery.clone();
+        }
+        specialized_metadata_result(output, true)
+    } else if tool_name == crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME
+        && result.output.get("dispatch_state").is_some()
+        && result.output.get("error_kind").is_some()
+    {
+        let mut output = json!({
+            "error":{"code":result.output["error_kind"],"message":result.error},
+            "dispatchState":result.output["dispatch_state"]
+        });
+        if let Some(recovery) = result.output.get("recovery") {
+            output["recovery"] = recovery.clone();
+        }
+        specialized_metadata_result(output, true)
+    } else if result.success {
+        specialized_metadata_result(result.output, false)
+    } else {
+        mcp_runtime_tool_result_fallback(result)
+    };
+    if let Some(meter) = meter {
+        rendered["_meta"] = json!({"webcodex/context_meter":meter});
+        if let Some(notice) = meter
+            .get("notice")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(content) = rendered.get_mut("content").and_then(Value::as_array_mut) {
+                content.push(
+                    json!({"type":"text","text":format!("WebCodex context notice: {notice}")}),
+                );
+            }
+        }
+    }
+    rendered
+}
+
+fn specialized_metadata_result(output: Value, error: bool) -> Value {
+    json!({
+        "content":[{"type":"text","text":output.to_string()}],
+        "structuredContent":output,"isError":error
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -424,10 +496,37 @@ fn add_stateless_context_projection_output_schema(tool: &mut Value) {
     }
 }
 
+fn add_goal_context_metadata(payload: &mut Value) {
+    let Some(tools) = payload.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for tool in tools {
+        // The local MCP forwarding gateway has its own argument contract and
+        // does not pass through the goal-aware ToolRuntime invocation boundary.
+        if tool.get("name").and_then(Value::as_str) == Some(crate::mcp_gateway::MCP_TOOL_NAME) {
+            continue;
+        }
+        if let Some(properties) = tool
+            .pointer_mut("/inputSchema/properties")
+            .and_then(Value::as_object_mut)
+        {
+            properties.insert(
+                webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD.to_string(),
+                webcodex_tool_contracts::goal_context_input_schema(),
+            );
+            properties.insert(
+                webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD.to_string(),
+                webcodex_tool_contracts::context_epoch_input_schema(),
+            );
+        }
+    }
+}
+
 pub(super) fn add_stateless_workflow_recorder_metadata(
     payload: &mut Value,
     model_surface: ModelSurface,
 ) {
+    add_goal_context_metadata(payload);
     let Some(tools) = payload.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
     };
@@ -530,7 +629,24 @@ fn adapt_artifact_image_mode_for_mcp(input_schema: &mut Value, description: &mut
 }
 
 fn adapt_tool_manifest_result_for_mcp(result: &mut ToolResult) {
-    if !result.success || result.output["name"] != "read_project_artifact" {
+    if !result.success {
+        return;
+    }
+    if let Some(properties) = result
+        .output
+        .pointer_mut("/input_schema/properties")
+        .and_then(Value::as_object_mut)
+    {
+        properties.insert(
+            webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD.to_string(),
+            webcodex_tool_contracts::goal_context_input_schema(),
+        );
+        properties.insert(
+            webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD.to_string(),
+            webcodex_tool_contracts::context_epoch_input_schema(),
+        );
+    }
+    if result.output["name"] != "read_project_artifact" {
         return;
     }
     let Some(mut description) = result.output["description"].as_str().map(str::to_string) else {
@@ -649,6 +765,10 @@ pub(super) async fn handle_list(
                 if let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut) {
                     tools.push(crate::ssh_resource_gateway::tool_spec(compact_schemas));
                 }
+            }
+            add_goal_context_metadata(&mut result);
+            if model_surface == ModelSurface::AdaptiveRuntime {
+                super::schema_projection::deduplicate_output_schemas(&mut result);
             }
             result
         }
@@ -1416,6 +1536,23 @@ pub(super) async fn handle_call(
             }
             return outcome;
         }
+        if let Some(denied) =
+            runtime.independent_gateway_goal_denial(&params.arguments, auth, window)
+        {
+            if let Some(lc) = lifecycle.as_deref() {
+                lc.dispatch_failed("goal_gateway_effect_unknown");
+                lc.dispatch_finished(true, Some(false), "tool_error");
+            }
+            let result = mcp_runtime_tool_result_fallback(denied);
+            return McpOutcome::Ok(rpc_result(
+                id,
+                if stateless_2026 {
+                    mcp_stateless_result(result, false)
+                } else {
+                    result
+                },
+            ));
+        }
         if let Some(lc) = lifecycle.as_deref() {
             lc.capture_payload("effective_arguments", &params.arguments);
         }
@@ -1433,244 +1570,15 @@ pub(super) async fn handle_call(
             },
         ));
     }
-    if params.name == crate::plugin_gateway::PLUGIN_TOOL_NAME {
-        let recording_session_id = match strip_recording_session_id(&mut params.arguments) {
-            Ok(session_id) => session_id,
-            Err(message) => {
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.dispatch_failed("invalid_arguments");
-                    lc.dispatch_finished(false, Some(false), "invalid_arguments");
-                }
-                return McpOutcome::BadRequest(rpc_error(id, -32602, message));
-            }
-        };
-        let call = match ToolCall::from_tool_name(&params.name, params.arguments.clone()) {
-            Ok(call) => call,
-            Err(message) => {
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.dispatch_failed("invalid_arguments");
-                    lc.dispatch_finished(false, Some(false), "invalid_arguments");
-                }
-                return McpOutcome::BadRequest(rpc_error(id, -32602, message));
-            }
-        };
-        let ToolCall::PluginTool(plugin) = call else {
-            unreachable!("plugin_tool parser must yield ToolCall::PluginTool");
-        };
-        if let Some(lc) = lifecycle.as_deref() {
-            lc.capture_payload(
-                "effective_arguments",
-                &crate::plugin_gateway::audit_arguments(&params.arguments),
-            );
-        }
-        let invocation = match crate::plugin_gateway::invoke(
-            runtime,
-            plugin,
-            recording_session_id.as_deref(),
-            auth,
-            crate::tool_runtime::sessions::SessionTransport::Mcp,
-        )
-        .await
-        {
-            Ok(invocation) => invocation,
-            Err(SpecializedGovernanceDenial::Scope {
-                required_scope,
-                description,
-            }) => {
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.dispatch_failed("forbidden");
-                    lc.dispatch_finished(false, Some(false), "forbidden");
-                }
-                return scope_forbidden(auth, Some(required_scope), description);
-            }
-            Err(SpecializedGovernanceDenial::Tool(result)) => {
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.dispatch_failed("specialized_governance_denied");
-                    lc.dispatch_finished(true, Some(false), "tool_error");
-                }
-                let result = mcp_runtime_tool_result_fallback(result);
-                return McpOutcome::Ok(rpc_result(
-                    id,
-                    if stateless_2026 {
-                        mcp_stateless_result(result, false)
-                    } else {
-                        result
-                    },
-                ));
-            }
-        };
-        let ok = invocation.success();
-        if let (Some(slot), Some(session_id)) = (
-            correlation_out.as_deref_mut(),
-            recording_session_id.as_deref(),
-        ) {
-            let mut correlation = crate::tool_runtime::ToolCallCorrelation::default();
-            let project = runtime.sessions.session_project(session_id).flatten();
-            correlation.resolved_project = project.clone();
-            correlation.add_workflow_session(crate::tool_runtime::WorkflowSessionCorrelation {
-                session_id: session_id.to_string(),
-                project,
-                relation: crate::tool_runtime::WorkflowSessionCorrelationRelation::Recording,
-            });
-            *slot = correlation;
-        }
-        if let Some(lc) = lifecycle.as_deref() {
-            lc.capture_payload(
-                "specialized_governance",
-                &invocation.policy().audit_projection(),
-            );
-            lc.dispatch_finished(true, Some(ok), if ok { "success" } else { "tool_error" });
-        }
-        let result = invocation.to_mcp_result();
-        return McpOutcome::Ok(rpc_result(
-            id,
-            if stateless_2026 {
-                mcp_stateless_result(result, false)
-            } else {
-                result
-            },
-        ));
-    }
-    if params.name == crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME
-        && (model_surface != ModelSurface::AdaptiveRuntime || via_adaptive_runtime_gateway)
-    {
-        let recording_session_id = match strip_recording_session_id(&mut params.arguments) {
-            Ok(session_id) => session_id,
-            Err(message) => {
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.dispatch_failed("invalid_arguments");
-                    lc.dispatch_finished(false, Some(false), "invalid_arguments");
-                }
-                return McpOutcome::BadRequest(rpc_error(id, -32602, message));
-            }
-        };
-        let policy = match crate::ssh_resource_gateway::operation_policy(&params.arguments) {
-            Ok(policy) => policy,
-            Err(_) => {
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.capture_payload(
-                        "effective_arguments",
-                        &crate::ssh_resource_gateway::audit_arguments(&params.arguments),
-                    );
-                }
-                let result =
-                    crate::ssh_resource_gateway::call(runtime, params.arguments, auth).await;
-                let ok = result.get("isError").and_then(Value::as_bool) != Some(true);
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.dispatch_finished(true, Some(ok), if ok { "success" } else { "tool_error" });
-                }
-                return McpOutcome::Ok(rpc_result(
-                    id,
-                    if stateless_2026 {
-                        mcp_stateless_result(result, false)
-                    } else {
-                        result
-                    },
-                ));
-            }
-        };
-        let audit = crate::ssh_resource_gateway::audit_arguments(&params.arguments);
-        let request = match serde_json::from_value::<crate::tool_runtime::SshResourceToolCall>(
-            params.arguments.clone(),
-        ) {
-            Ok(request) if request.validate().is_ok() => request,
-            _ => {
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.capture_payload("effective_arguments", &audit);
-                }
-                let result =
-                    crate::ssh_resource_gateway::call(runtime, params.arguments, auth).await;
-                let ok = result.get("isError").and_then(Value::as_bool) != Some(true);
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.dispatch_finished(true, Some(ok), if ok { "success" } else { "tool_error" });
-                }
-                return McpOutcome::Ok(rpc_result(
-                    id,
-                    if stateless_2026 {
-                        mcp_stateless_result(result, false)
-                    } else {
-                        result
-                    },
-                ));
-            }
-        };
-        let invocation = match crate::ssh_resource_gateway::invoke(
-            runtime,
-            request,
-            recording_session_id.as_deref(),
-            auth,
-            crate::tool_runtime::sessions::SessionTransport::Mcp,
-        )
-        .await
-        {
-            Ok(invocation) => invocation,
-            Err(SpecializedGovernanceDenial::Scope {
-                required_scope,
-                description,
-            }) => {
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.capture_payload("specialized_governance", &policy.audit_projection());
-                    lc.dispatch_failed("forbidden");
-                    lc.dispatch_finished(false, Some(false), "forbidden");
-                }
-                return scope_forbidden(auth, Some(required_scope), description);
-            }
-            Err(SpecializedGovernanceDenial::Tool(result)) => {
-                if let Some(lc) = lifecycle.as_deref() {
-                    lc.capture_payload("specialized_governance", &policy.audit_projection());
-                    lc.dispatch_failed("specialized_governance_denied");
-                    lc.dispatch_finished(true, Some(false), "tool_error");
-                }
-                let result = mcp_runtime_tool_result_fallback(result);
-                return McpOutcome::Ok(rpc_result(
-                    id,
-                    if stateless_2026 {
-                        mcp_stateless_result(result, false)
-                    } else {
-                        result
-                    },
-                ));
-            }
-        };
-        let ok = invocation.success();
-        if let (Some(slot), Some(session_id)) = (
-            correlation_out.as_deref_mut(),
-            recording_session_id.as_deref(),
-        ) {
-            let mut correlation = crate::tool_runtime::ToolCallCorrelation::default();
-            let project = runtime.sessions.session_project(session_id).flatten();
-            correlation.resolved_project = project.clone();
-            correlation.add_workflow_session(crate::tool_runtime::WorkflowSessionCorrelation {
-                session_id: session_id.to_string(),
-                project,
-                relation: crate::tool_runtime::WorkflowSessionCorrelationRelation::Recording,
-            });
-            *slot = correlation;
-        }
-        if let Some(lc) = lifecycle.as_deref() {
-            lc.capture_payload("effective_arguments", &audit);
-            lc.capture_payload(
-                "specialized_governance",
-                &invocation.policy().audit_projection(),
-            );
-            lc.dispatch_finished(true, Some(ok), if ok { "success" } else { "tool_error" });
-        }
-        let result = invocation.to_mcp_result();
-        return McpOutcome::Ok(rpc_result(
-            id,
-            if stateless_2026 {
-                mcp_stateless_result(result, false)
-            } else {
-                result
-            },
-        ));
-    }
     // Focused model surfaces reject direct tools they do not advertise at the
     // MCP boundary. Adaptive gateway calls are already reduced to an admitted
     // target and continue through the same normal runtime checks, whether that
     // target's preferred exposure is gateway or direct.
     let surface_denied = match model_surface {
-        ModelSurface::LocalCoding => !LOCAL_CODING_TOOL_NAMES.contains(&params.name.as_str()),
+        ModelSurface::LocalCoding => {
+            !LOCAL_CODING_TOOL_NAMES.contains(&params.name.as_str())
+                && params.name != crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME
+        }
         ModelSurface::AdaptiveRuntime => {
             !via_adaptive_runtime_gateway && !is_adaptive_runtime_direct_tool(&params.name)
         }
@@ -1693,6 +1601,45 @@ pub(super) async fn handle_call(
             )
         };
         return McpOutcome::BadRequest(rpc_error(id, -32602, message));
+    }
+    // Goal metadata has a shared kernel meaning. Existing generic Session
+    // continuity wrappers still have no meaning for specialized gateways.
+    if matches!(
+        params.name.as_str(),
+        crate::plugin_gateway::PLUGIN_TOOL_NAME
+            | crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME
+    ) {
+        let unsupported = [
+            crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_MESSAGE_IDS_FIELD,
+            crate::tool_runtime::sessions::TOOL_CALL_SESSION_MESSAGE_RESOLUTION_FIELD,
+            crate::tool_runtime::context_projection::TOOL_CALL_CONTEXT_REQUEST_FIELD,
+            crate::tool_runtime::sessions::TOOL_CALL_ACK_SESSION_CONTEXT_REVISION_FIELD,
+        ]
+        .into_iter()
+        .find(|field| params.arguments.get(*field).is_some());
+        if let Some(field) = unsupported {
+            let message =
+                format!("unknown field '{field}' for specialized gateway: generic continuity metadata is unsupported");
+            if let Some(lc) = lifecycle.as_deref() {
+                lc.dispatch_failed("invalid_arguments");
+                lc.dispatch_finished(false, Some(false), "invalid_arguments");
+            }
+            if params.name == crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME {
+                let result = specialized_metadata_result(
+                    json!({"error":{"code":"ssh_resource_invalid","message":message},"dispatchState":"not_started"}),
+                    true,
+                );
+                return McpOutcome::Ok(rpc_result(
+                    id,
+                    if stateless_2026 {
+                        mcp_stateless_result(result, false)
+                    } else {
+                        result
+                    },
+                ));
+            }
+            return McpOutcome::BadRequest(rpc_error(id, -32602, message));
+        }
     }
     // From here on, the MCP boundary has established a model-visible runtime
     // tool identity. A few MCP-only validations still happen before the
@@ -1843,43 +1790,62 @@ pub(super) async fn handle_call(
         crate::tool_runtime::sessions::SessionContextRevisionAck::Unacknowledged
     };
     if let Some(lc) = lifecycle.as_deref() {
-        lc.capture_payload("effective_arguments", &params.arguments);
+        let arguments = if params.name == crate::plugin_gateway::PLUGIN_TOOL_NAME {
+            crate::plugin_gateway::audit_arguments(&params.arguments)
+        } else if params.name == crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME {
+            crate::ssh_resource_gateway::audit_arguments(&params.arguments)
+        } else {
+            params.arguments.clone()
+        };
+        lc.capture_payload("effective_arguments", &arguments);
     }
     let as_image_requested = params.name == "read_project_artifact"
         && params.arguments.get("as_image").and_then(Value::as_bool) == Some(true);
-    let outcome = runtime
-        .call_tool_with_invocation_metadata(
-            KernelToolCallRequest {
-                tool_name: params.name.clone(),
-                arguments: params.arguments,
-            },
-            ToolCallContext {
-                transport: ToolTransport::Mcp,
-                session_id: session_id.as_deref(),
-                auth,
-                window,
-                record_oauth_scope_denials: false,
-                host_file_import_trust,
-            },
-            ToolInvocationMetadata {
-                ack_session_message_ids,
-                session_message_resolution,
-                context_request,
-                ack_session_context_revision,
-            },
-            ToolProtocolCapabilities {
-                context_continuity: context_continuity_surface_capable,
-                context_sidecar: context_sidecar_capable,
-                skill_runtime: skill_runtime_capable,
-                skill_management: skill_management_capable,
-                memory_surface: memory_surface_capable,
-                trace_diagnostics: trace_diagnostics_capable,
-            },
-        )
-        .await;
+    let review_arguments = params.arguments.clone();
+    // Keep the large runtime dispatch future off the adapter's async frame;
+    // otherwise ordinary discovery can exhaust Windows worker-thread stacks.
+    let outcome = Box::pin(runtime.call_tool_with_invocation_metadata(
+        KernelToolCallRequest {
+            tool_name: params.name.clone(),
+            arguments: params.arguments,
+        },
+        ToolCallContext {
+            transport: ToolTransport::Mcp,
+            session_id: session_id.as_deref(),
+            auth,
+            window,
+            record_oauth_scope_denials: false,
+            host_file_import_trust,
+        },
+        ToolInvocationMetadata {
+            ack_session_message_ids,
+            session_message_resolution,
+            context_request,
+            ack_session_context_revision,
+        },
+        ToolProtocolCapabilities {
+            context_continuity: context_continuity_surface_capable,
+            context_sidecar: context_sidecar_capable,
+            skill_runtime: skill_runtime_capable,
+            skill_management: skill_management_capable,
+            memory_surface: memory_surface_capable,
+            trace_diagnostics: trace_diagnostics_capable,
+        },
+    ))
+    .await;
     let model_ergonomics_completion = outcome.model_ergonomics;
     if let Some(slot) = correlation_out.as_deref_mut() {
-        *slot = outcome.correlation.clone();
+        let mut correlation = outcome.correlation.clone();
+        if matches!(
+            params.name.as_str(),
+            crate::plugin_gateway::PLUGIN_TOOL_NAME
+                | crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME
+        ) {
+            correlation.resolved_project = session_id
+                .as_deref()
+                .and_then(|id| runtime.sessions.session_project(id).flatten());
+        }
+        *slot = correlation;
     }
     let mut result = match outcome.error_status {
         Some(ToolCallErrorStatus::InsufficientScope {
@@ -1909,6 +1875,23 @@ pub(super) async fn handle_call(
             ) {
                 *slot = Some(completion.record_for_pre_result_failure("invalid_arguments"));
             }
+            if params.name == crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME {
+                let result = specialized_metadata_result(
+                    json!({
+                        "error":{"code":"ssh_resource_invalid","message":message},
+                        "dispatchState":"not_started"
+                    }),
+                    true,
+                );
+                return McpOutcome::Ok(rpc_result(
+                    id,
+                    if stateless_2026 {
+                        mcp_stateless_result(result, false)
+                    } else {
+                        result
+                    },
+                ));
+            }
             return McpOutcome::BadRequest(rpc_error(id, -32602, message));
         }
         None => outcome
@@ -1936,17 +1919,38 @@ pub(super) async fn handle_call(
             lc.dispatch_finished(true, Some(false), category);
         }
     }
-    let result = match resources::adapt_tool_result(
-        &params.name,
-        as_image_requested,
-        result,
-        resource_tool_call,
+    let mut result = if matches!(
+        params.name.as_str(),
+        crate::plugin_gateway::PLUGIN_TOOL_NAME
+            | crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME
     ) {
-        resources::McpResourceToolResultAdaptation::Framed(value) => value,
-        resources::McpResourceToolResultAdaptation::Unhandled(result) => {
-            mcp_runtime_tool_result_fallback(result)
+        specialized_runtime_result_for_mcp(&params.name, result)
+    } else if crate::tool_runtime::documents::is_document_tool(&params.name) {
+        resources::document_tool_result(runtime, result, auth, stateless_2026, model_surface).await
+    } else {
+        match resources::adapt_tool_result(
+            &params.name,
+            as_image_requested,
+            result,
+            resource_tool_call,
+        ) {
+            resources::McpResourceToolResultAdaptation::Framed(value) => value,
+            resources::McpResourceToolResultAdaptation::Unhandled(result) => {
+                mcp_runtime_tool_result_fallback(result)
+            }
         }
     };
+    if crate::tool_runtime::documents::is_document_tool(&params.name) || as_image_requested {
+        runtime
+            .record_host_review_transport(
+                &mut result,
+                &params.name,
+                &review_arguments,
+                auth,
+                window,
+            )
+            .await;
+    }
     let model_ergonomics = model_ergonomics_completion.as_ref().and_then(|completion| {
         result
             .get("structuredContent")

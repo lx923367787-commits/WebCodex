@@ -15,6 +15,9 @@ mod audit;
 mod communication;
 mod execution_model;
 mod executions;
+mod goal;
+mod host_goal;
+mod host_goal_context;
 mod memory;
 pub mod models;
 mod oauth;
@@ -60,6 +63,12 @@ pub use self::execution_model::{
 pub use self::execution_model::{
     ConnectorExecutionContinuationIntent, ConnectorTerminalContinuationClaim,
 };
+pub use self::goal::{GoalMutation, GoalStoreError};
+pub use self::host_goal::{
+    HostGoalCheckpointAction, HostGoalClaimMutation, HostGoalHandoffSnapshot, HostGoalMutation,
+    HostGoalOperationMutation, HostGoalPlanMutation,
+};
+pub use self::host_goal_context::{HostContextMeter, HostContextState, HostGoalWindowBinding};
 #[allow(unused_imports)]
 pub use self::memory::{
     canonicalize_memory_tags, memory_catalog_revision, valid_memory_catalog_revision,
@@ -138,5 +147,11 @@ mod continuation_delivery_tests;
 mod db_tests;
 #[cfg(test)]
 mod execution_intent_tests;
+#[cfg(test)]
+mod goal_tests;
+#[cfg(test)]
+mod host_goal_context_tests;
+#[cfg(test)]
+mod host_goal_tests;
 #[cfg(test)]
 mod memory_tests;

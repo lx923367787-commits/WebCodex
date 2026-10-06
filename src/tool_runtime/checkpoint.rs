@@ -162,13 +162,13 @@ impl Default for CheckpointStore {
 
 impl ToolRuntime {
     pub fn with_checkpoint_state_dir(mut self, state_dir: impl Into<PathBuf>) -> Self {
-        self.checkpoint_store = CheckpointStore::new(state_dir);
+        self.execution_state.checkpoint_store = CheckpointStore::new(state_dir);
         self
     }
 
     #[cfg(test)]
     pub(crate) fn checkpoint_state_dir(&self) -> &Path {
-        self.checkpoint_store.state_dir()
+        self.execution_state.checkpoint_store.state_dir()
     }
 
     pub(crate) async fn dispatch_workspace_checkpoint_tool(&self, call: ToolCall) -> ToolResult {
@@ -249,7 +249,7 @@ impl ToolRuntime {
                 );
             }
         };
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };
@@ -286,7 +286,7 @@ impl ToolRuntime {
         checkpoint["validation"] = metadata.validation;
         checkpoint["created_at"] = json!(chrono::Utc::now().timestamp());
 
-        let storage_path = match self.checkpoint_store.write(
+        let storage_path = match self.execution_state.checkpoint_store.write(
             checkpoint["resolved_project"].as_str().unwrap_or_default(),
             checkpoint["checkpoint_id"].as_str().unwrap_or_default(),
             &checkpoint,
@@ -304,12 +304,16 @@ impl ToolRuntime {
         project: String,
         limit: Option<usize>,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };
         let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT);
-        let checkpoints = match self.checkpoint_store.list(&resolved.resolved_id, limit) {
+        let checkpoints = match self
+            .execution_state
+            .checkpoint_store
+            .list(&resolved.resolved_id, limit)
+        {
             Ok(values) => values,
             Err(err) => return ToolResult::err(err),
         };
@@ -331,11 +335,12 @@ impl ToolRuntime {
         checkpoint_id: String,
         include_diff_stat: Option<bool>,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };
         let (checkpoint, path) = match self
+            .execution_state
             .checkpoint_store
             .load(&resolved.resolved_id, &checkpoint_id)
         {
@@ -369,11 +374,12 @@ impl ToolRuntime {
                 }),
             );
         }
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };
         let (checkpoint, _path) = match self
+            .execution_state
             .checkpoint_store
             .load(&resolved.resolved_id, &checkpoint_id)
         {
@@ -434,11 +440,12 @@ impl ToolRuntime {
                 }),
             );
         }
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };
         let path = match self
+            .execution_state
             .checkpoint_store
             .delete(&resolved.resolved_id, &checkpoint_id)
         {
