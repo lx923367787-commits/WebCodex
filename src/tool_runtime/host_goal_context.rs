@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::future::Future;
-use webcodex_core::host_goal::HostGoalExecutionBinding;
+use webcodex_core::host_goal::{HostGoalExecutionBinding, HostGoalOperationStatus};
 use webcodex_store::{Database, HostContextMeter};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +67,13 @@ impl GoalCallContext {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct OperationReceipt {
+    pub(crate) status: HostGoalOperationStatus,
+    pub(crate) job_id: Option<String>,
+    pub(crate) summary: String,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct RequestScope {
     owner_key: String,
     window_key: Option<String>,
@@ -75,6 +82,7 @@ pub(crate) struct RequestScope {
     event_id: String,
     request_arguments: Value,
     admitted_operation: Option<(String, String)>,
+    operation_receipt: Option<(String, OperationReceipt)>,
     active_operation: Option<std::sync::Arc<ActiveOperationLease>>,
 }
 
@@ -147,6 +155,7 @@ impl RequestScope {
             event_id: uuid::Uuid::new_v4().to_string(),
             request_arguments,
             admitted_operation: None,
+            operation_receipt: None,
             active_operation: None,
         })
     }
@@ -369,8 +378,35 @@ pub(crate) fn set_epoch(epoch: &str) -> Result<(), String> {
 
 pub(crate) fn mark_operation_admitted(goal_id: &str, operation_id: &str) {
     let _ = CURRENT.try_with(|state| {
-        state.borrow_mut().admitted_operation = Some((goal_id.to_owned(), operation_id.to_owned()));
+        let mut state = state.borrow_mut();
+        state.admitted_operation = Some((goal_id.to_owned(), operation_id.to_owned()));
+        state.operation_receipt = None;
     });
+}
+
+/// One admitted Operation owns this invocation. Preserve only its bounded,
+/// canonical receipt before model projection removes execution lifecycle fields.
+pub(crate) fn preserve_operation_receipt(tool: &str, receipt: OperationReceipt) {
+    let _ = CURRENT.try_with(|state| {
+        let mut state = state.borrow_mut();
+        if state.admitted_operation.is_some() {
+            state.operation_receipt = Some((tool.to_owned(), receipt));
+        }
+    });
+}
+
+pub(crate) fn take_operation_receipt(tool: &str) -> Option<OperationReceipt> {
+    CURRENT
+        .try_with(|state| {
+            state
+                .borrow_mut()
+                .operation_receipt
+                .take()
+                .filter(|(recorded_tool, _)| recorded_tool == tool)
+                .map(|(_, receipt)| receipt)
+        })
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn admitted_operation() -> Option<(String, String)> {

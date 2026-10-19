@@ -11,7 +11,7 @@ use webcodex_core::host_goal::*;
 use webcodex_store::{HostGoalCheckpointAction, HostGoalWindowBinding};
 
 #[path = "host_goal_execution_refs.rs"]
-mod execution_refs;
+pub(super) mod execution_refs;
 #[path = "host_goal_handoff.rs"]
 mod handoff;
 #[path = "host_goal_projection.rs"]
@@ -435,6 +435,26 @@ impl ToolRuntime {
         Ok(())
     }
 
+    pub(crate) fn preserve_host_goal_operation_receipt(&self, tool: &str, result: &ToolResult) {
+        if matches!(tool, "run_process" | "run_script") && context::admitted_operation().is_some() {
+            context::preserve_operation_receipt(
+                tool,
+                Self::host_goal_operation_receipt(tool, result),
+            );
+        }
+    }
+
+    fn host_goal_operation_receipt(tool: &str, result: &ToolResult) -> context::OperationReceipt {
+        let (status, job) = execution_refs::operation_receipt(tool, result);
+        let (status, summary) = execution_refs::native_run_receipt(tool, result)
+            .unwrap_or_else(|| (status, bounded(&result.output.to_string(), 4000)));
+        context::OperationReceipt {
+            status,
+            job_id: job.map(str::to_owned),
+            summary,
+        }
+    }
+
     pub(crate) async fn finish_host_goal_request(
         &self,
         tool: &str,
@@ -493,49 +513,15 @@ impl ToolRuntime {
         }
         if let Some((goal_id, operation_id)) = context::admitted_operation() {
             if let Some(result) = outcome.result.as_mut() {
-                let job = result.output["job_id"].as_str().map(str::to_string);
-                let status = result.output["status"]
-                    .as_str()
-                    .or_else(|| result.output["state"].as_str())
-                    .unwrap_or("");
-                let uncertain = result.output["execution_state"] == "outcome_unknown"
-                    || result.output["dispatch_certainty"] == "unknown"
-                    || result.output["run_id"].is_string();
-                let not_started = result.output["execution_state"] == "not_started"
-                    || result.output["dispatch_certainty"] == "not_started"
-                    || super::permissions::is_hard_denied_output(
-                        &result.output,
-                        result.error.as_deref(),
-                    );
-                let state = if uncertain {
-                    HostGoalOperationStatus::Unknown
-                } else if job.is_some() && !super::jobs::is_terminal_job_status(status) {
-                    HostGoalOperationStatus::Running
-                } else if result.success
-                    && result.output["exit_code"]
-                        .as_i64()
-                        .is_none_or(|code| code == 0)
-                    && !matches!(status, "failed" | "timeout")
-                {
-                    HostGoalOperationStatus::Succeeded
-                } else if not_started
-                    || (result.output["exit_code"].as_i64().is_some()
-                        && (result.output["execution_state"] == "completed"
-                            || super::jobs::is_terminal_job_status(status)))
-                {
-                    HostGoalOperationStatus::Failed
-                } else {
-                    HostGoalOperationStatus::Unknown
-                };
-                let (state, summary) = execution_refs::native_run_receipt(tool, result)
-                    .unwrap_or_else(|| (state, bounded(&result.output.to_string(), 4000)));
+                let receipt = context::take_operation_receipt(tool)
+                    .unwrap_or_else(|| Self::host_goal_operation_receipt(tool, result));
                 if let Err(error) = db.finish_host_goal_operation(
                     &principal,
                     &goal_id,
                     &operation_id,
-                    state,
-                    job.as_deref(),
-                    Some(&summary),
+                    receipt.status,
+                    receipt.job_id.as_deref(),
+                    Some(&receipt.summary),
                     now(),
                 ) {
                     *result=ToolResult::err_with_output("The tool may have executed, but its goal receipt could not be saved. Reconcile the existing operation before retrying.",json!({"error_kind":"goal_receipt_unavailable","operation_id":operation_id,"goal_id":goal_id,"outcome_unknown":true,"detail":error.code()}));
@@ -577,40 +563,6 @@ impl ToolRuntime {
                     }
                 }
             }
-            if result.success
-                && tool == "goal_read"
-                && result.output["projection"] == "node_context"
-                && result.output["context_read"]["complete"] == true
-            {
-                if let (
-                    Some(epoch),
-                    Some(goal_id),
-                    Some(revision),
-                    Some(plan_version),
-                    Some(node_id),
-                ) = (
-                    context::current_epoch(),
-                    result.output["context_read"]["goal_id"].as_str(),
-                    result.output["context_read"]["revision"].as_u64(),
-                    result.output["context_read"]["plan_version"].as_u64(),
-                    result.output["context_read"]["node_id"].as_str(),
-                ) {
-                    if result.output["node"]["id"] == node_id
-                        && result.output["requirements"].is_object()
-                    {
-                        if let Err(error) = db.ack_host_goal_context_read(
-                            &principal,
-                            &epoch,
-                            goal_id,
-                            revision,
-                            plan_version,
-                            node_id,
-                        ) {
-                            tracing::warn!(error=%error,"cannot save goal node context read receipt");
-                        }
-                    }
-                }
-            }
             // A console read has no ChatGPT identity. Keep the saved latest-chat
             // projection instead of replacing it with an unavailable new meter.
             if context::current_epoch().is_none() && result.output.get("context_meter").is_some() {
@@ -645,6 +597,47 @@ impl ToolRuntime {
                 }
                 Err(_) => {
                     result.output["context_meter"] = context::meter_projection(None, None);
+                }
+            }
+            if result.success && result.output["projection"] == "node_context" {
+                if let Err(error) = projection::fit_node_response(&mut result.output) {
+                    *result = error;
+                    outcome.success = false;
+                    return;
+                }
+            }
+            if result.success
+                && tool == "goal_read"
+                && result.output["projection"] == "node_context"
+                && result.output["context_read"]["complete"] == true
+            {
+                if let (
+                    Some(epoch),
+                    Some(goal_id),
+                    Some(revision),
+                    Some(plan_version),
+                    Some(node_id),
+                ) = (
+                    context::current_epoch(),
+                    result.output["context_read"]["goal_id"].as_str(),
+                    result.output["context_read"]["revision"].as_u64(),
+                    result.output["context_read"]["plan_version"].as_u64(),
+                    result.output["context_read"]["node_id"].as_str(),
+                ) {
+                    if result.output["node"]["id"] == node_id
+                        && result.output["requirements"].is_object()
+                    {
+                        if let Err(error) = db.ack_host_goal_context_read(
+                            &principal,
+                            &epoch,
+                            goal_id,
+                            revision,
+                            plan_version,
+                            node_id,
+                        ) {
+                            tracing::warn!(error=%error,"cannot save goal node context read receipt");
+                        }
+                    }
                 }
             }
         }

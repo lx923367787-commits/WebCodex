@@ -29,6 +29,8 @@ const TUNNEL_CLIENT_CONTROL_PLANE_PROBE_TIMEOUT: Duration = Duration::from_secs(
 const TUNNEL_CLIENT_READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const TUNNEL_CLIENT_HEALTH_URL_BYTES: usize = 512;
 const TUNNEL_CLIENT_OVERRIDE: &str = "WEBCODEX_TUNNEL_CLIENT_BIN";
+const TUNNEL_RECONNECT_LIMIT: u32 = 3;
+const TUNNEL_RECONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -41,7 +43,7 @@ struct TunnelClientAsset {
     member_name: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct OpenAiTunnelPrerequisites {
     pub(super) binary: PathBuf,
     pub(super) tunnel_id: String,
@@ -50,6 +52,11 @@ pub(super) struct OpenAiTunnelPrerequisites {
 #[derive(Debug)]
 pub(super) struct OpenAiTunnel {
     child: Child,
+    prerequisites: OpenAiTunnelPrerequisites,
+    mcp_url: String,
+    authorization_file: PathBuf,
+    session_dir: PathBuf,
+    reconnect_attempts: u32,
 }
 
 impl OpenAiTunnel {
@@ -61,8 +68,50 @@ impl OpenAiTunnel {
         Err(ProductError::new(
             "tunnel_unavailable",
             format!("OpenAI Secure MCP Tunnel stopped unexpectedly ({status})"),
-            Some("Check the OpenAI tunnel-client and network connectivity, then retry webcodex share --tunnel openai."),
+            Some("Check the OpenAI tunnel-client and network connectivity, then retry."),
         ))
+    }
+
+    pub(super) async fn wait_with_recovery(
+        &mut self,
+        mut observe: impl FnMut(&str) -> Result<(), ProductError>,
+    ) -> Result<(), ProductError> {
+        loop {
+            if self.child.wait().await.is_err() {
+                observe("failed")?;
+                return Err(tunnel_runtime_error(
+                    "OpenAI tunnel-client could not be supervised",
+                ));
+            }
+            // Only a confirmed exit of our own transport child permits recovery.
+            // No tool/Job result is an input, and no business request is replayed.
+            eprintln!("WebCodex: Tunnel exited; verifying a bounded transport reconnect. In-flight operation outcomes remain unknown until reconciled.");
+            observe("reconnecting")?;
+            let recovered = reconnect_tunnel(
+                &mut self.reconnect_attempts,
+                Instant::now() + TUNNEL_RECONNECT_TIMEOUT,
+                Duration::from_secs(1),
+                |deadline| {
+                    start_verified_tunnel_child(
+                        &self.prerequisites,
+                        &self.mcp_url,
+                        &self.authorization_file,
+                        &self.session_dir,
+                        deadline,
+                    )
+                },
+            )
+            .await;
+            self.child = match recovered {
+                Ok(child) => child,
+                Err(error) => {
+                    observe("failed")?;
+                    return Err(error);
+                }
+            };
+            observe("ready")?;
+            eprintln!("WebCodex: Tunnel reconnected and readiness verified; reconcile original operations before continuing.");
+        }
     }
 
     pub(super) async fn stop(&mut self) {
@@ -85,10 +134,71 @@ pub(super) async fn start_openai_tunnel(
     session_dir: &Path,
     deadline: Instant,
 ) -> Result<OpenAiTunnel, ProductError> {
+    let child = start_verified_tunnel_child(
+        prerequisites,
+        mcp_url,
+        authorization_file,
+        session_dir,
+        deadline,
+    )
+    .await?;
+    Ok(OpenAiTunnel {
+        child,
+        prerequisites: prerequisites.clone(),
+        mcp_url: mcp_url.to_string(),
+        authorization_file: authorization_file.to_path_buf(),
+        session_dir: session_dir.to_path_buf(),
+        reconnect_attempts: 0,
+    })
+}
+
+async fn reconnect_tunnel<T, F, Fut>(
+    attempts: &mut u32,
+    deadline: Instant,
+    delay: Duration,
+    mut start: F,
+) -> Result<T, ProductError>
+where
+    F: FnMut(Instant) -> Fut,
+    Fut: std::future::Future<Output = Result<T, ProductError>>,
+{
+    let mut last_error = tunnel_runtime_error("Tunnel reconnect budget exhausted");
+    while *attempts < TUNNEL_RECONNECT_LIMIT && Instant::now() < deadline {
+        *attempts += 1;
+        tokio::time::sleep(delay.min(deadline.saturating_duration_since(Instant::now()))).await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, start(deadline)).await {
+            Ok(Ok(child)) => return Ok(child),
+            Ok(Err(error)) => last_error = error,
+            Err(_) => {
+                return Err(tunnel_runtime_error(
+                    "Tunnel reconnect verification timed out",
+                ))
+            }
+        }
+    }
+    Err(last_error)
+}
+
+async fn start_verified_tunnel_child(
+    prerequisites: &OpenAiTunnelPrerequisites,
+    mcp_url: &str,
+    authorization_file: &Path,
+    session_dir: &Path,
+    deadline: Instant,
+) -> Result<Child, ProductError> {
     run_doctor(prerequisites, mcp_url, authorization_file, deadline).await?;
     run_control_plane_probe(prerequisites, deadline).await?;
 
-    let health_url_file = session_dir.join("openai-tunnel-health-url");
+    // Each child must publish its own readiness endpoint. A previous process's
+    // health file must never validate a replacement process.
+    let health_url_file = session_dir.join(format!(
+        "openai-tunnel-health-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     let log_file = session_dir.join("openai-tunnel.log");
     let mut command = Command::new(&prerequisites.binary);
     suppress_windows_console(&mut command);
@@ -118,7 +228,7 @@ pub(super) async fn start_openai_tunnel(
         let _ = child.wait().await;
         return Err(error);
     }
-    Ok(OpenAiTunnel { child })
+    Ok(child)
 }
 
 fn configure_runtime_command(

@@ -819,6 +819,7 @@ impl ToolRuntime {
             material_capabilities,
         )
         .await;
+        self.preserve_host_goal_operation_receipt(tool_name, &result);
         sparsify_terminal_structured_execution_success(tool_name, &mut result);
         result
     }

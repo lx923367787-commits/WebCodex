@@ -39,6 +39,12 @@ impl ToolRuntime {
             .map_err(store_error)?;
         let mut verified = Vec::new();
         for operation in operations {
+            if operation.job_id.is_some()
+                && !super::execution_refs::has_native_job_receipt(&operation.tool_name)
+            {
+                self.quarantine_host_goal_job_binding(goal, &operation)?;
+                return Err(failure("goal_operation_outcome_unknown", "An untrusted historical Job binding was removed. Resolve the original provider operation explicitly before handoff"));
+            }
             if operation.status == HostGoalOperationStatus::Unknown
                 || operation.status == HostGoalOperationStatus::Intent
             {
@@ -66,13 +72,10 @@ impl ToolRuntime {
                     ));
                 }
                 let status = result.output["status"].as_str().unwrap_or("");
-                let state = match status {
-                    "completed" if result.output["exit_code"] == 0 => HostGoalOperationStatus::Succeeded,
-                    "completed" | "failed" => HostGoalOperationStatus::Failed,
-                    "cancelled" | "stopped" => HostGoalOperationStatus::Cancelled,
-                    "queued" | "running" => HostGoalOperationStatus::Running,
-                    _ => return Err(failure("goal_operation_outcome_unknown", "Original Job status is not authoritative enough for handoff; observe the same Job, never restart it")),
-                };
+                let state = super::execution_refs::job_receipt_status(&result.output);
+                if state == HostGoalOperationStatus::Unknown {
+                    return Err(failure("goal_operation_outcome_unknown", "Original Job status is not authoritative enough for handoff; observe the same Job, never restart it"));
+                }
                 let summary = json!({"source":"job_status","job_id":job_id,"status":status,"exit_code":result.output["exit_code"]}).to_string();
                 let current = db
                     .finish_host_goal_operation(

@@ -6,6 +6,78 @@ use super::support::*;
 use crate::runner_protocol::{RunnerCapabilities, RunnerResultRequest};
 use serde_json::json;
 
+#[tokio::test]
+async fn strict_arguments_fail_at_kernel_before_business_dispatch() {
+    use crate::tool_runtime::kernel::{
+        HostFileImportTrust, ToolCallContext, ToolCallErrorStatus, ToolCallRequest, ToolTransport,
+    };
+    let runtime = test_runtime();
+    let auth = auth_context(None, true);
+    for (tool_name, arguments) in [
+        (
+            "run_process",
+            json!({"project":"unregistered","executable":"must-not-run","result_expectation":"maybe"}),
+        ),
+        (
+            "run_process",
+            json!({"project":"unregistered","executable":"must-not-run","accepted_exit_codes":["0"]}),
+        ),
+        (
+            "run_process",
+            json!({"project":"unregistered","executable":"must-not-run","expected_failure":"false"}),
+        ),
+        (
+            "run_process",
+            json!({"project":"unregistered","executable":"must-not-run","expected_failure":true,"result_expectation":"success"}),
+        ),
+        (
+            "run_process",
+            json!({"project":"unregistered","executable":"must-not-run","target":"unrelated"}),
+        ),
+        (
+            "write_project_file",
+            json!({"project":"unregistered","path":"must-not-write","content":"text","expected_hash":"typo"}),
+        ),
+        (
+            "plugin_tool",
+            json!({"action":"list","result_expectation":"observe"}),
+        ),
+        (
+            "ssh_resource",
+            json!({"action":"list","result_expectation":"observe"}),
+        ),
+    ] {
+        let outcome = runtime
+            .call_tool_with_context(
+                ToolCallRequest {
+                    tool_name: tool_name.to_string(),
+                    arguments,
+                },
+                ToolCallContext {
+                    session_id: None,
+                    auth: Some(&auth),
+                    transport: ToolTransport::Api,
+                    window: None,
+                    record_oauth_scope_denials: true,
+                    host_file_import_trust: HostFileImportTrust::Untrusted,
+                },
+            )
+            .await;
+        assert!(!outcome.success, "{tool_name}");
+        assert!(
+            matches!(
+                outcome.error_status,
+                Some(ToolCallErrorStatus::InvalidArguments { .. })
+            ),
+            "{tool_name} must reject input before target lookup or dispatch"
+        );
+        assert!(
+            outcome.result.is_none(),
+            "no business result for {tool_name}"
+        );
+    }
+}
+
 #[test]
 fn structured_validation_tools_are_known_and_parse() {
     for name in ["cargo_fmt", "cargo_check", "cargo_test", "go_test"] {

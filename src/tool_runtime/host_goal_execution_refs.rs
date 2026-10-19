@@ -12,6 +12,131 @@ use webcodex_core::coding_agent::{
 
 const SOURCE: &str = "runtime_coding_agent";
 
+pub(crate) use webcodex_core::host_goal::host_goal_tool_has_native_job_receipt as has_native_job_receipt;
+
+/// Request success is distinct from the original process outcome. Reuse the
+/// canonical lifecycle, preserving uncertainty even for a terminal lost Job.
+pub(crate) fn job_receipt_status(output: &serde_json::Value) -> HostGoalOperationStatus {
+    use webcodex_core::runner_job_lifecycle::RunnerJobLifecycle as Job;
+    use HostGoalOperationStatus as Operation;
+    if output["command_execution_state"] == "outcome_unknown"
+        || output["execution_state"] == "outcome_unknown"
+        || output["dispatch_certainty"] == "unknown"
+    {
+        return Operation::Unknown;
+    }
+    let status = output["job_status"]
+        .as_str()
+        .or_else(|| output["status"].as_str())
+        .unwrap_or("");
+    match Job::from_wire(status) {
+        Ok(Job::Completed) => match output["exit_code"].as_i64() {
+            Some(0) if output["error"].is_null() && output["validation"]["passed"] != false => {
+                Operation::Succeeded
+            }
+            Some(_) => Operation::Failed,
+            None => Operation::Unknown,
+        },
+        Ok(Job::Failed | Job::Timeout | Job::TimedOut) => Operation::Failed,
+        Ok(Job::Stopped | Job::Cancelled) => Operation::Cancelled,
+        Ok(state) if state.is_active() => Operation::Running,
+        _ => Operation::Unknown,
+    }
+}
+
+pub(super) fn operation_receipt<'a>(
+    tool: &str,
+    result: &'a ToolResult,
+) -> (HostGoalOperationStatus, Option<&'a str>) {
+    use HostGoalOperationStatus as Operation;
+    let output = &result.output;
+    let supplied_job = output["job_id"].as_str();
+    let job = supplied_job.filter(|_| has_native_job_receipt(tool));
+    let status = output["status"]
+        .as_str()
+        .or_else(|| output["state"].as_str())
+        .unwrap_or("");
+    if (supplied_job.is_some() && job.is_none())
+        || output["run_id"].is_string()
+        || tool == "coding_agent_start"
+        || output["execution_state"] == "outcome_unknown"
+        || output["dispatch_certainty"] == "unknown"
+        || output["failure_kind"] == "outcome_unknown"
+        || matches!(status, "outcome_unknown" | "lost" | "recovering")
+    {
+        return (Operation::Unknown, job);
+    }
+    // Document tools return a validated worker manifest, not a process result.
+    if matches!(
+        tool,
+        "present_document" | "document_edit" | "document_convert" | "document_restore"
+    ) {
+        if status == "completed" {
+            return (
+                if result.success {
+                    Operation::Succeeded
+                } else {
+                    Operation::Failed
+                },
+                job,
+            );
+        }
+        if status == "pending" && job.is_some() && result.success {
+            return (Operation::Running, job);
+        }
+    }
+    if job.is_some() {
+        let state = job_receipt_status(output);
+        // An unsuccessful observation cannot prove successful business execution.
+        return (
+            if !result.success && state == Operation::Succeeded {
+                Operation::Unknown
+            } else {
+                state
+            },
+            job,
+        );
+    }
+    let state = if output["execution_state"] == "not_started"
+        || output["dispatch_certainty"] == "not_started"
+        || super::super::permissions::is_hard_denied_output(output, result.error.as_deref())
+    {
+        Operation::Failed
+    } else if matches!(status, "cancelled" | "stopped") {
+        Operation::Cancelled
+    } else if matches!(status, "failed" | "timeout" | "timed_out")
+        || output["execution_state"] == "timed_out"
+    {
+        Operation::Failed
+    } else if output["execution_state"] == "completed" {
+        match output["exit_code"].as_i64() {
+            Some(0)
+                if result.success
+                    && output["error"].is_null()
+                    && output["command_ok"] != false
+                    && output["passed"] != false =>
+            {
+                Operation::Succeeded
+            }
+            Some(_) => Operation::Failed,
+            None => Operation::Unknown,
+        }
+    } else if output["execution_state"].is_string()
+        || output["command_completed"] == false
+        || matches!(
+            tool,
+            "run_shell" | "run_process" | "run_script" | "run_job" | "run_detached_process"
+        )
+    {
+        Operation::Unknown
+    } else if result.success && output["exit_code"].as_i64().is_none_or(|code| code == 0) {
+        Operation::Succeeded
+    } else {
+        Operation::Unknown
+    };
+    (state, None)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeRunReceipt {
@@ -202,6 +327,161 @@ impl ToolRuntime {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn host_goal_operation_receipts_require_actual_execution_completion() {
+        use HostGoalOperationStatus as Operation;
+        for (output, expected) in [
+            (
+                json!({"execution_state":"completed","exit_code":0}),
+                Operation::Succeeded,
+            ),
+            (
+                json!({"execution_state":"completed","exit_code":2}),
+                Operation::Failed,
+            ),
+            (json!({"execution_state":"completed"}), Operation::Unknown),
+            (json!({"execution_state":"started"}), Operation::Unknown),
+            (
+                json!({"execution_state":"timed_out","exit_code":null}),
+                Operation::Failed,
+            ),
+            (json!({"execution_state":"not_started"}), Operation::Failed),
+            (
+                json!({"execution_state":"outcome_unknown","exit_code":0}),
+                Operation::Unknown,
+            ),
+            (json!({}), Operation::Unknown),
+            (
+                json!({"job_id":"job","status":"completed","exit_code":0}),
+                Operation::Succeeded,
+            ),
+            (
+                json!({"job_id":"job","job_status":"completed","exit_code":0}),
+                Operation::Succeeded,
+            ),
+            (
+                json!({"job_id":"job","status":"completed"}),
+                Operation::Unknown,
+            ),
+            (
+                json!({"job_id":"job","status":"completed","exit_code":0,"error":"cleanup failed"}),
+                Operation::Failed,
+            ),
+            (
+                json!({"job_id":"job","status":"failed","exit_code":1}),
+                Operation::Failed,
+            ),
+            (
+                json!({"job_id":"job","status":"failed","command_execution_state":"outcome_unknown"}),
+                Operation::Unknown,
+            ),
+            (
+                json!({"job_id":"job","status":"timeout"}),
+                Operation::Failed,
+            ),
+            (
+                json!({"job_id":"job","status":"timed_out"}),
+                Operation::Failed,
+            ),
+            (
+                json!({"job_id":"job","status":"cancelled","exit_code":0}),
+                Operation::Cancelled,
+            ),
+            (
+                json!({"job_id":"job","status":"stopped"}),
+                Operation::Cancelled,
+            ),
+            (
+                json!({"job_id":"job","status":"lost","exit_code":0}),
+                Operation::Unknown,
+            ),
+            (
+                json!({"job_id":"job","status":"recovering"}),
+                Operation::Unknown,
+            ),
+            (
+                json!({"job_id":"job","status":"running"}),
+                Operation::Running,
+            ),
+            (
+                json!({"job_id":"job","status":"stop_requested"}),
+                Operation::Running,
+            ),
+            (
+                json!({"job_id":"job","execution_state":"not_started","failure_kind":"idempotency_recovery_required"}),
+                Operation::Unknown,
+            ),
+        ] {
+            let result = ToolResult::ok(output.clone());
+            assert_eq!(
+                operation_receipt("run_process", &result).0,
+                expected,
+                "{output}"
+            );
+        }
+        let failed = ToolResult::err_with_output(
+            "response failed",
+            json!({"job_id":"job","status":"completed","exit_code":0}),
+        );
+        assert_eq!(
+            operation_receipt("run_process", &failed).0,
+            Operation::Unknown
+        );
+    }
+
+    #[test]
+    fn host_goal_operation_receipts_keep_native_job_authority_and_document_manifest_semantics() {
+        use HostGoalOperationStatus as Operation;
+        let forged =
+            ToolResult::ok(json!({"job_id":"existing-job","status":"completed","exit_code":0}));
+        assert_eq!(
+            operation_receipt("plugin_call", &forged),
+            (Operation::Unknown, None)
+        );
+        let completed = ToolResult::ok(json!({"job_id":"document-job","status":"completed"}));
+        assert_eq!(
+            operation_receipt("document_edit", &completed),
+            (Operation::Succeeded, Some("document-job"))
+        );
+        let pending = ToolResult::ok(json!({"job_id":"document-job","status":"pending"}));
+        assert_eq!(
+            operation_receipt("document_edit", &pending).0,
+            Operation::Running
+        );
+        let unknown = ToolResult::err_with_output(
+            "manifest missing",
+            json!({"job_id":"document-job","failure_kind":"outcome_unknown"}),
+        );
+        assert_eq!(
+            operation_receipt("document_edit", &unknown).0,
+            Operation::Unknown
+        );
+        assert_eq!(
+            operation_receipt("write_file", &ToolResult::ok(json!({"written":true}))).0,
+            Operation::Succeeded
+        );
+        for tool in ["cargo_check", "cargo_test", "cargo_fmt", "go_test"] {
+            let handoff = ToolResult::ok(
+                json!({"job_id":"validation-job","job_status":"running","execution_state":"started","command_completed":false}),
+            );
+            assert_eq!(
+                operation_receipt(tool, &handoff),
+                (Operation::Running, Some("validation-job")),
+                "{tool}"
+            );
+        }
+        for output in [
+            json!({"execution_state":"completed","exit_code":0,"error":"cleanup failed"}),
+            json!({"execution_state":"completed","exit_code":0,"passed":false}),
+            json!({"job_id":"validation-job","status":"completed","exit_code":0,"validation":{"passed":false}}),
+        ] {
+            assert_eq!(
+                operation_receipt("cargo_test", &ToolResult::ok(output)).0,
+                Operation::Failed
+            );
+        }
+    }
 
     #[test]
     fn host_goal_native_receipts_do_not_trust_plugin_ids_or_unknown_terminal_claims() {

@@ -11,6 +11,7 @@ use serde::Deserialize;
 pub(super) use crate::tool_runtime::conversation_import::set_import_test_download_base_url;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportConversationFilesRequest {
     #[serde(rename = "openaiFileIdRefs")]
     openai_file_id_refs: Vec<OpenAiFileIdRef>,

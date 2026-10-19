@@ -15,15 +15,18 @@ pub(in crate::tool_runtime) fn repair_summary(
 ) -> Value {
     use webcodex_core::host_goal::*;
     let exhausted = repair.exhausted(super::now());
+    let (failure, failure_truncated) =
+        super::super::startup_brief::bounded_json_string(&repair.failure, 512);
     json!({"repair_id":repair.repair_id,"node_id":repair.node_id,"plan_version":repair.plan_version,
         "status":repair.status,"business_suspended":repair.active(),"exhausted":exhausted,
         "rounds_used":repair.rounds.len(),"max_rounds":HOST_GOAL_REPAIR_MAX_ROUNDS,
         "operations_used":repair.operations,"max_operations":HOST_GOAL_REPAIR_MAX_OPERATIONS,
-        "deadline_at":repair.deadline_at,"failure":bounded(&repair.failure,1000),
+        "deadline_at":repair.deadline_at,"failure":failure,"failure_truncated":failure_truncated,
+        "details":{"tool":"goal_read","arguments":{"goal_id":repair.goal_id,"view":"detail","section":"repair"}},
         "goal_context_repair":{"repair_id":repair.repair_id},
         "next_action":if !repair.active() {"Original acceptance passed; continue the original plan with the current node binding and omit repair metadata."}
         else if exhausted {"Keep affected business suspended. Report the preserved failure and exhausted budget for an operator decision; do not change IDs or weaken acceptance."}
-        else {"Continue autonomously: inspect the failure, read/claim the affected node if needed, and add goal_context.repair with this repair_id plus a concrete diagnosis for the next repair round. Make targeted repairs, then call goal_check_node with the same repair context. Failed verification requires another bounded repair round; only passed original node/final acceptance resumes business. No new user approval is needed for repair within the confirmed plan."}})
+        else {"Read/claim the affected node. Add goal_context.repair with this repair_id and diagnosis; repair within the confirmed plan, then goal_check_node with the same context. Only original acceptance passing releases business; budgets persist."}})
 }
 
 // Entry guidance only: never persist it in Goal state or operation receipts.
@@ -98,6 +101,33 @@ fn fit_summary(value: &mut Value, budget: usize) -> Result<(), ToolResult> {
         ));
     }
     Ok(())
+}
+
+/// Reserve the public 16 KiB budget for the *final* node output, including the
+/// kernel's repair and context-meter overlays. Never truncate requirements,
+/// execution bindings, repair budgets, or acceptance. Full failure evidence
+/// remains in the existing paged repair detail.
+pub(super) fn fit_node_response(value: &mut Value) -> Result<(), ToolResult> {
+    const RESPONSE_BYTES: usize = 16 * 1024;
+    if size(value) <= RESPONSE_BYTES {
+        return Ok(());
+    }
+    // Repeated derived paths are available from the Goal summary; the exact
+    // task directory remains in the Goal header.
+    if let Some(object) = value.as_object_mut() {
+        object.remove("task_files");
+    }
+    if fit_summary(value, RESPONSE_BYTES).is_ok() {
+        return Ok(());
+    }
+    if let Some(failure) = value["recovery"]["failure"].as_str().map(str::to_owned) {
+        value["recovery"]["failure"] = json!("");
+        value["recovery"]["failure_truncated"] = json!(true);
+        let remaining = RESPONSE_BYTES.saturating_sub(size(value));
+        let (excerpt, _) = super::super::startup_brief::bounded_json_string(&failure, remaining);
+        value["recovery"]["failure"] = json!(excerpt);
+    }
+    fit_summary(value, RESPONSE_BYTES)
 }
 
 pub(super) fn summary(
@@ -409,6 +439,8 @@ impl ToolRuntime {
                     .map_err(store_error)?;
                 value["review"] =
                     super::super::host_goal_review::review_summary(review.as_ref(), node);
+                // The kernel attaches the current repair gate once, after this
+                // lossless requirements projection, before acknowledging it.
                 fit_summary(&mut value, NODE_BYTES)?;
                 Ok(value)
             }

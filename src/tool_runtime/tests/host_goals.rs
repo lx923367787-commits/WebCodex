@@ -14,6 +14,8 @@ use std::sync::Arc;
 mod background_handoff;
 #[path = "host_goal_handoff.rs"]
 mod local_handoff;
+#[path = "host_goal_sync_receipts.rs"]
+mod sync_receipts;
 
 struct Fixture {
     temp: tempfile::TempDir,
@@ -1418,6 +1420,160 @@ async fn host_goals_new_chat_must_read_node_requirements_after_summary_before_cl
     let after_read = fixture.call_in_chat(claim(), "new-chat", None).await;
     success(&after_read);
     assert_eq!(after_read.output["goal"]["phase"], "executing");
+}
+
+#[tokio::test]
+async fn host_goals_near_limit_repair_context_remains_lossless_and_claimable() {
+    use webcodex_core::host_goal::{
+        HostGoalExecutionBinding, HostGoalInvocationContext, HostGoalPlan,
+    };
+    let fixture = Fixture::new().await;
+    let task_path = format!("tasks/{}", "bounded-repair-".repeat(4));
+    let goal = fixture.start_in_task(Some(&task_path)).await;
+    let node_id = format!("node-{}", "n".repeat(59));
+    let new_epoch = "r".repeat(128);
+    let mut large = plan();
+    large["nodes"][0]["id"] = json!(node_id);
+    large["constraints"] = json!(["C".repeat(4096)]);
+    large["nodes"][0]["review"] = json!(1);
+    large["nodes"][0]["delivery_kind"] = json!("lightweight");
+    let mut typed: HostGoalPlan = serde_json::from_value(large).unwrap();
+    typed.resolve_review_requirements();
+    let requirements = json!({
+        "objective":typed.objective,"constraints":typed.constraints,"deliverables":typed.deliverables,
+        "final_criteria":typed.final_criteria,"state_management":typed.state_management,
+        "verification_paths":typed.verification_paths,
+    });
+    let combined = serde_json::to_vec(&requirements).unwrap().len()
+        + serde_json::to_vec(&typed.nodes[0]).unwrap().len();
+    let padding = 12 * 1024 - 32 - combined;
+    typed.nodes[0].work.push_str(&"W".repeat(padding));
+    typed.validate().unwrap();
+    let expected_node = serde_json::to_value(&typed.nodes[0]).unwrap();
+    assert!(
+        serde_json::to_vec(&requirements).unwrap().len()
+            + serde_json::to_vec(&typed.nodes[0]).unwrap().len()
+            >= 12 * 1024 - 32
+    );
+    let saved = fixture
+        .save_plan(
+            &goal,
+            serde_json::to_value(&typed).unwrap(),
+            "large-repair-plan",
+        )
+        .await;
+    success(&saved);
+    let confirmed = fixture
+        .confirm(&saved.output["goal"], "large-repair-confirm")
+        .await;
+    success(&confirmed);
+    let first_read = fixture
+        .call(ToolCall::GoalRead {
+            source_context_epoch: None,
+            goal_id: id(&goal),
+            round_offset: None,
+            round_limit: None,
+            history_after: None,
+            history_limit: None,
+            history_kind: None,
+            view: Some("node".into()),
+            node_id: Some(node_id.clone()),
+            section: None,
+            cursor: None,
+        })
+        .await;
+    success(&first_read);
+    let claimed = fixture
+        .call(ToolCall::GoalClaimNode {
+            goal_id: id(&goal),
+            node_id,
+            expected_revision: revision(&confirmed.output["goal"]),
+            plan_version: 1,
+            idempotency_key: "large-repair-first".into(),
+            context_epoch: Some("chat-original".into()),
+            rework: false,
+            takeover_attempt_id: None,
+        })
+        .await;
+    success(&claimed);
+    let binding: HostGoalExecutionBinding =
+        serde_json::from_value(claimed.output["binding"].clone()).unwrap();
+    let owner = crate::tool_runtime::coding_agent::goal_owner_key(Some(&fixture.auth)).unwrap();
+    // Use the authoritative failure transition, with escape-heavy evidence that
+    // cannot be bounded by raw string length alone. No database row is patched.
+    let evidence = format!("Acceptance failed: {}", "\n\u{0001}".repeat(500));
+    fixture
+        .db
+        .record_host_goal_repair_failure(
+            &owner,
+            &binding,
+            &evidence,
+            crate::tool_runtime::host_goal::now(),
+            Some(&HostGoalInvocationContext {
+                context_epoch: "chat-original".into(),
+                identity_source: "explicit_context_only".into(),
+            }),
+        )
+        .unwrap();
+    let repair = fixture
+        .db
+        .get_host_goal_repair(&owner, &binding.goal_id)
+        .unwrap()
+        .unwrap();
+    fixture.bootstrap(&claimed.output["goal"], &new_epoch).await;
+    let node = fixture
+        .call_in_chat(
+            ToolCall::GoalRead {
+                source_context_epoch: None,
+                goal_id: binding.goal_id.clone(),
+                round_offset: None,
+                round_limit: None,
+                history_after: None,
+                history_limit: None,
+                history_kind: None,
+                view: Some("node".into()),
+                node_id: Some(binding.node_id.clone()),
+                section: None,
+                cursor: None,
+            },
+            &new_epoch,
+            None,
+        )
+        .await;
+    success(&node);
+    assert_eq!(node.output["requirements"], requirements);
+    assert_eq!(node.output["node"], expected_node);
+    assert_eq!(node.output["recovery"]["business_suspended"], true);
+    assert_eq!(node.output["recovery"]["repair_id"], repair.repair_id);
+    assert_eq!(node.output["recovery"]["deadline_at"], repair.deadline_at);
+    assert_eq!(node.output["recovery"]["failure_truncated"], true);
+    assert!(serde_json::to_vec(&node.output).unwrap().len() <= 16384);
+    let resumed = fixture
+        .call_in_chat(
+            ToolCall::GoalClaimNode {
+                goal_id: binding.goal_id.clone(),
+                node_id: binding.node_id.clone(),
+                expected_revision: revision(&node.output["goal"]),
+                plan_version: binding.plan_version,
+                idempotency_key: "large-repair-takeover".into(),
+                context_epoch: Some(new_epoch.clone()),
+                rework: false,
+                takeover_attempt_id: Some(binding.attempt_id),
+            },
+            &new_epoch,
+            None,
+        )
+        .await;
+    success(&resumed);
+    assert!(resumed.output["binding"]["fence"].as_u64().unwrap() > binding.fence);
+    assert_eq!(
+        resumed.output["recovery"]["deadline_at"],
+        repair.deadline_at
+    );
+    assert_eq!(
+        fixture.detail(&resumed.output["goal"], "repair").await["failure"],
+        evidence
+    );
 }
 
 #[tokio::test]

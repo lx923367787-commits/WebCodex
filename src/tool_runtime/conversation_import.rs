@@ -40,6 +40,7 @@ struct TrustedDownloadTarget {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct OpenAiFileIdRef {
     #[serde(default)]
     pub(crate) name: Option<String>,

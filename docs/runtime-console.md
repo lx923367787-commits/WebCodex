@@ -2,6 +2,36 @@
 
 Open `/runtime` and connect with an existing runtime credential.
 
+Runtime Overview projects the existing `runtime_status.connection_layers`, Job
+reconciliation counters, and build compatibility into separate Server, Tunnel,
+Runner, transport, Project, Job, and build diagnostics. States distinguish online,
+offline, degraded, unknown, and unconfigured. The Server has no authoritative
+external Tunnel health feed, so Tunnel remains **unknown**, even when the local
+Server responds. A configured URL and a past successful tool call are not health
+proof. Layer TTLs are enforced and the Console expires its snapshot after at most
+65 seconds (earlier when a layer expires), counting from request start to include
+handling and transit delay without comparing clocks across hosts. Failed refreshes
+immediately mark retained observations as unknown. Summaries, Project cards,
+Runner cards and recent Sessions share the freshness gate and label retained
+values as historical until a verified refresh; language changes cannot revive them.
+Project connectivity uses the newest matching Project observation from Overview
+or `/projects`, each with its own request-start age and failure state. An unrelated
+Overview refresh cannot renew an old Project, and project-scoped credentials can
+refresh their connection facts without `runtime:read`. Session aggregates retain
+their separate Overview freshness.
+Console requests have a 35-second deadline and never automatically retry mutations.
+
+The regular OpenAI Tunnel owner may reconnect only its own confirmed-exited
+transport child, at most three times over that owner's lifetime. Each recovery
+uses one 60-second deadline and re-runs the doctor, control-plane, and new-child
+readiness checks. Its existing machine output channel invalidates cached readiness
+while reconnecting; Desktop observes that same channel until verified readiness
+returns or failure/shutdown is reported. Quick Share retains its existing
+exit-on-tunnel-failure behavior. Shutdown cancels recovery. Recovery does not restart the Server
+or Runner, replay a tool request, or resolve unknown Operation/Job outcomes;
+those still require canonical reconciliation. A live tunnel daemon retains its
+own network reconnect behavior; the owner does not kill it for a business failure.
+
 The workspace start page offers **Find a project**, **Runtime overview**, and
 **Durable Agents**. Press **Command+K** on macOS or **Ctrl+K** on Windows/Linux
 while connected to open Projects & Sessions and focus project search. On narrow

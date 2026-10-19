@@ -81,6 +81,34 @@ fn verify(goal: &HostGoalRecord, binding: &HostGoalExecutionBinding, key: &str) 
     }
 }
 
+async fn read_node(
+    fixture: &Fixture,
+    binding: &HostGoalExecutionBinding,
+    invocation: &HostGoalInvocationContext,
+) -> ToolResult {
+    call(
+        fixture,
+        binding,
+        invocation,
+        "read-repair-context",
+        None,
+        ToolCall::GoalRead {
+            goal_id: binding.goal_id.clone(),
+            round_offset: None,
+            round_limit: None,
+            history_after: None,
+            history_limit: None,
+            history_kind: None,
+            view: Some("node".into()),
+            node_id: Some(binding.node_id.clone()),
+            section: None,
+            cursor: None,
+            source_context_epoch: None,
+        },
+    )
+    .await
+}
+
 #[tokio::test]
 async fn host_goal_repair_kernel_suspends_business_repairs_and_verifies_before_release() {
     let (fixture, goal, binding, invocation) =
@@ -110,6 +138,13 @@ async fn host_goal_repair_kernel_suspends_business_repairs_and_verifies_before_r
     );
     assert_eq!(failed.output["error_kind"], "goal_repair_required");
     assert_eq!(failed.output["recovery"]["business_suspended"], true);
+    let node = read_node(&fixture, &binding, &invocation).await;
+    assert!(node.success, "{node:?}");
+    assert_eq!(node.output["projection"], "node_context");
+    assert_eq!(node.output["recovery"], failed.output["recovery"]);
+    assert_eq!(node.output["context_read"]["complete"], true);
+    assert_eq!(node.output["node"]["acceptance"][0]["id"], "command");
+    assert!(serde_json::to_vec(&node.output).unwrap().len() <= 16384);
     assert!(
         fixture.command_jobs().is_empty(),
         "Verification must not erase a newly observed execution failure"
@@ -162,6 +197,9 @@ async fn host_goal_repair_kernel_suspends_business_repairs_and_verifies_before_r
     assert!(checked.success, "{checked:?}");
     assert_eq!(checked.output["goal"]["phase"], "completed");
     assert_eq!(checked.output["recovery"]["business_suspended"], false);
+    let current = read_node(&fixture, &binding, &invocation).await;
+    assert!(current.success, "{current:?}");
+    assert_eq!(current.output["recovery"], checked.output["recovery"]);
     assert!(!fixture.command_jobs().is_empty());
     let stored = fixture
         .db

@@ -1,5 +1,75 @@
 use super::*;
 
+#[tokio::test]
+async fn reconnect_is_bounded_and_success_does_not_reset_lifetime_budget() {
+    let mut attempts = 0;
+    let mut calls = 0;
+    let result = reconnect_tunnel(
+        &mut attempts,
+        Instant::now() + Duration::from_secs(1),
+        Duration::ZERO,
+        |_| {
+            calls += 1;
+            std::future::ready(if calls == 2 {
+                Ok(())
+            } else {
+                Err(tunnel_runtime_error("probe failed"))
+            })
+        },
+    )
+    .await;
+    assert!(result.is_ok());
+    assert_eq!(attempts, 2);
+    let result: Result<(), _> = reconnect_tunnel(
+        &mut attempts,
+        Instant::now() + Duration::from_secs(1),
+        Duration::ZERO,
+        |_| {
+            calls += 1;
+            std::future::ready(Err(tunnel_runtime_error("probe failed")))
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(calls, 3);
+    assert_eq!(attempts, TUNNEL_RECONNECT_LIMIT);
+}
+
+#[tokio::test]
+async fn reconnect_deadline_and_cancellation_never_start_another_attempt() {
+    let mut attempts = 0;
+    let result: Result<(), _> =
+        reconnect_tunnel(&mut attempts, Instant::now(), Duration::ZERO, |_| async {
+            panic!("expired recovery must not launch a child");
+        })
+        .await;
+    assert!(result.is_err());
+    assert_eq!(attempts, 0);
+
+    let result: Result<(), _> = reconnect_tunnel(
+        &mut attempts,
+        Instant::now() + Duration::from_millis(10),
+        Duration::ZERO,
+        |_| std::future::pending(),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(attempts, 1);
+
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(10),
+        reconnect_tunnel::<(), _, _>(
+            &mut attempts,
+            Instant::now() + Duration::from_secs(5),
+            Duration::ZERO,
+            |_| std::future::pending(),
+        ),
+    )
+    .await;
+    assert!(cancelled.is_err());
+    assert_eq!(attempts, 2);
+}
+
 #[test]
 fn runtime_command_inherits_only_tunnel_authority_not_server_bootstrap_or_openai_admin_keys() {
     let prerequisites = OpenAiTunnelPrerequisites {

@@ -608,6 +608,27 @@ impl HostGoalOperationStatus {
     }
 }
 
+/// Closed set of runtime tools whose Job ids refer to the native Runner ledger.
+/// Provider payload fields never acquire this authority by their shape alone.
+pub fn host_goal_tool_has_native_job_receipt(tool: &str) -> bool {
+    matches!(
+        tool,
+        "run_shell"
+            | "run_process"
+            | "run_script"
+            | "run_job"
+            | "run_detached_process"
+            | "cargo_check"
+            | "cargo_test"
+            | "cargo_fmt"
+            | "go_test"
+            | "present_document"
+            | "document_edit"
+            | "document_convert"
+            | "document_restore"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostGoalOperation {

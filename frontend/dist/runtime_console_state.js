@@ -233,6 +233,8 @@ export function initialRuntimeConsoleState() {
         credentialGeneration: 0,
         overviewGeneration: 0,
         projectsGeneration: 0,
+        projectsObservedAt: 0,
+        projectsObservationFailed: false,
         runnerGeneration: 0,
         selectedDevice: "",
         selectedProject: "",
@@ -246,6 +248,8 @@ export function invalidateRuntimeCredential(state) {
     state.credentialGeneration += 1;
     state.overviewGeneration += 1;
     state.projectsGeneration += 1;
+    state.projectsObservedAt = 0;
+    state.projectsObservationFailed = false;
     state.runnerGeneration += 1;
     state.selectedDevice = "";
     state.selectedProject = "";
@@ -568,3 +572,109 @@ export function resolveRuntimeContextFocusTransition(options) {
     }
     return "none";
 }
+export const RUNTIME_OVERVIEW_STALE_MS = 65000;
+export function runtimeProjectProjection(project, overviewProject, projectsObservedAt, overviewObservedAt, projectsFresh, overviewFresh) {
+    const useOverview = !!overviewProject && overviewObservedAt >= projectsObservedAt;
+    const connection = useOverview ? overviewProject : project;
+    return {
+        ...project,
+        connected: connection?.connected,
+        agent_status: connection?.agent_status,
+        sessions: overviewProject?.sessions,
+        connection_observed_at: useOverview ? overviewObservedAt : projectsObservedAt,
+        connection_fresh: typeof connection?.connected === "boolean" && (useOverview ? overviewFresh : projectsFresh),
+        sessions_fresh: !!overviewProject && overviewFresh,
+    };
+}
+export function runtimeOverviewFreshUntil(snapshot, requestStartedAt) {
+    let deadline = requestStartedAt + RUNTIME_OVERVIEW_STALE_MS;
+    for (const layer of Object.values(snapshot?.connection_layers || {})) {
+        if (["ready", "connected", "registered", "observed"].includes(layer?.status)
+            && typeof layer.age_secs === "number" && typeof layer.stale_after_secs === "number") {
+            deadline = Math.min(deadline, requestStartedAt + Math.max(0, layer.stale_after_secs - layer.age_secs) * 1000);
+        }
+    }
+    return deadline;
+}
+// Observation-only projections. Neither connectivity nor historical success
+// authorizes retrying an operation with an unknown outcome.
+export function runtimeDiagnostics(snapshot, receivedAt, now, failure = null) {
+    const fresh = receivedAt > 0 && now >= receivedAt && now - receivedAt < RUNTIME_OVERVIEW_STALE_MS && !failure;
+    const elapsed = fresh ? (now - receivedAt) / 1000 : 0;
+    const unavailable = failure || "snapshot_expired_or_unavailable";
+    const layer = (name, key) => {
+        const observation = snapshot?.connection_layers?.[key];
+        if (!fresh)
+            return { name, status: "unknown", reason: unavailable };
+        if (!observation)
+            return { name, status: "unknown", reason: "observation_unavailable" };
+        const expired = typeof observation.age_secs === "number" && typeof observation.stale_after_secs === "number"
+            && ["ready", "connected", "registered", "observed"].includes(observation.status)
+            && observation.age_secs + elapsed >= observation.stale_after_secs;
+        const raw = expired ? "stale" : observation.status;
+        const status = raw === "not_configured" ? "unconfigured"
+            : ["ready", "connected", "registered"].includes(raw) ? "online"
+                : raw === "disconnected" ? "offline" : raw === "stale" ? "degraded" : "unknown";
+        return { name, status, reason: expired ? "observation_expired" : observation.reason_code || observation.source || "observation_unavailable" };
+    };
+    const runners = layer("Runner", "runner_process");
+    if (runners.status === "online" && (snapshot?.runners_stale > 0 || snapshot?.runners_unavailable > 0)) {
+        runners.status = "degraded";
+        runners.reason = "some_runners_unavailable";
+    }
+    const build = snapshot?.version_compatibility;
+    const sourceStatus = build?.source_alignment?.status;
+    const buildStatus = !fresh ? "unknown"
+        : build?.status === "no_runners" ? "unconfigured"
+            : build?.status === "version_mismatch" || sourceStatus === "different" ? "degraded"
+                : build?.status === "compatible" && sourceStatus === "aligned" ? "online" : "unknown";
+    const jobs = snapshot?.jobs;
+    const jobCountsKnown = jobs && [jobs.recovering_count, jobs.lost_after_reconcile_count]
+        .every((count) => typeof count === "number" && Number.isSafeInteger(count) && count >= 0);
+    const jobStatus = !fresh || !jobCountsKnown ? "unknown"
+        : jobs.recovering_count > 0 || jobs.lost_after_reconcile_count > 0 ? "degraded" : "online";
+    return [
+        { name: "Server", status: fresh ? "online" : failure === "transport_unreachable" ? "offline" : "unknown", reason: fresh ? "authenticated_response_observed" : unavailable },
+        layer("Tunnel", "tunnel"), runners,
+        layer("Runner transport", "server_transport"),
+        layer("Project", "project_registry"),
+        { name: "Job", status: jobStatus, reason: !fresh ? unavailable : !jobCountsKnown ? "job_state_unavailable" : jobStatus === "degraded" ? "job_reconciliation_required" : "registry_observed_not_execution_success" },
+        { name: "Build consistency", status: buildStatus, reason: !fresh ? unavailable : sourceStatus || "build_identity_unavailable" },
+    ];
+}
+// All Console requests have a deadline, including mutations. Timeout is an
+// unknown result; this helper intentionally never retries requests.
+export const fetchRuntimeResponse = async (url, init, timeoutMs = 35000, fetcher = fetch) => {
+    const controller = new AbortController();
+    const callerSignal = init.signal;
+    const cancel = () => controller.abort();
+    if (callerSignal?.aborted)
+        return null;
+    callerSignal?.addEventListener("abort", cancel, { once: true });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    try {
+        const response = await fetcher(url, { ...init, signal: controller.signal });
+        let data = null;
+        try {
+            data = await response.json();
+        }
+        catch {
+            data = null;
+        }
+        if (callerSignal?.aborted)
+            return null;
+        if (timedOut)
+            return { ok: false, status: 0, data: null, reason: "request_timeout" };
+        return { ok: response.ok, status: response.status, data };
+    }
+    catch {
+        if (callerSignal?.aborted)
+            return null;
+        return { ok: false, status: 0, data: null, reason: timedOut ? "request_timeout" : "transport_unreachable" };
+    }
+    finally {
+        clearTimeout(timer);
+        callerSignal?.removeEventListener("abort", cancel);
+    }
+};

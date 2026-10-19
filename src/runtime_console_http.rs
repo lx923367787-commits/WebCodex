@@ -400,6 +400,10 @@ struct RuntimeConsoleOverview {
     version: Option<String>,
     build_git_commit: Option<String>,
     build_git_dirty: Option<bool>,
+    server_time: Option<i64>,
+    connection_layers: Value,
+    version_compatibility: Value,
+    jobs: Value,
     runner_count: usize,
     runners_online: usize,
     runners_stale: usize,
@@ -2410,6 +2414,29 @@ async fn overview_for_auth(
         version: safe_string(status.get("version"), 80),
         build_git_commit: safe_string(build.get("git_commit"), 80),
         build_git_dirty: build.get("git_dirty").and_then(Value::as_bool),
+        server_time: status.get("server_time").and_then(Value::as_i64),
+        connection_layers: [
+            "tunnel",
+            "runner_process",
+            "server_transport",
+            "server_registration",
+            "project_registry",
+            "connector_endpoint",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            status
+                .get("connection_layers")?
+                .get(name)
+                .map(|value| (name.to_string(), value.clone()))
+        })
+        .collect::<serde_json::Map<String, Value>>()
+        .into(),
+        version_compatibility: status
+            .get("version_compatibility")
+            .cloned()
+            .unwrap_or(Value::Null),
+        jobs: status.get("jobs").cloned().unwrap_or(Value::Null),
         runner_count,
         runners_online: online,
         runners_stale: stale,
@@ -3274,6 +3301,76 @@ mod tests {
     use salvo::test::{ResponseExt, TestClient};
     use salvo::Service;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn overview_preserves_connection_freshness_and_canonical_build_diagnostics() {
+        let runtime = test_runtime();
+        let auth = crate::auth::shared_key_context("runtime-console-diagnostics");
+        let mut registration =
+            crate::test_support::current_runner_registration(RunnerRegisterRequest {
+                client_id: "diagnostic-runner".to_string(),
+                runner_instance_id: "diagnostic-instance".to_string(),
+                runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
+                display_name: None,
+                owner: None,
+                hostname: None,
+                host_context: None,
+                capabilities: RunnerCapabilities::default(),
+                policy: None,
+                process_started_at: None,
+                build: None,
+                job_concurrency_limit: None,
+                job_inventory: None,
+                coding_agent_providers: None,
+                coding_agent_inventory: None,
+            });
+        registration.build = Some(crate::runner_protocol::RunnerBuildInfo {
+            version: Some("0.0.0-test-mismatch".to_string()),
+            git_commit: Some("different-build".to_string()),
+            git_dirty: Some(false),
+        });
+        runtime
+            .runner_registry
+            .register_with_auth(
+                registration,
+                Some(&crate::test_support::runner_access(&auth)),
+            )
+            .await
+            .unwrap();
+        let console_overview = overview_for_auth(&runtime, &auth).await.unwrap();
+        assert!(console_overview.server_time.is_some());
+        assert_eq!(
+            console_overview.connection_layers["tunnel"]["status"],
+            "not_observed"
+        );
+        assert!(console_overview
+            .connection_layers
+            .get("last_successful_tool_call")
+            .is_none());
+        assert_eq!(
+            console_overview.connection_layers["server_transport"]["status"],
+            "connected"
+        );
+        assert!(console_overview.mixed_builds_present);
+        assert_eq!(
+            console_overview.runners[0].version_matches_server,
+            Some(false)
+        );
+        assert_eq!(console_overview.jobs["active_count"], 0);
+        runtime
+            .runner_registry
+            .reconcile_disconnect("diagnostic-runner", "diagnostic-instance")
+            .await;
+        let disconnected = overview_for_auth(&runtime, &auth).await.unwrap();
+        assert_eq!(
+            disconnected.connection_layers["server_transport"]["status"],
+            "disconnected"
+        );
+        assert_eq!(
+            disconnected.connection_layers["runner_process"]["status"],
+            "stale"
+        );
+    }
 
     fn project(id: &str, private_path: &str) -> RunnerProjectSummary {
         RunnerProjectSummary {

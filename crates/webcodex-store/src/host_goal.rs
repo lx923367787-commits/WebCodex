@@ -91,6 +91,35 @@ fn request_hash<T: Serialize>(value: &T) -> Result<String, GoalStoreError> {
     Ok(hash(encode(value)?))
 }
 
+fn operation_resolution_summary(
+    operation: &HostGoalOperation,
+    report: &str,
+) -> Result<String, GoalStoreError> {
+    let Some(recovery) = operation
+        .result_summary
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .filter(|value| value["source"] == "untrusted_job_binding_removed")
+    else {
+        return Ok(report.to_string());
+    };
+    let mut summary = serde_json::json!({
+        "source":"user_reconciliation_report", "report":report, "recovery":recovery,
+    });
+    if summary.to_string().len() > 8192 {
+        if let Some(previous) = summary["recovery"]["previous_result_summary"].as_str() {
+            let fingerprint = hash(previous);
+            summary["recovery"]["previous_result_sha256"] = serde_json::json!(fingerprint);
+            summary["recovery"]["previous_result_summary"] = serde_json::Value::Null;
+        }
+    }
+    let summary = encode(&summary)?;
+    if summary.len() > 8192 {
+        return Err(invalid("Operation recovery evidence and resolution report exceed 8 KiB; provide a shorter explicit report"));
+    }
+    Ok(summary)
+}
+
 fn read(
     conn: &Connection,
     owner: &str,
@@ -1146,7 +1175,17 @@ impl Database {
         goal.current_node_id = Some(node_id.into());
         goal.current_attempt_id = Some(binding.attempt_id.clone());
         goal.phase = HostGoalPhase::Executing;
-        goal.state.next_step = plan.plan.nodes[index].work.clone();
+        let node = &plan.plan.nodes[index];
+        // This field is a bounded navigation hint. The immutable node context
+        // owns the complete work/acceptance, and may legitimately exceed 4 KiB.
+        goal.state.next_step = if node.work.len() <= 4096 {
+            node.work.clone()
+        } else {
+            format!(
+                "Continue node {}: {}. Read its node context for the complete requirements.",
+                node.id, node.title
+            )
+        };
         tx.execute(
             "INSERT INTO wc_host_goal_attempts(attempt_id,goal_id,snapshot_json) VALUES(?1,?2,?3)",
             params![binding.attempt_id, id, encode(&attempt)?],
@@ -1471,7 +1510,10 @@ impl Database {
                 return Err(conflict("Manual resolution is restricted to unresolved business operations without a Job; internal checks require authoritative Job evidence"));
             }
             operation.status = resolution.status;
-            operation.result_summary = Some(resolution.report.clone());
+            operation.result_summary = Some(operation_resolution_summary(
+                &operation,
+                &resolution.report,
+            )?);
             operation.updated_at = now;
             if resolution.status == HostGoalOperationStatus::Failed {
                 repair::fail(&tx, &goal, &operation.binding, &resolution.report, now)?;
@@ -1936,6 +1978,59 @@ impl Database {
             operation,
             replayed: false,
         })
+    }
+
+    /// Narrow an old provider-supplied Job binding to an unresolved operation.
+    /// This never observes the named Job or changes execution/acceptance authority.
+    pub fn clear_untrusted_host_goal_job_binding(
+        &self,
+        owner: &str,
+        expected: &HostGoalOperation,
+        now: i64,
+    ) -> Result<HostGoalOperation, GoalStoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(unavailable)?;
+        let id = &expected.binding.goal_id;
+        read(&tx, owner, id)?.ok_or_else(not_found)?;
+        let value: Option<String> = tx.query_row("SELECT snapshot_json FROM wc_host_goal_operations WHERE goal_id=?1 AND operation_id=?2",params![id,expected.operation_id],|row| row.get(0)).optional().map_err(unavailable)?;
+        let mut operation: HostGoalOperation = decode(value.ok_or_else(not_found)?)?;
+        if operation != *expected {
+            return Err(conflict(
+                "Operation changed before invalid Job binding recovery",
+            ));
+        }
+        if operation.status.terminal()
+            || operation.job_id.is_none()
+            || host_goal_tool_has_native_job_receipt(&operation.tool_name)
+            || operation.tool_name == "coding_agent_start"
+        {
+            return Err(conflict(
+                "Only unresolved non-native Job bindings can be removed",
+            ));
+        }
+        let mut summary = serde_json::json!({
+            "source":"untrusted_job_binding_removed",
+            "untrusted_job_id":operation.job_id,
+            "previous_result_summary":operation.result_summary,
+        });
+        if summary.to_string().len() > 8192 {
+            summary["previous_result_sha256"] =
+                serde_json::json!(hash(operation.result_summary.as_deref().unwrap_or("")));
+            summary["previous_result_summary"] = serde_json::Value::Null;
+        }
+        operation.status = HostGoalOperationStatus::Unknown;
+        operation.job_id = None;
+        operation.result_summary = Some(summary.to_string());
+        operation.updated_at = now;
+        tx.execute(
+            "UPDATE wc_host_goal_operations SET terminal=0,snapshot_json=?2 WHERE sequence=?1",
+            params![operation.sequence, encode(&operation)?],
+        )
+        .map_err(unavailable)?;
+        tx.commit().map_err(unavailable)?;
+        Ok(operation)
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -11,6 +11,7 @@ use serde_json::Value;
 /// GPT Action (`registerProject`); also reachable via callRuntimeTool / MCP
 /// tools/call.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RegisterProjectRequest {
     pub client_id: String,
     pub id: String,
@@ -31,6 +32,7 @@ struct RegisterProjectRequest {
 /// Dedicated GPT Action (`createProject`); also reachable via callRuntimeTool
 /// / MCP tools/call.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateProjectRequest {
     pub client_id: String,
     pub id: String,
@@ -48,13 +50,6 @@ struct CreateProjectRequest {
     pub adopt_existing_empty: bool,
     #[serde(default)]
     pub overwrite: bool,
-    /// Narrow pre-0.4 ingress sentinels. This dedicated endpoint historically
-    /// ignores unrelated unknown fields, so naming only retired semantic fields
-    /// keeps that behavior without introducing a generic compatibility-field bag.
-    #[serde(default, rename = "managed_temporary_project")]
-    pub retired_managed_temporary_project: Option<Value>,
-    #[serde(default, rename = "allow_existing_empty")]
-    pub retired_allow_existing_empty: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,30 +139,6 @@ pub async fn projects_create(req: &mut Request, depot: &mut Depot, res: &mut Res
     let Some(body) = parse_json_body::<CreateProjectRequest>(req, res).await else {
         return;
     };
-    if body.retired_managed_temporary_project.is_some() {
-        render_result(
-            res,
-            &audit,
-            "create_project",
-            None,
-            crate::tool_runtime::ToolResult::err(
-                "invalid arguments for create_project: field 'managed_temporary_project' is no longer supported; use ordinary explicit project creation",
-            ),
-        );
-        return;
-    }
-    if body.retired_allow_existing_empty.is_some() {
-        render_result(
-            res,
-            &audit,
-            "create_project",
-            None,
-            crate::tool_runtime::ToolResult::err(
-                "invalid arguments for create_project: field 'allow_existing_empty' is no longer supported; use 'adopt_existing_empty' to explicitly adopt an existing empty directory",
-            ),
-        );
-        return;
-    }
     let auth = depot.obtain::<crate::auth::AuthContext>().ok().cloned();
     let result = runtime
         .dispatch_with_auth(

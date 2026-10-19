@@ -256,9 +256,9 @@ pub async fn tools_call(req: &mut Request, depot: &mut Depot, res: &mut Response
         guard.handler_returned(500, estimated, Some(false), None, "error_runtime_missing");
         return;
     };
-    // Parse the body as a raw JSON value so we can apply the params/arguments
-    // precedence rule explicitly and emit field-aware errors that include the
-    // tool name. We never echo the raw body back, so tokens/headers/env never
+    // Parse the body as a raw JSON value so we can reject mixed argument
+    // envelopes and emit field-aware errors before dispatch. We never echo the
+    // raw body back, so tokens/headers/env never
     // leak through error messages.
     let body: Value = match req.parse_json().await {
         Ok(body) => body,
@@ -500,7 +500,7 @@ fn tool_call_trace_effective_arguments(tool: &str, params: &Value) -> Value {
 /// - `{"tool":"git_diff_summary","project":"agent:c:p"}`
 /// - `{"tool":"git_status","project":"agent:c:p","recording_session_id":"wc_sess_..."}`
 ///
-/// Non-null `params` take precedence over flattened GPT Action fields. A null
+/// Non-null `params` cannot be mixed with flattened GPT Action fields. A null
 /// `params` wrapper is treated as absent. When `params` is absent/null, every
 /// top-level field except `tool` and reserved metadata like
 /// `recording_session_id` is collected into the params object for GPT Action
@@ -529,13 +529,33 @@ fn extract_tool_call(body: &Value) -> Result<(String, Value), String> {
     if obj.contains_key("arguments") {
         return Err("field 'arguments' is no longer supported; use 'params' or flattened top-level tool arguments".to_string());
     }
-    // Non-null params take precedence over flattened GPT Action fields. Some
-    // Action runtimes emit optional object properties as explicit nulls, which
-    // must not erase valid flattened tool arguments.
+    if obj
+        .get(TOOL_CALL_RECORDING_SESSION_ID_FIELD)
+        .is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|session_id| !session_id.trim().is_empty())
+        })
+    {
+        return Err("field 'recording_session_id' must be a non-empty string".to_string());
+    }
+    // Some Action runtimes emit optional object properties as explicit nulls;
+    // a null params wrapper must not erase valid flattened tool arguments.
     let params = if let Some(params) = obj
         .get(TOOL_CALL_PARAMS_FIELD)
         .filter(|params| !params.is_null())
     {
+        for field in obj.keys() {
+            if !TOOL_CALL_WRAPPER_FIELDS.contains(&field.as_str())
+                && field != TOOL_CALL_RECORDING_SESSION_ID_FIELD
+                && field != webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD
+                && field != webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD
+            {
+                return Err(format!(
+                    "field '{field}' cannot be supplied outside non-null 'params'; put all tool arguments inside 'params' or use only flattened arguments"
+                ));
+            }
+        }
         let mut params = params.clone();
         for field in [
             webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD,

@@ -325,6 +325,7 @@ h4 { margin-bottom: 5px; color: var(--muted); font-size: .7rem; letter-spacing: 
 .device-group-identity .small { overflow: hidden; color: var(--placeholder); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 .device-group-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pass); }
 .device-group.offline .device-group-dot { background: var(--fail); }
+.device-group.unknown .device-group-dot { background: var(--muted); }
 .device-project-list { display: grid; gap: 2px; margin: 0; padding: 0; border-left: 0; }
 .device-project-empty { margin: 4px 10px 8px; }
 .project-row { appearance: none; position: relative; width: 100%; min-width: 0; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 0 9px; align-items: start; padding: 8px; border: 0; border-radius: 9px; background: transparent; color: inherit; text-align: left; cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 120ms var(--ease-out); }
@@ -1072,3 +1073,8 @@ body:not(.runtime-has-session) .topbar-controls { padding-right: 0; }
 #goal-host-state pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
 #goal-detail-objective, #goal-detail-note, #goal-status { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 700px) { .goal-form-grid, .goal-workspace { grid-template-columns: 1fr; } }
+.runtime-diagnostics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 16px; }
+.runtime-diagnostic { display: flex; flex-direction: column; gap: 4px; border-left: 3px solid currentColor; padding-left: 10px; overflow-wrap: anywhere; }
+.runtime-diagnostic[data-status="online"] { color: var(--success, #29966d); }
+.runtime-diagnostic[data-status="degraded"] { color: var(--warning, #a66b16); }
+.runtime-diagnostic[data-status="offline"] { color: var(--danger, #c44d58); }

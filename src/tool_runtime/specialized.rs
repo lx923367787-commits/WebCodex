@@ -31,7 +31,6 @@ pub(crate) async fn try_dispatch_specialized_gateway(
     context: super::kernel::ToolCallContext<'_>,
 ) -> Option<super::kernel::ToolCallOutcome> {
     use super::kernel::{ToolCallErrorStatus, ToolCallOutcome};
-    use super::sessions::strip_tool_call_expectation_metadata;
     use super::ToolCall;
 
     if !matches!(
@@ -42,8 +41,7 @@ pub(crate) async fn try_dispatch_specialized_gateway(
         return None;
     }
 
-    let arguments = strip_tool_call_expectation_metadata(request.arguments.clone());
-    let call = match ToolCall::from_tool_name(&request.tool_name, arguments) {
+    let call = match ToolCall::from_tool_name(&request.tool_name, request.arguments.clone()) {
         Ok(call) => call,
         Err(message) => {
             return Some(ToolCallOutcome {

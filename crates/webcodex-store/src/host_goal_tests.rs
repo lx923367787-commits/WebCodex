@@ -695,6 +695,133 @@ fn host_goal_tests_pending_operation_blocks_takeover_replay_never_redispatches()
 }
 
 #[test]
+fn host_goal_tests_untrusted_job_recovery_preserves_native_authority_and_snapshot_fence() {
+    for tool in [
+        "run_process",
+        "cargo_test",
+        "coding_agent_start",
+        "plugin_call",
+    ] {
+        let (dir, db) = database();
+        let (goal, binding) = claimed(&db);
+        db.begin_host_goal_operation(OWNER, &binding, "original", tool, "payload", NOW + 5)
+            .unwrap();
+        let old_summary = if tool == "plugin_call" {
+            "x".repeat(7000)
+        } else {
+            "Original receipt".into()
+        };
+        let original = db
+            .finish_host_goal_operation(
+                OWNER,
+                &goal.goal_id,
+                "original",
+                HostGoalOperationStatus::Running,
+                Some("job-original"),
+                Some(&old_summary),
+                NOW + 6,
+            )
+            .unwrap();
+        assert!(db
+            .clear_untrusted_host_goal_job_binding(OTHER, &original, NOW + 7)
+            .is_err());
+        let mut stale = original.clone();
+        stale.updated_at -= 1;
+        assert!(db
+            .clear_untrusted_host_goal_job_binding(OWNER, &stale, NOW + 7)
+            .is_err());
+        if tool == "plugin_call" {
+            let narrowed = db
+                .clear_untrusted_host_goal_job_binding(OWNER, &original, NOW + 7)
+                .unwrap();
+            assert_eq!(narrowed.status, HostGoalOperationStatus::Unknown);
+            assert!(narrowed.job_id.is_none());
+            assert_eq!(narrowed.binding, original.binding);
+            assert!(db
+                .clear_untrusted_host_goal_job_binding(OWNER, &original, NOW + 8)
+                .is_err());
+            let resolve = |key: &str, report: String| {
+                db.checkpoint_host_goal_with_request(
+                    OWNER,
+                    &goal.goal_id,
+                    goal.revision,
+                    Some(&binding),
+                    &goal.state,
+                    HostGoalCheckpointAction::Cancel,
+                    "Explicit cancellation after original provider inspection",
+                    key,
+                    key,
+                    &[HostGoalOperationResolution {
+                        operation_id: "original".into(),
+                        status: HostGoalOperationStatus::Cancelled,
+                        report,
+                    }],
+                    NOW + 9,
+                )
+            };
+            assert!(resolve("oversized", "\"".repeat(8192)).is_err());
+            assert_eq!(
+                db.get_host_goal_operation(OWNER, &goal.goal_id, "original")
+                    .unwrap()
+                    .unwrap(),
+                narrowed
+            );
+            let report = "User explicitly cancelled the original provider operation. ".repeat(60);
+            assert_eq!(
+                resolve("explicit", report.clone()).unwrap().goal.phase,
+                HostGoalPhase::Cancelled
+            );
+            let reopened = Database::open(&dir.path().join("state.db")).unwrap();
+            let receipt = reopened
+                .get_host_goal_operation(OWNER, &goal.goal_id, "original")
+                .unwrap()
+                .unwrap();
+            let stored = receipt.result_summary.unwrap();
+            assert!(stored.len() <= 8192);
+            let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+            assert_eq!(value["report"], report);
+            assert_eq!(value["recovery"]["untrusted_job_id"], "job-original");
+            assert!(value["recovery"]["previous_result_summary"].is_null());
+            use sha2::Digest;
+            assert_eq!(
+                value["recovery"]["previous_result_sha256"],
+                format!("{:x}", sha2::Sha256::digest(old_summary.as_bytes()))
+            );
+        } else {
+            assert!(db
+                .clear_untrusted_host_goal_job_binding(OWNER, &original, NOW + 7)
+                .is_err());
+            let denied = db
+                .checkpoint_host_goal_with_request(
+                    OWNER,
+                    &goal.goal_id,
+                    goal.revision,
+                    Some(&binding),
+                    &goal.state,
+                    HostGoalCheckpointAction::Progress,
+                    "Manual success cannot replace native evidence",
+                    "manual",
+                    "manual-hash",
+                    &[HostGoalOperationResolution {
+                        operation_id: "original".into(),
+                        status: HostGoalOperationStatus::Succeeded,
+                        report: "User report".into(),
+                    }],
+                    NOW + 8,
+                )
+                .unwrap_err();
+            assert_eq!(denied.code(), "goal_job_reconciliation_required");
+            assert_eq!(
+                db.get_host_goal_operation(OWNER, &goal.goal_id, "original")
+                    .unwrap()
+                    .unwrap(),
+                original
+            );
+        }
+    }
+}
+
+#[test]
 fn host_goal_tests_acceptance_cannot_skip_criteria_or_forge_machine_source() {
     let (_dir, db) = database();
     let (goal, binding) = claimed(&db);

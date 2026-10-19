@@ -880,24 +880,60 @@ async fn collaboration_two_sessions_keep_execution_history_and_explicit_provenan
     assert!(exact.success, "{:?}", exact.error);
     assert_eq!(exact.output["messages"].as_array().unwrap().len(), 1);
 
-    let assignment_fence = runtime
+    let assignment = runtime
         .sessions
         .get_assignment(&coordinator.session_id, &todo_id)
+        .unwrap();
+    let assignment_fence = assignment.assignment_fence.clone();
+    let mut completion_arguments = json!({
+        "session_id": coordinator.session_id,
+        "message_id": todo_id,
+        "answer": "No findings. Revalidated the authoritative synthetic source after review.",
+        "completion_key": "worker-review-v1",
+        "expected_assignment_fence": assignment_fence.clone(),
+        "tags": ["review", "done"],
+        "priority": "normal",
+        "author_session_id": "wc_sess_forged_should_be_ignored"
+    });
+    let rejected = runtime
+        .call_tool_with_context(
+            ToolCallRequest {
+                tool_name: "complete_session_message".into(),
+                arguments: completion_arguments.clone(),
+            },
+            ToolCallContext {
+                transport: ToolTransport::Api,
+                session_id: Some(&worker.session_id),
+                auth: Some(&auth),
+                window: Some(&worker_window),
+                record_oauth_scope_denials: false,
+                host_file_import_trust: HostFileImportTrust::Untrusted,
+            },
+        )
+        .await;
+    assert!(!rejected.success);
+    assert!(matches!(
+        rejected.error_status,
+        Some(super::super::kernel::ToolCallErrorStatus::InvalidArguments { ref message })
+            if message.contains("author_session_id")
+                && !message.contains("wc_sess_forged_should_be_ignored")
+    ));
+    let unchanged = runtime
+        .sessions
+        .get_assignment(&coordinator.session_id, &todo_id)
+        .unwrap();
+    assert_eq!(unchanged, assignment);
+    assert_eq!(unchanged.todo.status, sessions::SessionMessageStatus::Open);
+    assert!(unchanged.direct_replies.is_empty());
+
+    completion_arguments
+        .as_object_mut()
         .unwrap()
-        .assignment_fence;
+        .remove("author_session_id");
     let completed = call_with_recorder(
         &runtime,
         "complete_session_message",
-        json!({
-            "session_id": coordinator.session_id,
-            "message_id": todo_id,
-            "answer": "No findings. Revalidated the authoritative synthetic source after review.",
-            "completion_key": "worker-review-v1",
-            "expected_assignment_fence": assignment_fence.clone(),
-            "tags": ["review", "done"],
-            "priority": "normal",
-            "author_session_id": "wc_sess_forged_should_be_ignored"
-        }),
+        completion_arguments,
         Some(&worker.session_id),
         &auth,
         Some(&worker_window),

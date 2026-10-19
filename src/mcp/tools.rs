@@ -307,10 +307,16 @@ fn specialized_metadata_result(output: Value, error: bool) -> Value {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct McpToolCallParams {
     pub(super) name: String,
     #[serde(default)]
     pub(super) arguments: Value,
+    // Protocol capabilities and host identity are consumed by their existing
+    // adapters before parsing. Retain the extension slot while rejecting
+    // misplaced business fields that would otherwise disappear silently.
+    #[serde(default, rename = "_meta")]
+    _meta: Option<serde::de::IgnoredAny>,
 }
 
 pub(super) fn tool_name_from_params(params: &Value) -> Option<String> {

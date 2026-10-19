@@ -7,6 +7,238 @@ use webcodex_core::host_goal::{
     HostGoalExecutionBinding, HostGoalInvocationContext, HostGoalOperationStatus, HostGoalRecord,
 };
 
+#[tokio::test]
+async fn host_goal_active_operations_receipts_survive_restart_without_replaying_effects() {
+    use HostGoalOperationStatus as Operation;
+    for (tool, output, expected, expected_job) in [
+        (
+            "run_process",
+            json!({"job_id":"original-job","job_status":"completed","exit_code":0}),
+            Operation::Succeeded,
+            Some("original-job"),
+        ),
+        (
+            "run_process",
+            json!({"job_id":"original-job","status":"cancelled","exit_code":0}),
+            Operation::Cancelled,
+            Some("original-job"),
+        ),
+        (
+            "run_process",
+            json!({"job_id":"original-job","status":"lost"}),
+            Operation::Unknown,
+            Some("original-job"),
+        ),
+        (
+            "run_process",
+            json!({"execution_state":"timed_out","exit_code":null}),
+            Operation::Failed,
+            None,
+        ),
+        (
+            "plugin_call",
+            json!({"job_id":"unrelated-job","status":"completed","exit_code":0}),
+            Operation::Unknown,
+            None,
+        ),
+    ] {
+        let (fixture, goal, binding) = prepare(Behavior::Accept, false).await;
+        fixture
+            .db
+            .begin_host_goal_operation(
+                &goal.owner_key,
+                &binding,
+                "original-operation",
+                tool,
+                "payload",
+                7,
+            )
+            .unwrap();
+        let scope = RequestScope::new(goal.owner_key.clone(), None, &json!({})).unwrap();
+        let mut outcome = crate::tool_runtime::kernel::ToolCallOutcome {
+            success: true,
+            result: Some(ToolResult::ok(output)),
+            error_status: None,
+            project: Some(goal.project.clone()),
+            model_ergonomics: None,
+            correlation: Default::default(),
+        };
+        context::scope(scope, async {
+            context::track_active_operation(&goal.goal_id, "original-operation").unwrap();
+            context::mark_operation_admitted(&goal.goal_id, "original-operation");
+            fixture
+                .runtime
+                .finish_host_goal_request(tool, &json!({}), Some(&goal_auth()), &mut outcome)
+                .await;
+        })
+        .await;
+        let reopened = crate::Database::open(&fixture.temp.path().join("goal.db")).unwrap();
+        let receipt = reopened
+            .get_host_goal_operation(&goal.owner_key, &goal.goal_id, "original-operation")
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.status, expected, "{tool}");
+        assert_eq!(receipt.job_id.as_deref(), expected_job);
+        assert_eq!(
+            reopened
+                .count_unresolved_host_goal_operations(&goal.owner_key, &goal.goal_id)
+                .unwrap(),
+            u64::from(!expected.terminal())
+        );
+        let replay = reopened
+            .begin_host_goal_operation(
+                &goal.owner_key,
+                &binding,
+                "original-operation",
+                tool,
+                "payload",
+                9,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.operation, receipt);
+        assert_eq!(
+            reopened
+                .get_host_goal(&goal.owner_key, &goal.goal_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            webcodex_core::host_goal::HostGoalPhase::Executing
+        );
+        assert!(
+            fixture.command_jobs().is_empty(),
+            "Recording or restoring a receipt must never dispatch an effect"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_goal_active_operations_legacy_plugin_job_cannot_enter_native_reconciliation() {
+    let (fixture, goal, binding) = prepare(Behavior::Accept, false).await;
+    fixture
+        .db
+        .begin_host_goal_operation(
+            &goal.owner_key,
+            &binding,
+            "plugin-operation",
+            "plugin_call",
+            "payload",
+            7,
+        )
+        .unwrap();
+    fixture
+        .db
+        .finish_host_goal_operation(
+            &goal.owner_key,
+            &goal.goal_id,
+            "plugin-operation",
+            HostGoalOperationStatus::Running,
+            Some("unrelated-job"),
+            Some("Original provider receipt"),
+            8,
+        )
+        .unwrap();
+    let lease = context::lease_active_operation(&goal.goal_id, "plugin-operation");
+    let active = fixture
+        .runtime
+        .reconcile_host_goal_operations(&goal, Some(&goal_auth()))
+        .await
+        .unwrap_err();
+    assert_eq!(active.output["error_kind"], "goal_operation_still_active");
+    drop(lease);
+    let denied = fixture
+        .runtime
+        .reconcile_host_goal_operations(&goal, Some(&goal_auth()))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied.output["error_kind"],
+        "goal_operation_outcome_unknown"
+    );
+    let reopened = crate::Database::open(&fixture.temp.path().join("goal.db")).unwrap();
+    let quarantined = reopened
+        .get_host_goal_operation(&goal.owner_key, &goal.goal_id, "plugin-operation")
+        .unwrap()
+        .unwrap();
+    assert_eq!(quarantined.status, HostGoalOperationStatus::Unknown);
+    assert!(quarantined.job_id.is_none());
+    assert_eq!(quarantined.binding, binding);
+    let summary: serde_json::Value =
+        serde_json::from_str(quarantined.result_summary.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["untrusted_job_id"], "unrelated-job");
+    let replay = reopened
+        .begin_host_goal_operation(
+            &goal.owner_key,
+            &binding,
+            "plugin-operation",
+            "plugin_call",
+            "payload",
+            9,
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.operation, quarantined);
+    assert!(reopened
+        .checkpoint_host_goal(
+            &goal.owner_key,
+            &goal.goal_id,
+            goal.revision,
+            Some(&binding),
+            &goal.state,
+            webcodex_store::HostGoalCheckpointAction::Cancel,
+            "Cannot silently cancel an unknown operation",
+            "silent-cancel",
+            10
+        )
+        .is_err());
+    let cancelled = reopened.checkpoint_host_goal_with_request(
+        &goal.owner_key, &goal.goal_id, goal.revision, Some(&binding), &goal.state,
+        webcodex_store::HostGoalCheckpointAction::Cancel, "Explicit original-provider inspection and cancellation", "explicit-cancel", "cancel-request-hash",
+        &[webcodex_core::host_goal::HostGoalOperationResolution { operation_id:"plugin-operation".into(), status:HostGoalOperationStatus::Cancelled,
+            report:json!({"source":"user_reconciliation_report","evidence":"User inspected the original provider operation","source_refs":["provider-operation"],"user_confirmation":"Cancel this operation and Goal"}).to_string() }], 11,
+    ).unwrap();
+    assert_eq!(
+        cancelled.goal.phase,
+        webcodex_core::host_goal::HostGoalPhase::Cancelled
+    );
+    assert_eq!(
+        reopened
+            .count_unresolved_host_goal_operations(&goal.owner_key, &goal.goal_id)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        reopened
+            .get_host_goal_operation(&goal.owner_key, &goal.goal_id, "plugin-operation")
+            .unwrap()
+            .unwrap()
+            .status,
+        HostGoalOperationStatus::Cancelled
+    );
+    drop(reopened);
+    let after_cancel = crate::Database::open(&fixture.temp.path().join("goal.db")).unwrap();
+    let receipt = after_cancel
+        .get_host_goal_operation(&goal.owner_key, &goal.goal_id, "plugin-operation")
+        .unwrap()
+        .unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(receipt.result_summary.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["recovery"]["untrusted_job_id"], "unrelated-job");
+    assert_eq!(
+        summary["recovery"]["previous_result_summary"],
+        "Original provider receipt"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(summary["report"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        report["user_confirmation"],
+        "Cancel this operation and Goal"
+    );
+    assert_eq!(receipt.status, HostGoalOperationStatus::Cancelled);
+    assert!(receipt.result_summary.as_ref().unwrap().len() <= 8192);
+    assert!(fixture.command_jobs().is_empty());
+}
+
 async fn resolve(
     fixture: &Fixture,
     goal: &HostGoalRecord,

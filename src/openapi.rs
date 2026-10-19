@@ -390,7 +390,7 @@ fn schemas() -> Value {
             "type": "object",
             "additionalProperties": false,
             "required": [TOOL_CALL_TOOL_FIELD],
-            "description": "Generic GPT Actions runtime tool call. The model-facing `tool` selector and flattened top-level fields cover only model-visible runtime tools and match registered_tool_specs, MCP discovery, and tool_manifest. GPT Actions should pass tool-specific arguments as flattened top-level fields because some Action runtimes reject free-form params objects. `params` is the canonical direct/non-Action argument envelope; a non-null value takes precedence and a null wrapper does not suppress flattened arguments. The retired `arguments` wrapper is rejected. Top-level `session_id` is ordinary explicit tool business input when declared by the selected visible tool; use `recording_session_id` only to record this wrapper call in an explicitly selected existing Workflow Session. Omitted Session identifiers never infer a Workflow Session from window, credential, project, or prior calls. For daily discovery prefer tool_manifest; it exposes accepted_flattened_args for model-facing top-level calls. Use list_tools with summary_only/category/features/limit only for focused discovery.",
+            "description": "Generic GPT Actions runtime tool call. The model-facing `tool` selector and flattened top-level fields cover only model-visible runtime tools and match registered_tool_specs, MCP discovery, and tool_manifest. GPT Actions should pass tool-specific arguments as flattened top-level fields because some Action runtimes reject free-form params objects. `params` is the canonical direct/non-Action argument envelope; a non-null value cannot be mixed with flattened business arguments, and a null wrapper does not suppress flattened arguments. The retired `arguments` wrapper is rejected. Top-level `session_id` is ordinary explicit tool business input when declared by the selected visible tool; use `recording_session_id` only to record this wrapper call in an explicitly selected existing Workflow Session. Omitted Session identifiers never infer a Workflow Session from window, credential, project, or prior calls. For daily discovery prefer tool_manifest; it exposes accepted_flattened_args for model-facing top-level calls. Use list_tools with summary_only/category/features/limit only for focused discovery.",
             "properties": {
                 "session_id": {
                     "type": "string",
@@ -1294,7 +1294,7 @@ fn insert_tool_call_request_reserved_properties(schemas: &mut Value) {
         TOOL_CALL_PARAMS_FIELD.to_string(),
         json!({
             "type": "object",
-            "description": "Canonical tool-specific arguments object for non-Action clients. A non-null value takes precedence; a null wrapper does not suppress flattened top-level fields. GPT Actions should prefer flattened top-level fields.",
+            "description": "Canonical tool-specific arguments object for non-Action clients. A non-null value cannot be mixed with flattened business arguments; a null wrapper does not suppress flattened top-level fields. GPT Actions should prefer flattened top-level fields.",
             "nullable": true,
             "additionalProperties": true
         }),

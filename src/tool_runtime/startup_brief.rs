@@ -1137,7 +1137,10 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 
 /// Bound by the serialized JSON payload cost, not Unicode scalar count. This
 /// keeps control characters and escape-heavy content within the byte contract.
-fn bounded_json_string(value: &str, max_payload_bytes: usize) -> (String, bool) {
+pub(in crate::tool_runtime) fn bounded_json_string(
+    value: &str,
+    max_payload_bytes: usize,
+) -> (String, bool) {
     let mut output = String::new();
     let mut used = 0usize;
     for character in value.chars() {

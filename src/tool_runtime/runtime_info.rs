@@ -721,6 +721,7 @@ pub(crate) fn compact_runtime_status(status: &Value) -> Value {
     }
     let mut compact = json!({
         "compact": true,
+        "server_time": status.get("server_time").cloned().unwrap_or(Value::Null),
         "service": status.get("service").cloned().unwrap_or_else(|| json!("webcodex")),
         "runtime_exposure": status
             .get("runtime_exposure")
@@ -743,6 +744,8 @@ pub(crate) fn compact_runtime_status(status: &Value) -> Value {
             "active_count": status.pointer("/jobs/active_count").cloned().unwrap_or(Value::Null),
             "running_count": status.pointer("/jobs/running_count").cloned().unwrap_or(Value::Null),
             "queued_count": status.pointer("/jobs/queued_count").cloned().unwrap_or(Value::Null),
+            "recovering_count": status.pointer("/jobs/recovering_count").cloned().unwrap_or(Value::Null),
+            "lost_after_reconcile_count": status.pointer("/jobs/lost_after_reconcile_count").cloned().unwrap_or(Value::Null),
         },
         "agents": {
             "count": status.pointer("/agents/count").cloned().unwrap_or_else(|| json!(0)),
@@ -860,13 +863,17 @@ fn layer_observation(
     now: i64,
     extra: Value,
 ) -> Value {
+    let expired = observed_at.zip(stale_after_secs).is_some_and(|(at, ttl)| {
+        now.saturating_sub(at) >= ttl
+            && matches!(status, "ready" | "connected" | "registered" | "observed")
+    });
     let mut layer = json!({
-        "status": status,
+        "status": if expired { "stale" } else { status },
         "observed_at": observed_at,
         "source": source,
         "age_secs": observed_at.map(|at| now.saturating_sub(at)),
         "stale_after_secs": stale_after_secs,
-        "reason_code": reason_code,
+        "reason_code": if expired { Some("observation_expired") } else { reason_code },
     });
     if let (Some(object), Some(extra)) = (layer.as_object_mut(), extra.as_object()) {
         for (key, value) in extra {
@@ -1144,6 +1151,12 @@ fn connection_layers(
     };
 
     json!({
+        // The Server does not own or probe an external tunnel daemon. A live
+        // local endpoint or historical tool result cannot establish its health.
+        "tunnel": layer_observation(
+            "not_observed", None, "tunnel_owner", None,
+            Some("tunnel_health_not_reported"), now, json!({}),
+        ),
         "runner_process": runner_process,
         "server_transport": server_transport,
         "server_registration": server_registration,
@@ -1470,6 +1483,21 @@ mod phase_e2_status_tests {
     use super::*;
 
     #[test]
+    fn connection_observations_expire_without_rewriting_failure_or_configuration() {
+        let observed = |status, now| {
+            layer_observation(status, Some(100), "test", Some(10), None, now, json!({}))
+        };
+        assert_eq!(observed("ready", 109)["status"], "ready");
+        for status in ["ready", "connected", "registered", "observed"] {
+            assert_eq!(observed(status, 110)["status"], "stale");
+            assert_eq!(observed(status, 110)["reason_code"], "observation_expired");
+        }
+        for status in ["disconnected", "unknown", "not_configured"] {
+            assert_eq!(observed(status, 200)["status"], status);
+        }
+    }
+
+    #[test]
     fn concurrency_counts_use_only_canonical_running_and_queued_statuses() {
         for status in ["running", "started"] {
             assert!(job_status_is_running(status), "{status}");
@@ -1596,18 +1624,25 @@ mod phase_e2_status_tests {
     #[test]
     fn compact_runtime_status_keeps_minimum_job_state_counts() {
         let compact = compact_runtime_status(&json!({
+            "server_time": 1720000000,
             "jobs": {
                 "active_count": 5,
                 "running_count": 2,
                 "queued_count": 1,
+                "recovering_count": 2,
+                "lost_after_reconcile_count": 3,
             }
         }));
+        assert_eq!(compact["server_time"], 1720000000);
+        assert!(compact_runtime_status(&json!({}))["server_time"].is_null());
         assert_eq!(
             compact["jobs"],
             json!({
                 "active_count": 5,
                 "running_count": 2,
                 "queued_count": 1,
+                "recovering_count": 2,
+                "lost_after_reconcile_count": 3,
             })
         );
     }

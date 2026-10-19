@@ -749,7 +749,10 @@ impl ToolRuntime {
             }
         }
 
-        let mut call = match ToolCall::from_tool_name(&request.tool_name, concrete_arguments) {
+        // The canonical parser validates expectation metadata before removing
+        // it. Passing the already-stripped arguments bypasses those checks.
+        let mut call = match ToolCall::from_tool_name(&request.tool_name, request.arguments.clone())
+        {
             Ok(call) => call,
             Err(message) => {
                 self.sessions.record_tool_call_finished(

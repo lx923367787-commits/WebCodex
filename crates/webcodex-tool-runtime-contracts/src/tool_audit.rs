@@ -1946,13 +1946,24 @@ mod computer_privacy_tests {
                 "memory_scope_id": scope_id,
                 "expected_catalog_revision": catalog_revision,
                 "confirm": true,
-                "body": private_body,
             }),
         );
         assert_eq!(purge_args["memory_scope_id"], scope_id);
         assert_eq!(purge_args["expected_catalog_revision"], catalog_revision);
         assert!(purge_args.get("confirm").is_none());
         assert!(!purge_args.to_string().contains(private_body));
+        let malformed_purge = json!({
+            "memory_scope_id": scope_id,
+            "expected_catalog_revision": catalog_revision,
+            "confirm": true,
+            "body": private_body,
+        });
+        assert!(ToolCall::from_tool_name("memory_scope_purge", malformed_purge.clone()).is_err());
+        assert_eq!(
+            session_log_arguments_for_tool_request("memory_scope_purge", &malformed_purge),
+            serde_json::json!({}),
+            "malformed hidden-tool arguments fail closed without retaining private fields"
+        );
         let typed_purge = ToolCall::MemoryScopePurge {
             memory_scope_id: scope_id.clone(),
             expected_catalog_revision: catalog_revision.clone(),

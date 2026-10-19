@@ -67,6 +67,7 @@ struct ManagedProcess {
     logs: Arc<Mutex<VecDeque<String>>>,
     stdout_task: JoinHandle<()>,
     stderr_task: JoinHandle<()>,
+    machine_events: Option<MachineEventSender>,
 }
 
 #[derive(Default)]
@@ -129,6 +130,22 @@ impl MachineEventReceiver {
 }
 
 impl MachineEventSender {
+    fn latest_lifecycle(&self) -> Option<Value> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed || state.dropped_critical > 0 {
+            return Some(serde_json::json!({ "event": "failed" }));
+        }
+        state
+            .queue
+            .iter()
+            .rev()
+            .find(|event| machine_event_is_terminal(event))
+            .cloned()
+    }
+
     fn send(&self, value: Value) {
         let mut state = self
             .state
@@ -200,7 +217,16 @@ fn machine_event_is_progress(value: &Value) -> bool {
 fn machine_event_is_terminal(value: &Value) -> bool {
     matches!(
         value.get("event").and_then(Value::as_str),
-        Some("ready" | "error" | "failed" | "stopped" | "exit" | "exited" | "terminal")
+        Some(
+            "ready"
+                | "reconnecting"
+                | "error"
+                | "failed"
+                | "stopped"
+                | "exit"
+                | "exited"
+                | "terminal"
+        )
     )
 }
 
@@ -291,6 +317,7 @@ impl ProcessSupervisor {
             (None, None)
         };
         let stdout_logs = Arc::clone(&logs);
+        let machine_events = machine_tx.clone();
         let stdout_task = tokio::task::spawn_blocking(move || {
             drain_stream(stdout, stdout_logs, machine_tx, machine_stdout)
         });
@@ -312,6 +339,7 @@ impl ProcessSupervisor {
                 logs,
                 stdout_task,
                 stderr_task,
+                machine_events,
             },
         );
         Ok(machine_rx)
@@ -356,6 +384,14 @@ impl ProcessSupervisor {
                 }
             }
         }
+    }
+
+    pub(crate) fn latest_machine_lifecycle(&self, kind: ProcessKind) -> Option<Value> {
+        self.processes
+            .get(&kind)?
+            .machine_events
+            .as_ref()?
+            .latest_lifecycle()
     }
 
     pub fn snapshot(&mut self, kind: ProcessKind) -> Option<ProcessSnapshot> {
@@ -546,6 +582,21 @@ fn process_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_observation_survives_startup_receiver_drop_and_fails_closed() {
+        let (sender, mut receiver) = machine_event_channel();
+        sender.send(serde_json::json!({"event": "ready"}));
+        assert_eq!(receiver.recv().await.unwrap()["event"], "ready");
+        drop(receiver);
+        assert!(sender.latest_lifecycle().is_none());
+        for event in ["reconnecting", "ready", "failed", "stopped"] {
+            sender.send(serde_json::json!({"event": event}));
+            assert_eq!(sender.latest_lifecycle().unwrap()["event"], event);
+        }
+        sender.close();
+        assert_eq!(sender.latest_lifecycle().unwrap()["event"], "failed");
+    }
 
     #[tokio::test]
     async fn machine_event_progress_flood_stays_bounded_and_ready_is_observed() {

@@ -3,7 +3,7 @@ use super::openai_tunnel_service::{prepare_openai_tunnel, start_openai_tunnel};
 use super::setup_service::{create_private_dir, write_new_private};
 use super::ProductError;
 use serde_json::{json, Value};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -66,22 +66,43 @@ pub(crate) async fn run_regular_server_tunnel(
     .await?;
 
     let clipboard = copy_text_to_clipboard(&prerequisites.tunnel_id, true).await;
-    let ready = machine_regular_tunnel_ready_event(clipboard);
-    let encoded = serde_json::to_string(&ready).map_err(|_| {
-        ProductError::new(
-            "machine_output_failed",
-            "WebCodex could not encode regular Tunnel readiness",
-            Some("Retry the OpenAI Secure Tunnel."),
-        )
-    })?;
-    println!("{encoded}");
+    emit_regular_tunnel_lifecycle("ready", clipboard)?;
 
     let outcome = tokio::select! {
         _ = wait_for_regular_tunnel_stop_signal() => Ok(()),
-        result = tunnel.wait_for_exit() => result,
+        result = tunnel.wait_with_recovery(|status| emit_regular_tunnel_lifecycle(status, clipboard)) => result,
     };
     tunnel.stop().await;
+    if outcome.is_ok() {
+        emit_regular_tunnel_lifecycle("stopped", clipboard)?;
+    }
     outcome
+}
+
+fn emit_regular_tunnel_lifecycle(
+    status: &str,
+    clipboard: ClipboardCopyOutcome,
+) -> Result<(), ProductError> {
+    let event = machine_regular_tunnel_lifecycle_event(status, clipboard);
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{event}")
+        .and_then(|_| stdout.flush())
+        .map_err(|_| {
+            ProductError::new(
+                "machine_output_failed",
+                "WebCodex could not publish Tunnel lifecycle state",
+                Some("Check the Tunnel owner output channel."),
+            )
+        })
+}
+
+fn machine_regular_tunnel_lifecycle_event(status: &str, clipboard: ClipboardCopyOutcome) -> Value {
+    let mut event = machine_regular_tunnel_ready_event(clipboard);
+    event["event"] = json!(status);
+    if status != "ready" {
+        event["ready_for_chatgpt"] = json!(false);
+    }
+    event
 }
 
 fn machine_regular_tunnel_ready_event(clipboard: ClipboardCopyOutcome) -> Value {
@@ -198,6 +219,18 @@ mod tests {
         assert!(!encoded.contains("Bearer"));
         assert!(!encoded.contains("wc_pat_"));
         assert!(!encoded.contains("wc_boot_"));
+    }
+
+    #[test]
+    fn lifecycle_events_invalidate_ready_until_verified_recovery() {
+        for status in ["ready", "reconnecting", "ready", "failed", "stopped"] {
+            let event =
+                machine_regular_tunnel_lifecycle_event(status, ClipboardCopyOutcome::Copied);
+            assert_eq!(event["event"], status);
+            assert_eq!(event["ready_for_chatgpt"], status == "ready");
+            assert_eq!(event["schema_version"], 1);
+            assert_eq!(event["connection"]["kind"], "openai_tunnel");
+        }
     }
 
     #[test]

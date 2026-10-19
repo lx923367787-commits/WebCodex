@@ -7,6 +7,28 @@ use base64::engine::general_purpose;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn mcp_tool_call_envelope_rejects_misplaced_execution_fields() {
+    for field in [
+        "expected_sha256",
+        "target",
+        "project",
+        "result_expectation",
+        "params",
+    ] {
+        let mut input = json!({
+            "name": "write_project_file",
+            "arguments": {"project":"demo","path":"a.txt","content":"text"},
+            "_meta": {"progressToken":"request-1"},
+        });
+        input[field] = json!("must-not-be-ignored");
+        assert!(
+            serde_json::from_value::<McpToolCallParams>(input).is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
 fn mcp_gateway_tool_call_params_do_not_retain_outer_meta() {
     for meta in [
         json!({"progressToken": "legacy-progress", "custom": {"private": true}}),
@@ -23,7 +45,9 @@ fn mcp_gateway_tool_call_params_do_not_retain_outer_meta() {
             "_meta": meta
         }))
         .unwrap();
-        let McpToolCallParams { name, arguments } = parsed;
+        let McpToolCallParams {
+            name, arguments, ..
+        } = parsed;
         assert_eq!(name, crate::mcp_gateway::MCP_TOOL_NAME);
         assert_eq!(arguments, json!({"action": "list"}));
     }

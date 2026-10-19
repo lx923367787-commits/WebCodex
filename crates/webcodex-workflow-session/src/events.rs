@@ -281,8 +281,40 @@ pub fn validate_model_facing_result_expectation(
     let Some(object) = arguments.as_object() else {
         return Ok(());
     };
+    // These legacy expectation fields are still accepted, but must not be
+    // silently coerced or discarded before execution and evidence recording.
+    if object
+        .get(TOOL_EXPECTED_FAILURE_FIELD)
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(format!(
+            "invalid arguments for tool '{tool_name}': expected_failure must be a boolean"
+        ));
+    }
+    for field in [TOOL_EXPECTED_FAILURE_KIND_FIELD, TOOL_ASSERTION_NAME_FIELD] {
+        if object.get(field).is_some_and(|value| !value.is_string()) {
+            return Err(format!(
+                "invalid arguments for tool '{tool_name}': {field} must be a string"
+            ));
+        }
+    }
     let result_expectation = object.get(TOOL_RESULT_EXPECTATION_FIELD);
     let accepted_exit_codes = object.get(TOOL_ACCEPTED_EXIT_CODES_FIELD);
+    let legacy_expected_failure = object
+        .get(TOOL_EXPECTED_FAILURE_FIELD)
+        .and_then(Value::as_bool);
+    if (legacy_expected_failure == Some(true)
+        && (result_expectation
+            .and_then(Value::as_str)
+            .is_some_and(|value| matches!(value, "success" | "observe"))
+            || accepted_exit_codes.is_some()))
+        || (legacy_expected_failure == Some(false)
+            && result_expectation.and_then(Value::as_str) == Some("failure"))
+    {
+        return Err(format!(
+            "invalid arguments for tool '{tool_name}': expected_failure conflicts with result_expectation or accepted_exit_codes"
+        ));
+    }
     if result_expectation.is_none() && accepted_exit_codes.is_none() {
         return Ok(());
     }

@@ -625,6 +625,12 @@ impl ToolRuntime {
             return;
         }
         let current = json!({
+            "session_id": handoff.output.get("session_id"),
+            "project": handoff.output.get("project"),
+            "mode": handoff.output.get("mode"),
+            "guards": handoff.output.get("guards"),
+            "execution_context": handoff.output.get("execution_context"),
+            "lifecycle": handoff.output.get("lifecycle"),
             "workspace": handoff.output.get("workspace"),
             "checkpoints": handoff.output.get("checkpoints"),
             "validation": recovery_validation_summary(handoff.output.get("validation")),

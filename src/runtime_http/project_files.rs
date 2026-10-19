@@ -5,6 +5,7 @@ use salvo::prelude::*;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProjectIdRequest {
     pub project: String,
     #[serde(default)]
@@ -12,6 +13,7 @@ struct ProjectIdRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReadProjectFileRequest {
     pub project: String,
     pub path: String,
@@ -26,6 +28,7 @@ struct ReadProjectFileRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProjectGitDiffRequest {
     pub project: String,
     #[serde(default)]
@@ -35,6 +38,7 @@ struct ProjectGitDiffRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApplyUnifiedDiffRequest {
     pub project: String,
     pub diff: String,
@@ -45,6 +49,7 @@ struct ApplyUnifiedDiffRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GitRestorePathsRequest {
     pub project: String,
     pub paths: Vec<String>,
@@ -53,6 +58,7 @@ struct GitRestorePathsRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DiscardUntrackedRequest {
     pub project: String,
     pub paths: Vec<String>,
@@ -61,6 +67,7 @@ struct DiscardUntrackedRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListProjectFilesRequest {
     pub project: String,
     #[serde(default)]
@@ -72,6 +79,7 @@ struct ListProjectFilesRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchProjectTextRequest {
     pub project: String,
     pub pattern: String,

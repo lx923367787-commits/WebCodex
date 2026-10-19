@@ -3390,9 +3390,12 @@ fn batch_budget_preserves_recorder_overlay_for_no_ack_read_batch() {
 #[tokio::test]
 async fn unknown_session_context_recovery_uses_current_handoff_not_history_replay() {
     let runtime = super::super::ToolRuntime::new_for_tests();
-    let session = runtime
-        .sessions
-        .start_session(None, Some("unknown continuity recovery".to_string()));
+    let session = runtime.sessions.start_session_with_guards(
+        None,
+        Some("unknown continuity recovery".to_string()),
+        SessionMode::ReadOnly,
+        SessionGuards::default(),
+    );
     let first = record_model_facing_result(
         &runtime.sessions,
         &session.session_id,
@@ -3451,6 +3454,16 @@ async fn unknown_session_context_recovery_uses_current_handoff_not_history_repla
         .await;
     let current = &response.output["session_recovery"]["current_handoff"];
     assert!(current.is_object());
+    assert_eq!(current["session_id"], session.session_id);
+    assert_eq!(current["mode"], "read_only");
+    assert_eq!(current["guards"]["deny_write_tools"], true);
+    assert_eq!(current["guards"]["deny_shell_tools"], true);
+    assert_eq!(current["lifecycle"], "active");
+    assert_eq!(current["execution_context"], json!({}));
+    assert!(
+        current.get("permissions").is_none(),
+        "historical approvals must not become recovered execution authority"
+    );
     assert!(current["work_performed"]
         .as_array()
         .unwrap()
@@ -3461,6 +3474,16 @@ async fn unknown_session_context_recovery_uses_current_handoff_not_history_repla
         .unwrap()
         .is_empty(),
         "the current ToolResult may inform current state but must not be replayed as missed history");
+
+    // Reconstruct from the current store, not the previously emitted snapshot.
+    runtime.sessions.close_session(&session.session_id).unwrap();
+    runtime
+        .add_session_history_recovery(&mut response, &unknown, None)
+        .await;
+    assert_eq!(
+        response.output["session_recovery"]["current_handoff"]["lifecycle"],
+        "closed"
+    );
 }
 
 #[tokio::test]

@@ -101,9 +101,14 @@ impl AppState {
                                 ProcessPhase::Starting | ProcessPhase::Running
                             )
                         });
-                if let Some(exposure) =
-                    regular_tunnel_exposure(&mut snapshot.regular_tunnel, active)
-                {
+                if let Some(exposure) = regular_tunnel_exposure(
+                    &mut snapshot.regular_tunnel,
+                    active,
+                    supervisor
+                        .latest_machine_lifecycle(ProcessKind::RegularTunnel)
+                        .as_ref(),
+                    snapshot.openai_tunnel_config.effective_tunnel_id.is_some(),
+                ) {
                     snapshot.readiness = aggregate_readiness(
                         snapshot.readiness.server.clone(),
                         snapshot.readiness.runner.clone(),
@@ -112,6 +117,18 @@ impl AppState {
                     );
                     apply_regular_tunnel_next_action(&mut snapshot, &exposure);
                 }
+            } else {
+                // A busy owner cannot confirm that cached readiness is current.
+                if let Some(tunnel) = snapshot.regular_tunnel.as_mut() {
+                    tunnel.status = RegularTunnelStatus::Starting;
+                    tunnel.ready_for_chatgpt = false;
+                }
+                snapshot.readiness = aggregate_readiness(
+                    snapshot.readiness.server.clone(),
+                    snapshot.readiness.runner.clone(),
+                    ExposureReadiness::Unknown,
+                    snapshot.readiness.project.clone(),
+                );
             }
         }
         snapshot.current_operation = self.operations.current();
@@ -606,18 +623,16 @@ impl DesktopCore {
         self.snapshot.regular_tunnel_available = true;
         apply_config_projection(&mut self.snapshot, &self.config);
         if self.snapshot.regular_tunnel.is_some() {
-            let active = self
-                .process_snapshot(ProcessKind::RegularTunnel)
-                .await
-                .is_some_and(|process| {
-                    matches!(
-                        process.phase,
-                        ProcessPhase::Starting | ProcessPhase::Running
-                    )
-                });
-            if let Some(exposure) =
-                regular_tunnel_exposure(&mut self.snapshot.regular_tunnel, active)
-            {
+            let (active, event) = self.regular_tunnel_observation().await;
+            if let Some(exposure) = regular_tunnel_exposure(
+                &mut self.snapshot.regular_tunnel,
+                active,
+                event.as_ref(),
+                self.snapshot
+                    .openai_tunnel_config
+                    .effective_tunnel_id
+                    .is_some(),
+            ) {
                 self.snapshot.readiness = aggregate_readiness(
                     self.snapshot.readiness.server.clone(),
                     self.snapshot.readiness.runner.clone(),
@@ -780,18 +795,18 @@ impl DesktopCore {
                 None
             };
         cancellation.check()?;
-        let tunnel_active = self
-            .process_snapshot(ProcessKind::RegularTunnel)
-            .await
-            .is_some_and(|process| {
-                matches!(
-                    process.phase,
-                    ProcessPhase::Starting | ProcessPhase::Running
-                )
-            });
+        let (tunnel_active, tunnel_event) = self.regular_tunnel_observation().await;
         let regular_tunnel_expected = self.snapshot.regular_tunnel.is_some();
-        let exposure = regular_tunnel_exposure(&mut self.snapshot.regular_tunnel, tunnel_active)
-            .unwrap_or_else(|| exposure_readiness(self.config.topology.as_ref()));
+        let exposure = regular_tunnel_exposure(
+            &mut self.snapshot.regular_tunnel,
+            tunnel_active,
+            tunnel_event.as_ref(),
+            self.snapshot
+                .openai_tunnel_config
+                .effective_tunnel_id
+                .is_some(),
+        )
+        .unwrap_or_else(|| exposure_readiness(self.config.topology.as_ref()));
         self.snapshot.readiness = aggregate_readiness(server, runner, exposure.clone(), project);
         if regular_tunnel_expected && exposure == ExposureReadiness::Error {
             self.snapshot.readiness.next_action_kind =
@@ -2312,6 +2327,22 @@ impl DesktopCore {
         self.supervisor.lock().await.snapshot(kind)
     }
 
+    async fn regular_tunnel_observation(&self) -> (bool, Option<Value>) {
+        let mut supervisor = self.supervisor.lock().await;
+        let active = supervisor
+            .snapshot(ProcessKind::RegularTunnel)
+            .is_some_and(|process| {
+                matches!(
+                    process.phase,
+                    ProcessPhase::Starting | ProcessPhase::Running
+                )
+            });
+        (
+            active,
+            supervisor.latest_machine_lifecycle(ProcessKind::RegularTunnel),
+        )
+    }
+
     async fn process_logs(&self, kind: ProcessKind) -> Vec<String> {
         self.supervisor.lock().await.logs(kind)
     }
@@ -3033,12 +3064,45 @@ fn reserve_loopback_address() -> DesktopResult<String> {
 fn regular_tunnel_exposure(
     state: &mut Option<RegularTunnelState>,
     process_active: bool,
+    event: Option<&Value>,
+    id_available: bool,
 ) -> Option<ExposureReadiness> {
     let state = state.as_mut()?;
     if !process_active {
         state.status = RegularTunnelStatus::Error;
         state.ready_for_chatgpt = false;
         return Some(ExposureReadiness::Error);
+    }
+    if let Some(event) = event {
+        match event.get("event").and_then(Value::as_str) {
+            Some("reconnecting") => {
+                state.status = RegularTunnelStatus::Starting;
+                state.ready_for_chatgpt = false;
+            }
+            Some("ready") => {
+                let ready = serde_json::from_value::<RegularTunnelReadyEvent>(event.clone())
+                    .ok()
+                    .filter(|ready| {
+                        ready.schema_version == 1
+                            && ready.provider == "openai"
+                            && ready.connection.kind == "openai_tunnel"
+                            && ready.connection.clipboard_contains == "tunnel_id"
+                    });
+                if let Some(ready) = ready {
+                    state.status = RegularTunnelStatus::Ready;
+                    state.ready_for_chatgpt = (ready.ready_for_chatgpt || id_available)
+                        && (ready.connection.clipboard_state == "copied" || id_available);
+                    state.clipboard_state = ready.connection.clipboard_state;
+                } else {
+                    state.status = RegularTunnelStatus::Error;
+                    state.ready_for_chatgpt = false;
+                }
+            }
+            _ => {
+                state.status = RegularTunnelStatus::Error;
+                state.ready_for_chatgpt = false;
+            }
+        }
     }
     Some(match state.status {
         RegularTunnelStatus::Starting => ExposureReadiness::Starting,
@@ -4647,11 +4711,11 @@ mod tests {
             ready_for_chatgpt: true,
         });
         assert_eq!(
-            regular_tunnel_exposure(&mut state, true),
+            regular_tunnel_exposure(&mut state, true, None, false),
             Some(ExposureReadiness::LocalReady)
         );
         assert_eq!(
-            regular_tunnel_exposure(&mut state, false),
+            regular_tunnel_exposure(&mut state, false, None, false),
             Some(ExposureReadiness::Error)
         );
         assert_eq!(state.as_ref().unwrap().status, RegularTunnelStatus::Error);
@@ -4665,6 +4729,50 @@ mod tests {
         );
         assert!(readiness.runtime_ready);
         assert!(!readiness.ready_for_chatgpt);
+    }
+
+    #[test]
+    fn regular_tunnel_recovery_replaces_cached_ready_and_rejects_unverified_recovery() {
+        let mut state = Some(RegularTunnelState {
+            provider: "openai".to_string(),
+            status: RegularTunnelStatus::Ready,
+            clipboard_state: "copied".to_string(),
+            clipboard_contains: "tunnel_id".to_string(),
+            ready_for_chatgpt: true,
+        });
+        let ready = serde_json::json!({
+            "event": "ready", "schema_version": 1, "provider": "openai", "ready_for_chatgpt": true,
+            "connection": {"kind": "openai_tunnel", "clipboard_state": "copied", "clipboard_contains": "tunnel_id"},
+        });
+        assert_eq!(
+            regular_tunnel_exposure(&mut state, true, None, false),
+            Some(ExposureReadiness::LocalReady)
+        );
+        let reconnecting = serde_json::json!({"event": "reconnecting"});
+        assert_eq!(
+            regular_tunnel_exposure(&mut state, true, Some(&reconnecting), false),
+            Some(ExposureReadiness::Starting)
+        );
+        assert!(!state.as_ref().unwrap().ready_for_chatgpt);
+        assert_eq!(
+            regular_tunnel_exposure(&mut state, true, Some(&ready), false),
+            Some(ExposureReadiness::LocalReady)
+        );
+        for event in [
+            serde_json::json!({"event": "failed"}),
+            serde_json::json!({"event": "stopped"}),
+            serde_json::json!({"event": "ready"}),
+        ] {
+            assert_eq!(
+                regular_tunnel_exposure(&mut state, true, Some(&event), false),
+                Some(ExposureReadiness::Error)
+            );
+            assert!(!state.as_ref().unwrap().ready_for_chatgpt);
+        }
+        assert_eq!(
+            regular_tunnel_exposure(&mut state, false, Some(&ready), false),
+            Some(ExposureReadiness::Error)
+        );
     }
 
     #[test]

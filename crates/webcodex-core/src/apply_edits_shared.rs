@@ -129,6 +129,7 @@ impl ApplyTextLineScope {
 /// A single atomic text edit against one file. Only the fields relevant to the
 /// `kind` are required; the runtime validates presence before dispatch.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApplyTextEditInput {
     pub kind: ApplyTextEditKind,
     #[serde(default)]
@@ -335,6 +336,7 @@ impl ApplyFileChangeKind {
 /// the fields allowed and required for each `kind` before the owning Runner is
 /// contacted.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApplyFileChangeInput {
     pub kind: ApplyFileChangeKind,
     pub path: String,

@@ -51,6 +51,7 @@ fn terminal_check(operation: &HostGoalOperation, criterion_id: &str) -> HostGoal
                         && value["job_id"].as_str() == Some(job.as_str())
                         && value["status"] == "completed"
                         && value["exit_code"] == 0
+                        && value["error"].is_null()
                 })
         });
     HostGoalCheckEvidence {
@@ -659,6 +660,22 @@ impl ToolRuntime {
         Ok(())
     }
 
+    pub(crate) fn quarantine_host_goal_job_binding(
+        &self,
+        goal: &HostGoalRecord,
+        operation: &HostGoalOperation,
+    ) -> Result<(), ToolResult> {
+        let db = self.host_goal_db()?;
+        context::guarded_operation_reconciliation(
+            &goal.goal_id,
+            &[operation.operation_id.clone()],
+            || db.clear_untrusted_host_goal_job_binding(&goal.owner_key, operation, now()),
+        )
+        .map_err(|error| failure("goal_operation_still_active", error))?
+        .map_err(store_error)?;
+        Ok(())
+    }
+
     async fn observe_host_goal_operation(
         &self,
         goal: &HostGoalRecord,
@@ -674,6 +691,13 @@ impl ToolRuntime {
                 "The operation has no confirmed Job",
             )
         })?;
+        if !super::host_goal::execution_refs::has_native_job_receipt(&operation.tool_name) {
+            self.quarantine_host_goal_job_binding(goal, &operation)?;
+            return Err(failure(
+                "goal_operation_outcome_unknown",
+                "An untrusted historical Job binding was removed. Inspect the original provider operation and use an explicit checkpoint resolution; no Job was observed or stopped",
+            ));
+        }
         let result = self
             .host_goal_internal_tool(
                 ToolCall::JobStatus {
@@ -686,23 +710,25 @@ impl ToolRuntime {
         if !result.success {
             return Err(result);
         }
-        let status = result.output["status"].as_str().unwrap_or("");
-        if status == "lost" {
+        if result.output["job_id"].as_str() != Some(job.as_str())
+            || result.output["project"] != goal.project
+        {
             return Err(failure(
-                "goal_operation_outcome_unknown",
-                format!("Original Job {job} was lost; do not dispatch a replacement"),
+                "goal_job_identity_conflict",
+                "The original Job does not match the saved goal project and execution",
             ));
         }
-        if !super::jobs::is_terminal_job_status(status) {
+        let status = result.output["status"].as_str().unwrap_or("");
+        let state = super::host_goal::execution_refs::job_receipt_status(&result.output);
+        if state == HostGoalOperationStatus::Unknown {
+            return Err(failure(
+                "goal_operation_outcome_unknown",
+                format!("Original Job {job} has no trustworthy terminal outcome; do not dispatch a replacement"),
+            ));
+        }
+        if !state.terminal() {
             return Err(failure("goal_check_pending",format!("Original Job {job} is {status}; observe it, then retry the same goal check request")));
         }
-        let state = if status == "completed" && result.output["exit_code"] == 0 {
-            HostGoalOperationStatus::Succeeded
-        } else if matches!(status, "cancelled" | "stopped") {
-            HostGoalOperationStatus::Cancelled
-        } else {
-            HostGoalOperationStatus::Failed
-        };
         self.host_goal_db()?
             .finish_host_goal_operation(
                 &goal.owner_key,
@@ -1147,6 +1173,10 @@ mod tests {
             &json!({"job_id":"job-real","status":"completed","exit_code":0}),
         ));
         assert!(terminal_check(&operation, "test").passed);
+        operation.result_summary = Some(stable_job_result(
+            &json!({"job_id":"job-real","status":"completed","exit_code":0,"error":"cleanup failed"}),
+        ));
+        assert!(!terminal_check(&operation, "test").passed);
         operation.status = HostGoalOperationStatus::Failed;
         assert!(!terminal_check(&operation, "test").passed);
     }

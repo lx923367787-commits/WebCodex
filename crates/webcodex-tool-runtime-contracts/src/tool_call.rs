@@ -470,7 +470,12 @@ pub struct ComputerSnapshotRegion {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "tool", content = "params", rename_all = "snake_case")]
+#[serde(
+    tag = "tool",
+    content = "params",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ToolCall {
     PresentDocument(DocumentToolCall),
     DocumentEdit(DocumentToolCall),
@@ -2808,6 +2813,18 @@ impl ToolCall {
         }
         let recorder_metadata = ToolCallRecorderMetadata::from_business_arguments(&arguments);
         let arguments = strip_tool_call_expectation_metadata(arguments);
+        // Unit variants have no params for serde to inspect. Do not silently
+        // discard a supplied target, precondition, or malformed argument shape.
+        if definition.uses_unit_arguments()
+            && !arguments.is_null()
+            && !arguments
+                .as_object()
+                .is_some_and(|object| object.is_empty())
+        {
+            return Err(format!(
+                "invalid arguments for tool '{name}': this tool accepts only an empty object or null"
+            ));
+        }
         if name == "read_project_artifact"
             && arguments
                 .as_object()
