@@ -310,7 +310,6 @@ pub(crate) mod shell;
 pub(crate) mod updates;
 
 #[cfg(test)]
-#[path = "../job_manager_tests.rs"]
 pub(crate) mod tests;
 
 #[cfg(test)]

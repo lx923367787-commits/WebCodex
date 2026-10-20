@@ -55,14 +55,14 @@ pub(crate) fn builtin_coding_workflow_projection() -> Value {
         "contract": BUILTIN_CODING_WORKFLOW_CONTRACT,
         "version": BUILTIN_CODING_WORKFLOW_VERSION,
         "authority": "model_guidance_only",
-        "role_selection": "Default guidance always applies; named roles only when requested. Neither grants authority.",
+        "role_selection": "Default guidance always applies; named roles only when requested.",
         "guidance": [
-            "Defaults only: follow host safety, user scope, and project rules; guidance grants no authority.",
-            "Complete authorized work through validation and review; ask only for missing requirements or authority.",
-            "Verify Project, branch, HEAD, and existing changes; read nested rules for changed paths and recover truncated instructions.",
-            "Preserve unrelated work; make the smallest coherent change. Push/publish/deploy/restart need an explicit action and target.",
-            "Use structured tools and edit guards; apply model_protocol only where the exposed schema supports it.",
-            "Long required validation + independent read-only inspection: use short sync_wait_secs for same-execution Job handoff, inspect then observe; do not fan out heavy validations. Covered-source mutation makes that result stale/cache-warmup; final source needs fresh validation.",
+            "Follow host safety, user scope, and project rules; guidance grants no authority.",
+            "Complete authorized work, validation and review; ask only for missing requirements or authority.",
+            "Check Project, branch, HEAD and existing changes; read nested rules for changed paths; recover truncated instructions.",
+            "Preserve unrelated work; make minimal coherent changes. Push/publish/deploy/restart need an explicit action and target.",
+            "Use structured tools and edit guards; model_protocol only where the exposed schema supports it.",
+            "Long required validation + independent read-only inspection: use short sync_wait_secs for same-execution Job handoff, inspect then observe; do not fan out heavy validations. Covered-source changes make results stale/cache-warmup; final source needs fresh validation.",
             "Observe existing Jobs; inspect state before retrying an unknown outcome. Timeout does not prove no effect.",
             "Review the diff; report evidence, limits, and Jobs. finish_coding_task is advisory evidence, not proof."
         ],
@@ -73,7 +73,7 @@ pub(crate) fn builtin_coding_workflow_projection() -> Value {
             "session_message_resolution": "For a handled non-todo, send session_message_resolution on the next ordinary call with recording_session_id; ACK guidance also needs ack_session_message_ids. It cannot predict the main call. Todos use complete_session_message.",
             "context_sidecar": "context_request adds bounded context after the main tool and never authorizes effects. Recover lost project.instructions with an observation call before dependent mutation.",
             "runner_targeting": "For exact Runner client_id, use runtime_status(client_id=...) or list_projects(client_id=...) before treating it as absent.",
-            "persistent_shell": "Persistent shell is primarily for repeated remote commands on one named SSH resource, preserving remote cwd/env/exports/functions/umask. Ordinary local coding stays on structured tools -> run_process/run_script -> run_shell for shell syntax; use local persistent shell only when same-process state is required.",
+            "persistent_shell": "Use primarily for repeated remote commands on one named SSH resource, preserving remote cwd/env/exports/functions/umask. Local coding: structured tools -> run_process/run_script -> run_shell for shell syntax; local persistent shell only when same-process state is required.",
             "normal_closeout": "Normal success: finish_coding_task(summary_only=true); full closeout only for unresolved evidence or handoff/debug.",
             "goal_mode": "On request: 开启目标模式 -> goal_mode_start; 继续本地当前任务 -> goal_bootstrap. category=goal is a directory, not the full contract. Before first use, read tool_manifest(tool_name=<name>); never guess parameters/behavior from names or summaries. Reuse known unchanged contracts."
         },
@@ -81,7 +81,7 @@ pub(crate) fn builtin_coding_workflow_projection() -> Value {
             "implementation_owner": {
                 "purpose": "Implement one coherent change end to end.",
                 "guidance": [
-                    "Map cross-layer changes end to end; use compiler/schema/exhaustiveness failures to find missing integration.",
+                    "Map cross-layer changes; compiler/schema/exhaustiveness failures expose missing integration.",
                     "Minimize concepts; fix concrete issues without speculative redesign.",
                     "When intentionally rerunning the same logical validation, reuse the same assertion_name; do not rerun solely to clear stale historical validation evidence."
                 ]
@@ -90,7 +90,7 @@ pub(crate) fn builtin_coding_workflow_projection() -> Value {
                 "purpose": "Review independently within task scope.",
                 "guidance": [
                     "Challenge authority, bounds, malformed data, privacy, replay/races, timeouts, and fail-closed behavior.",
-                    "For review-only tasks, report concrete findings with file/line evidence and impact; do not edit. Fix only when the task authorizes corrections, with focused regression validation."
+                    "For review-only tasks, report concrete findings, file/line evidence and impact; do not edit. Fix only when the task authorizes corrections; run focused regressions."
                 ]
             }
         }

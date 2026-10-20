@@ -17,6 +17,12 @@ use state::AppState;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 
+fn desktop_context() -> tauri::Context<tauri::Wry> {
+    // Keep one macro expansion: macOS development builds embed a fixed-name
+    // Info.plist symbol, shared by the asset probe and normal startup.
+    tauri::generate_context!()
+}
+
 /// Packaging-only probe: no window, plugins, credentials or runtime processes.
 /// A Cargo build without tauri/custom-protocol can compile successfully while
 /// still pointing at the development server, which cannot resume a saved runtime.
@@ -24,7 +30,7 @@ pub fn has_embedded_frontend() -> bool {
     if tauri::is_dev() {
         return false;
     }
-    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let context = desktop_context();
     let names: Vec<_> = context
         .assets()
         .iter()
@@ -91,7 +97,7 @@ pub fn run() {
             commands::cancel_desktop_operation,
             commands::get_bounded_activity,
         ])
-        .build(tauri::generate_context!())
+        .build(desktop_context())
         .expect("failed to build WebCodex Desktop");
 
     app.run(|app_handle, event| match event {

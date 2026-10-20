@@ -150,6 +150,65 @@ impl TerminalWriteGate {
 
 #[cfg(test)]
 #[derive(Debug, Default)]
+struct PromptDispatchTestGateState {
+    reached: bool,
+    released: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct PromptDispatchTestGate {
+    state: Mutex<PromptDispatchTestGateState>,
+    changed: Condvar,
+    deadline: Instant,
+}
+
+#[cfg(test)]
+impl PromptDispatchTestGate {
+    fn new(deadline: Instant) -> Self {
+        Self {
+            state: Mutex::new(PromptDispatchTestGateState::default()),
+            changed: Condvar::new(),
+            deadline,
+        }
+    }
+
+    fn block_dispatch(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.reached = true;
+        self.changed.notify_all();
+        while !state.released {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, _) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+        }
+        true
+    }
+
+    fn wait_until_reached(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        while !state.reached {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, _) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+        }
+        true
+    }
+
+    fn release(&self) {
+        self.state.lock().unwrap().released = true;
+        self.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
 struct DurableRunStoreTestControl {
     fail_next_terminal_writes: std::sync::atomic::AtomicUsize,
     terminal_write_gate: Mutex<Option<Arc<TerminalWriteGate>>>,
@@ -621,7 +680,7 @@ pub(crate) struct CodingAgentManager {
     #[cfg(test)]
     admission_after_accepting_test_reached: AtomicBool,
     #[cfg(test)]
-    prompt_dispatch_test_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
+    prompt_dispatch_test_gate: Mutex<Option<Arc<PromptDispatchTestGate>>>,
     #[cfg(test)]
     prompt_after_barrier_test_delay: Mutex<Option<Duration>>,
     #[cfg(test)]
@@ -662,7 +721,7 @@ impl CodingAgentManager {
             #[cfg(test)]
             admission_after_accepting_test_reached: AtomicBool::new(false),
             #[cfg(test)]
-            prompt_dispatch_test_barrier: Mutex::new(None),
+            prompt_dispatch_test_gate: Mutex::new(None),
             #[cfg(test)]
             prompt_after_barrier_test_delay: Mutex::new(None),
             #[cfg(test)]
@@ -702,7 +761,7 @@ impl CodingAgentManager {
             #[cfg(test)]
             admission_after_accepting_test_reached: AtomicBool::new(false),
             #[cfg(test)]
-            prompt_dispatch_test_barrier: Mutex::new(None),
+            prompt_dispatch_test_gate: Mutex::new(None),
             #[cfg(test)]
             prompt_after_barrier_test_delay: Mutex::new(None),
             #[cfg(test)]
@@ -1659,9 +1718,16 @@ impl CodingAgentManager {
 
         #[cfg(test)]
         {
-            let barrier = self.prompt_dispatch_test_barrier.lock().unwrap().clone();
-            if let Some(barrier) = barrier {
-                barrier.wait();
+            let gate = self.prompt_dispatch_test_gate.lock().unwrap().clone();
+            if gate.is_some_and(|gate| !gate.block_dispatch()) {
+                self.setup_failure(
+                    &request.run_id,
+                    &entry,
+                    "coding_agent_test_gate_timeout",
+                    "Test prompt dispatch gate was not released before its deadline",
+                );
+                self.terminate_run_io(&mut child, &mut outbound);
+                return;
             }
         }
         let prompt_id = next_id;
@@ -4709,6 +4775,66 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn prompt_dispatch_test_gate_times_out_when_provider_never_arrives() {
+        let started = Instant::now();
+        let gate = PromptDispatchTestGate::new(started + Duration::from_millis(20));
+        assert!(!gate.wait_until_reached());
+        gate.release();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn prompt_dispatch_test_gate_times_out_when_test_never_releases_it() {
+        let started = Instant::now();
+        let gate = PromptDispatchTestGate::new(started + Duration::from_millis(20));
+        assert!(!gate.block_dispatch());
+        assert!(gate.wait_until_reached());
+        gate.release();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prompt_dispatch_test_gate_remains_bounded_after_provider_setup_failure() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "crash_before_prompt");
+        let cfg = fake_config(exe, args);
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_promptgatefailed01";
+        let gate = Arc::new(PromptDispatchTestGate::new(
+            Instant::now() + Duration::from_millis(20),
+        ));
+        *manager.prompt_dispatch_test_gate.lock().unwrap() = Some(Arc::clone(&gate));
+        let started = manager.handle(
+            start_request(&manager, &root, run, BTreeMap::new()),
+            &projects,
+        );
+        assert!(started.error.is_none(), "{:?}", started.error);
+        let snapshot = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        let reached = gate.wait_until_reached();
+        gate.release();
+        manager.stop_accepting();
+        let drain = manager.drain_workers_until(Instant::now() + Duration::from_secs(3));
+        assert!(
+            !reached,
+            "failed provider unexpectedly reached the prompt gate"
+        );
+        assert_eq!(snapshot.state, CodingAgentRunState::Failed);
+        assert_eq!(
+            snapshot.execution_state,
+            CodingAgentExecutionState::NotStarted
+        );
+        assert_eq!(drain.timed_out, 0, "{drain:?}");
+        assert_eq!(drain.panicked, 0, "{drain:?}");
+        assert_eq!(manager.worker_count(), 0);
+        assert!(!received_methods(&wire_log(&temp))
+            .iter()
+            .any(|method| method == "session/prompt"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn cancel_and_prompt_gate_race_has_only_linearized_outcomes() {
         let temp = TempDir::new().unwrap();
@@ -4718,29 +4844,34 @@ for line in sys.stdin:
         let root = temp.path().join("repo");
         let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
         let run = "wc_agent_run_promptgaterace01";
-        let race = Arc::new(std::sync::Barrier::new(2));
-        *manager.prompt_dispatch_test_barrier.lock().unwrap() = Some(Arc::clone(&race));
+        let race = Arc::new(PromptDispatchTestGate::new(
+            Instant::now() + Duration::from_secs(5),
+        ));
+        *manager.prompt_dispatch_test_gate.lock().unwrap() = Some(Arc::clone(&race));
         let started = manager.handle(
             start_request(&manager, &root, run, BTreeMap::new()),
             &projects,
         );
         assert!(started.error.is_none(), "{:?}", started.error);
 
-        let cancel_manager = Arc::clone(&manager);
-        let cancel_projects = projects.clone();
-        let cancel_race = Arc::clone(&race);
-        let cancel = thread::spawn(move || {
-            cancel_race.wait();
-            cancel_manager.handle(
-                CodingAgentRequest::Cancel(CodingAgentCancelRequest {
-                    run_id: run.to_string(),
-                }),
-                &cancel_projects,
-            )
-        });
-        let cancelled = cancel.join().unwrap();
+        let reached = race.wait_until_reached();
+        race.release();
+        if !reached {
+            manager.stop_accepting();
+            let drain = manager.drain_workers_until(Instant::now() + Duration::from_secs(3));
+            let snapshot = manager.runs.lock().unwrap().get(run).unwrap().snapshot();
+            panic!("ACP provider never reached the prompt dispatch test gate before its deadline; snapshot={snapshot:?}; drain={drain:?}; wire_log={:?}", wire_log(&temp));
+        }
+        // Releasing the provider and cancelling on this thread still races for
+        // the production prompt lock, without an auxiliary unbounded join.
+        let cancelled = manager.handle(
+            CodingAgentRequest::Cancel(CodingAgentCancelRequest {
+                run_id: run.to_string(),
+            }),
+            &projects,
+        );
         assert!(cancelled.error.is_none(), "{:?}", cancelled.error);
-        *manager.prompt_dispatch_test_barrier.lock().unwrap() = None;
+        *manager.prompt_dispatch_test_gate.lock().unwrap() = None;
         let final_snapshot = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
         let drain = manager.drain_workers_until(Instant::now() + Duration::from_secs(3));
         assert_eq!(drain.timed_out, 0);
