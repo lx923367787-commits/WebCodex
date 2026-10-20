@@ -282,7 +282,7 @@ Windows，本轮全部使用命令行。测试线程栈为 `RUST_MIN_STACK=33554
 | [crates/webcodex-runner/src/webcodex_runner/dispatch.rs](../crates/webcodex-runner/src/webcodex_runner/dispatch.rs) | 修改 |
 | [crates/webcodex-runner/src/webcodex_runner/files.rs](../crates/webcodex-runner/src/webcodex_runner/files.rs) | 修改 |
 | [crates/webcodex-runner/src/webcodex_runner/files/dispatch.rs](../crates/webcodex-runner/src/webcodex_runner/files/dispatch.rs) | 新增 |
-| [crates/webcodex-runner/src/webcodex_runner/job_manager_tests.rs](../crates/webcodex-runner/src/webcodex_runner/job_manager_tests.rs) | 修改 |
+| [crates/webcodex-runner/src/webcodex_runner/jobs/tests.rs](../crates/webcodex-runner/src/webcodex_runner/jobs/tests.rs) | 修改（后续迁入所属 jobs 模块） |
 | [crates/webcodex-runner/src/webcodex_runner/jobs/context.rs](../crates/webcodex-runner/src/webcodex_runner/jobs/context.rs) | 新增 |
 | [crates/webcodex-runner/src/webcodex_runner/jobs/detached.rs](../crates/webcodex-runner/src/webcodex_runner/jobs/detached.rs) | 新增 |
 | [crates/webcodex-runner/src/webcodex_runner/jobs/execution.rs](../crates/webcodex-runner/src/webcodex_runner/jobs/execution.rs) | 新增 |
