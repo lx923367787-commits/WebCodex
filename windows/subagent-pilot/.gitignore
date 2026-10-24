@@ -5,3 +5,7 @@ evidence/
 pilot-request.json
 *.sqlite3*
 *.log*
+dispatch/
+worker-results/
+retired-requests/
+mcp-run-*.json

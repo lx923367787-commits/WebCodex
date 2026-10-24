@@ -2,6 +2,8 @@
 
 **Windows 当前版本（2026-10-24）：[完整源码、工具、依赖和复刻步骤](windows/README.md)。**
 
+**换电脑继续开发：[现用 Windows 客户端完整包与接续步骤](windows/HOME-DEVELOPMENT.zh-CN.md)。**
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 **WebCodex 让 ChatGPT、Claude 和其他 AI Agent 直接使用你自己机器上的代码仓库和开发工具。**

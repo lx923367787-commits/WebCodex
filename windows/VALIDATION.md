@@ -1,5 +1,19 @@
 # Windows snapshot validation — 2026-10-24
 
+## Complete home-computer transfer follow-up
+
+The follow-up explicitly adds the current Windows client binaries and runtime dependencies, not just build recipes. The canonical production source was rehashed and had not changed since the first snapshot. Five previously omitted historical development helpers and the three parameterized installer build scripts are now included. The old installed uninstaller is intentionally excluded because it belongs to the original installation identity; its Tauri/NSIS source is retained.
+
+The portable package contains 9,868 recorded files before its root manifest, about 2.06 GB unpacked. Its Desktop, Server, Runner and CLI hashes match the current installed binaries. CodeBuddy 2.162.0, standalone Codex 0.159.2, ACP's separate Codex 0.153.4, Antigravity 1.4.5, Node 24.15.0 and Tunnel client 0.0.12 are present with their runtime resources. Only fixed `--version` commands were used; no model task, GUI, service restart or login operation was performed.
+
+Fresh portable Python 3.11.9 matched all 34 provider dependency versions and imported the native pywin32 DLLs successfully. Portable-provider tests ran 632 cases: **603 passed and 29 opt-in cases skipped**. A separate entirely offline setup rebuilt a new venv from the bundled wheelhouse and passed `pip check`. Windows PowerShell 5.1 generated four TOML templates with Chinese/spaced paths, and launcher environment handling was checked using headless fixtures. The packaged drawing `doctor` passed for Graphviz and all chart/document dependencies. The complete package file set and every recorded file hash were checked after these tests; no extra runtime/state files appeared.
+
+The installer helper Python scripts passed syntax, controlled payload/hash/escaping tests and refusal cases. NSIS was not installed on the validation machine, so the newly parameterized historical NSIS installer was not compiled or executed. The supplied running client binaries came from the existing installation; no claim is made that this installer produced them.
+
+The Windows transfer is stored as authenticated GitHub **draft release assets**, with a source ZIP, client ZIP, per-file manifest and SHA256SUMS. Keeping it draft prevents the repository's existing `release: published` workflow from publishing a Linux image. Source development remains on `windows/current-20261024`; `main` and other platforms are unchanged. See [HOME-DEVELOPMENT.zh-CN.md](HOME-DEVELOPMENT.zh-CN.md) for download and setup.
+
+## Original source snapshot checks
+
 Validation ran on Windows x64 against an isolated copy of the source identified by the current deployment records. The original development checkout and installed services were not changed. The earlier development checkout was found to omit newer Host enrollment, team execution and Desktop changes, so it was replaced by the canonical deployment source before the checks below.
 
 ## Completed checks

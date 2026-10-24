@@ -2,6 +2,8 @@
 
 本目录记录 Windows x64 当前功能所需的外部运行时和可复用依赖。精确下载地址、文件大小、SHA-256 和来源在 [`dependencies.json`](dependencies.json)。这些文件可以放在任意本地磁盘的新目录，不依赖原开发机器的路径。
 
+对应的 Windows 离线运行包使用方法见 [PORTABLE.zh-CN.md](PORTABLE.zh-CN.md)。它将可移植运行时与源码分开交付；`configure-providers.ps1` 独立生成新电脑路径，不要求联网安装依赖。Python venv 必须在目标机重建，不能直接复制旧机器的 `.venv`。
+
 ## 源码内已提供的内容
 
 Rust Server/Runner/CLI、Desktop、网页前端、Office/PDF 文档工具和绘图工具的源码与锁文件均在仓库中。中文字体 [`assets/fonts/ZCOOLXiaoWei-Regular.ttf`](assets/fonts/ZCOOLXiaoWei-Regular.ttf) 和原始 [`OFL.txt`](assets/fonts/OFL.txt) 一并保存；复制或打包字体时保留许可证。构建时继续使用仓库锁文件，避免执行依赖升级命令。

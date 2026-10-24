@@ -101,7 +101,9 @@ try {
         }
     }
     Copy-Item -LiteralPath (Join-Path $root 'plugins/safe-delete') -Destination (Join-Path $app 'safe-delete') -Recurse
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'setup-providers.ps1') -Destination $app
+    foreach ($script in @('setup-providers.ps1', 'configure-providers.ps1', 'launch-portable.ps1', 'launch-portable.cmd', 'PORTABLE.zh-CN.md')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination $app
+    }
     Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $app
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $OutputDirectory 'BUILD-GUIDE.md')
     $files = [ordered]@{}

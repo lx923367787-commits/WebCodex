@@ -2,6 +2,8 @@
 
 **Windows snapshot (2026-10-24): [source, tools, dependencies and build instructions](windows/README.md).**
 
+**Moving development to another Windows PC: [current client package and transfer guide](windows/HOME-DEVELOPMENT.zh-CN.md).**
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 **WebCodex lets ChatGPT, Claude, and other AI agents work directly with code and developer tools on your own machines.**

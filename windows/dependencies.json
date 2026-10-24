@@ -92,15 +92,54 @@
     }
   ],
   "lockfiles": [
-    { "path": "Cargo.lock", "manager": "cargo", "install": "cargo build --locked" },
-    { "path": "apps/desktop/src-tauri/Cargo.lock", "manager": "cargo", "install": "cargo build --locked --features tauri/custom-protocol" },
-    { "path": "frontend/package-lock.json", "manager": "npm", "install": "npm ci" },
-    { "path": "apps/desktop/package-lock.json", "manager": "npm", "install": "npm ci" },
-    { "path": "windows/chat-handoff/extension-runtime/package-lock.json", "manager": "npm", "install": "npm ci" },
-    { "path": "windows/goal-provider/package-lock.json", "manager": "npm", "install": "npm ci" },
-    { "path": "windows/chat-handoff/requirements.lock", "manager": "pip", "python": "3.11 x64", "install": "pip install -r requirements.lock in a dedicated venv, separate from the Office runtime" },
-    { "path": "plugins/mycodex-tools/requirements.lock", "manager": "pip", "python": "3.11 x64", "install": "pip install --only-binary=:all: --no-deps -r requirements.lock" },
-    { "path": "plugins/mycodex-tools/drawing/requirements.lock", "manager": "pip", "python": "3.11 x64", "install": "pip install --only-binary=:all: --no-deps --target drawing/vendor -r drawing/requirements.lock" }
+    {
+      "path": "Cargo.lock",
+      "manager": "cargo",
+      "install": "cargo build --locked"
+    },
+    {
+      "path": "apps/desktop/src-tauri/Cargo.lock",
+      "manager": "cargo",
+      "install": "cargo build --locked --features tauri/custom-protocol"
+    },
+    {
+      "path": "frontend/package-lock.json",
+      "manager": "npm",
+      "install": "npm ci"
+    },
+    {
+      "path": "apps/desktop/package-lock.json",
+      "manager": "npm",
+      "install": "npm ci"
+    },
+    {
+      "path": "windows/chat-handoff/extension-runtime/package-lock.json",
+      "manager": "npm",
+      "install": "npm ci"
+    },
+    {
+      "path": "windows/goal-provider/package-lock.json",
+      "manager": "npm",
+      "install": "npm ci"
+    },
+    {
+      "path": "windows/chat-handoff/requirements.lock",
+      "manager": "pip",
+      "python": "3.11 x64",
+      "install": "pip install -r requirements.lock in a dedicated venv, separate from the Office runtime"
+    },
+    {
+      "path": "plugins/mycodex-tools/requirements.lock",
+      "manager": "pip",
+      "python": "3.11 x64",
+      "install": "pip install --only-binary=:all: --no-deps -r requirements.lock"
+    },
+    {
+      "path": "plugins/mycodex-tools/drawing/requirements.lock",
+      "manager": "pip",
+      "python": "3.11 x64",
+      "install": "pip install --only-binary=:all: --no-deps --target drawing/vendor -r drawing/requirements.lock"
+    }
   ],
   "installed_reference": {
     "python": "3.11.9 amd64",
@@ -108,7 +147,10 @@
     "pdfium": "153.0.7999.0",
     "tesseract": "5.5.3.20260724",
     "graphviz": "16.1.0",
-    "ocr_languages": ["chi_sim", "eng"],
+    "ocr_languages": [
+      "chi_sim",
+      "eng"
+    ],
     "tesseract_tsv_sha256": "59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04"
   },
   "external_requirements": [
@@ -122,5 +164,48 @@
     "Version locks preserve selected dependency versions; Python wheel bytes are not hash-pinned in the existing requirements.lock files.",
     "Upstream main URLs are accepted only when their bytes match the recorded SHA-256; a hash mismatch must stop the build.",
     "This inventory preserves functionality prerequisites, not pre-existing accounts, personal documents, runtime databases or byte-identical Rust executable output."
+  ],
+  "portable_programs": [
+    {
+      "name": "Node.js",
+      "version": "24.15.0",
+      "url": "https://nodejs.org/dist/v24.15.0/node-v24.15.0-win-x64.zip",
+      "archive_sha256": "cc5149eabd53779ce1e7bdc5401643622d0c7e6800ade18928a767e940bb0e62",
+      "package_path": "node/"
+    },
+    {
+      "name": "CodeBuddy",
+      "version": "2.162.0",
+      "package_path": "cli/codebuddy/",
+      "executable_sha256": "5d06f03f55fe07aa2748a1b02d6898fca5932c52cd85db05487765851282f94a"
+    },
+    {
+      "name": "Codex CLI",
+      "version": "0.159.2",
+      "package_path": "cli/codex/",
+      "package": "@openai/codex",
+      "executable_sha256": "52f75c649bebb8001102a1dd129c1ea6d02b0940321e6d7e82ee0526753bd58a"
+    },
+    {
+      "name": "Codex ACP",
+      "version": "1.9.0",
+      "package_path": "goal-provider/",
+      "embedded_codex_version": "0.153.4",
+      "note": "Separate from the standalone Codex CLI; retained with its existing npm lock."
+    },
+    {
+      "name": "Antigravity CLI",
+      "version": "1.4.5",
+      "package_path": "cli/agy/agy.exe",
+      "executable_sha256": "d191b2e423c8c5a96ffba84699dd5f52f4eec0e74bb457e8d5f755dc55528f9d"
+    },
+    {
+      "name": "OpenAI tunnel-client",
+      "version": "0.0.12",
+      "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-windows-amd64.zip",
+      "archive_sha256": "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356",
+      "executable_sha256": "6649169733686805ca16cccd91774594d0c017fd729c37ad4ce1cd18323d9ae8",
+      "package_path": "tunnel/tunnel-client.exe"
+    }
   ]
 }
