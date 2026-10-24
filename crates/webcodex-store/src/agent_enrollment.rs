@@ -1589,7 +1589,7 @@ pub(crate) fn activate_cli_worker_on_connection(
     )?;
     Ok(binding)
 }
-fn issue_agent_enrollment_on_connection(
+pub(crate) fn issue_agent_enrollment_on_connection(
     conn: &Connection,
     request: NewAgentEnrollment,
     source: Option<&VerifiedAgentRun>,

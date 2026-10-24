@@ -10,6 +10,7 @@ use std::sync::Arc;
 const CONTROL: &str = "synthetic-enrollment-bootstrap";
 const PROJECT: &str = "enrollment-project";
 
+mod auto_enrollment;
 mod host_dispatch;
 
 struct Fixture {
@@ -289,7 +290,7 @@ async fn enrollment_http_cached_gateway_attaches_native_window_without_bypassing
             .await
             .1,
     );
-    for tool in ["runtime_status", "run_shell", "call_runtime_tool"] {
+    for tool in ["run_shell", "call_runtime_tool"] {
         denied(
             &f.rpc(
                 &token,
@@ -378,8 +379,6 @@ async fn native_contract_discovery_unblocks_claim_prepare_without_granting_busin
         .1,
     );
     for call in [
-        json!({"name":"tool_manifest","arguments":{}}),
-        json!({"name":"tool_manifest","arguments":{"tool_name":"runtime_status"}}),
         json!({"name":"call_runtime_tool","arguments":{"tool":"tool_manifest","arguments":{"tool_name":"call_runtime_tool"}}}),
         json!({"name":"call_runtime_tool","arguments":{"tool":"call_runtime_tool","arguments":{}}}),
         json!({"name":"agent_identity","arguments":{}}),

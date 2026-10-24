@@ -6,6 +6,9 @@ use crate::{AgentIsolationError, Database};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
+#[path = "native_agent_host_auto_enrollment.rs"]
+mod auto_enrollment;
+
 pub const NATIVE_AGENT_HOST_TOKEN_PREFIX: &str = "wc_nh_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +78,11 @@ impl Database {
                token_hash TEXT NOT NULL UNIQUE, binary_sha256 TEXT NOT NULL,
                enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
                created_at_unix_ms INTEGER NOT NULL, rotated_at_unix_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS wc_native_host_auto_enrollment (
+               host_id TEXT PRIMARY KEY REFERENCES wc_native_agent_hosts(host_id),
+               owner_user TEXT NOT NULL REFERENCES users(id), project TEXT NOT NULL,
+               max_subagents INTEGER NOT NULL, max_cli_calls INTEGER NOT NULL
              );",
         )?;
         Ok(())

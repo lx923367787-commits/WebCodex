@@ -101,7 +101,7 @@ try {
         }
     }
     Copy-Item -LiteralPath (Join-Path $root 'plugins/safe-delete') -Destination (Join-Path $app 'safe-delete') -Recurse
-    foreach ($script in @('setup-providers.ps1', 'configure-providers.ps1', 'launch-portable.ps1', 'launch-portable.cmd', 'PORTABLE.zh-CN.md')) {
+    foreach ($script in @('setup-providers.ps1', 'configure-providers.ps1', 'configure-native-host.py', 'NATIVE-HOST-SETUP.zh-CN.md', 'launch-portable.ps1', 'launch-portable.cmd', 'PORTABLE.zh-CN.md')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination $app
     }
     Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $app

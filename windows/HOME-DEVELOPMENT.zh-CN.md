@@ -1,6 +1,6 @@
 # 在家里的 Windows 电脑继续开发
 
-本次交付包含两部分：`windows/current-20261024` 分支保存全部项目源码和自有开发工具；`windows-home-20261024` GitHub 草稿附件保存当前 Windows 客户端与运行依赖。草稿附件需要登录仓库所有者 `lx923367787-commits` 才能访问。保持草稿是为了不触发现有 `release: published` 的 Linux 镜像发布流程；这不是一个跨平台版本发布。
+本次交付包含两部分：`windows/current-20261024` 分支保存全部项目源码和自有开发工具；`windows-home-20261025` GitHub 草稿附件保存当前 Windows 客户端与运行依赖。草稿附件需要登录仓库所有者 `lx923367787-commits` 才能访问。保持草稿是为了不触发现有 `release: published` 的 Linux 镜像发布流程；这不是一个跨平台版本发布。
 
 ## 下载与核对
 
@@ -9,10 +9,10 @@
 ```powershell
 gh auth login
 gh api user --jq .login
-gh release download windows-home-20261024 --repo lx923367787-commits/WebCodex --dir .\WebCodex-Transfer
+gh release download windows-home-20261025 --repo lx923367787-commits/WebCodex --dir .\WebCodex-Transfer
 Get-Content .\WebCodex-Transfer\SHA256SUMS.txt
-Get-FileHash .\WebCodex-Transfer\WebCodex-Windows-Home-20261024.zip -Algorithm SHA256
-Get-FileHash .\WebCodex-Transfer\WebCodex-Source-20261024.zip -Algorithm SHA256
+Get-FileHash .\WebCodex-Transfer\WebCodex-Windows-Home-20261025.zip -Algorithm SHA256
+Get-FileHash .\WebCodex-Transfer\WebCodex-Source-20261025.zip -Algorithm SHA256
 ```
 
 将哈希与 `SHA256SUMS.txt` 对比，再解压客户端包到一个新的目录。不要覆盖另一套安装或复制旧卸载器。包中 `MANIFEST.json` 逐文件记录大小与 SHA-256，独立的 `Windows-Package-MANIFEST.json` 供下载前检查。
@@ -37,6 +37,10 @@ Get-FileHash .\WebCodex-Transfer\WebCodex-Source-20261024.zip -Algorithm SHA256
 | 路径配置和启动入口 | `configure-providers.ps1`、`setup-providers.ps1`、`launch-portable.cmd` |
 
 Gemini CLI 没有安装在此次原机清单中，不能把 Antigravity 或它的模型选项当成 Gemini CLI。所有外部 CLI 的账号和模型访问权限仍由新机登录决定。
+
+## 2026-10-25 连接修复
+
+请使用本页的 20261025 新包。此前 20261024 包里的 Server 尚未包含首次聊天自动注册修复。新包保持现用 Desktop/Runner/CLI 和工具依赖，并更新 Server。新电脑必须按 [NATIVE-HOST-SETUP.zh-CN.md](NATIVE-HOST-SETUP.zh-CN.md) 配置本机 Host 的自动注册；只填写 API key/Tunnel ID 不能替代这一步。不要复制旧机 Host、OAuth 绑定、carrier 或数据库。新聊天接入仍保持独立 Agent 隔离，CLI/子助手的执行限制沿用原策略。
 
 ## 接着开发
 

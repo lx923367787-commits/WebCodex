@@ -27,6 +27,22 @@ Client：
 
 ## 常见问题
 
+### 新聊天返回 `agent_host_window_not_active`
+
+这里的 window 指聊天与 Agent 运行的服务端绑定，不是桌面窗口是否置顶。
+原生宿主连接先调用 `runtime_status`（可传 `compact: true`）：管理员为该宿主启用
+自动注册后，首次调用会原子创建独立任务、Agent 和私有目录；同一聊天重复调用沿用
+原身份。连接状态只返回当前聊天的信息，不再返回账号下所有 Runner 或项目。
+
+若返回 `connected: true`、`agent_state: enrollment_required`，说明传输已连接，
+但管理员尚未通过 Bootstrap 控制入口 `configure_native_host_auto_enrollment`
+明确配置该 `host_id` 的 `owner_user`、`project` 和 `policy`。也可继续使用启动器
+交付的 `agent_attach` 一次性注册凭据。不要从其他聊天复制身份或注册凭据。
+
+缓存旧工具列表的聊天可调用无参数 `tool_manifest` 发现当前隔离工具，再用
+`agent_assignment` 读取自己的任务。已撤销、待交接或退出运行的旧窗口不会自动
+创建替代身份；同一 Agent 的交接仍使用原有 `goal_handoff` 协议。
+
 ### `webcodex connect` 无法完成
 
 `connect` 最多等待 15 秒来确认完整链路：Server 可访问、同 key 能看到 Runner、

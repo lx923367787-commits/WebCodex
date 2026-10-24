@@ -1,6 +1,6 @@
 # WebCodex
 
-**Windows snapshot (2026-10-24): [source, tools, dependencies and build instructions](windows/README.md).**
+**Windows snapshot, including the 2026-10-25 connection repair: [source, tools, dependencies and build instructions](windows/README.md).**
 
 **Moving development to another Windows PC: [current client package and transfer guide](windows/HOME-DEVELOPMENT.zh-CN.md).**
 

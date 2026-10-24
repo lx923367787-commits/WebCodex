@@ -20,6 +20,7 @@ pub(crate) use enrollment::{
     authorize_agent_goal_creation_on_connection, bind_agent_enrollment_goal_on_connection,
     claim_agent_enrollment_on_connection, delegated_cli_budget_on_connection,
     enrollment_projection_on_connection, issue_delivery_grant_on_connection,
+    issue_agent_enrollment_on_connection,
     recover_cancelled_cli_worker_on_connection, require_enrollment_public_task_on_connection,
     reserve_agent_enrollment_on_connection,
     reset_unstarted_agent_enrollment_delivery_on_connection,

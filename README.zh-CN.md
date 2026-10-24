@@ -1,6 +1,6 @@
 # WebCodex
 
-**Windows 当前版本（2026-10-24）：[完整源码、工具、依赖和复刻步骤](windows/README.md)。**
+**Windows 当前版本（含 2026-10-25 连接修复）：[完整源码、工具、依赖和复刻步骤](windows/README.md)。**
 
 **换电脑继续开发：[现用 Windows 客户端完整包与接续步骤](windows/HOME-DEVELOPMENT.zh-CN.md)。**
 

@@ -1,6 +1,7 @@
 //! OAuth host requests terminate in this narrow broker, never the legacy
-//! shared-user tool dispatcher. Only a registered outer host window selects a
-//! run. A fresh candidate needs either an exact control-plane registration or
+//! shared-user tool dispatcher. An exact outer host window selects its run;
+//! configured native hosts may enroll a new independent Agent on first use.
+//! A handoff candidate needs either an exact control-plane registration or
 //! the current one-time preparation grant delivered by the trusted launcher;
 //! an attempt UUID by itself is correlation, never authority.
 use super::response::{
@@ -8,7 +9,7 @@ use super::response::{
 };
 use super::{protocol, JsonRpcRequest, McpOutcome, McpProtocolEra};
 use crate::auth::{AuthContext, AuthKind};
-use crate::tool_runtime::ToolRuntime;
+use crate::tool_runtime::{ToolResult, ToolRuntime};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use webcodex_store::AgentHostWindowBinding;
@@ -36,6 +37,33 @@ struct GatewayCall {
     arguments: Value,
 }
 
+fn status_arguments_valid(arguments: &Value) -> bool {
+    arguments.as_object().is_some_and(|args| {
+        args.iter().all(|(name, value)| {
+            matches!(name.as_str(), "compact" | "summary_only") && value.is_boolean()
+        })
+    })
+}
+
+fn connection_status(
+    db: &crate::Database,
+    binding: &webcodex_store::VerifiedAgentRun,
+) -> ToolResult {
+    let assignment = db.read_agent_enrollment(binding).ok().map(|assignment| {
+        json!({
+            "task_id":assignment.task_id,"task_directory":assignment.task_directory,
+            "purpose":assignment.purpose,"policy":assignment.policy
+        })
+    });
+    ToolResult::ok(json!({
+        "connected":true,"scope":"current_window","runtime_exposure":"isolated_agent",
+        "agent_state":"active","agent":{"agent_id":binding.agent_id(),
+            "run_id":binding.run_id(),"generation":binding.generation(),"project":binding.project()},
+        "assignment":assignment,"shared_runtime_access":false,
+        "next_action":"Read agent_assignment for this chat's task. Use tool_manifest to discover the current isolated tools."
+    }))
+}
+
 pub(super) async fn handle(
     runtime: &ToolRuntime,
     request: JsonRpcRequest,
@@ -46,7 +74,11 @@ pub(super) async fn handle(
         if let Some(db) = runtime.isolation_database() {
             let _ = db.record_agent_access_denied(None, code);
         }
-        McpOutcome::Ok(rpc_error(request.id.clone(), -32003, code))
+        let mut error = rpc_error(request.id.clone(), -32003, code);
+        if auth.is_native_host() && code == "agent_tool_not_isolated" {
+            error["error"]["data"] = json!({"recovery":"Call tool_manifest without filters to discover the current isolated tools. Cached shared-runtime tools are unavailable; start a fresh Agent with runtime_status."});
+        }
+        McpOutcome::Ok(error)
     };
     let Some(db) = runtime.isolation_database() else {
         return denied("agent_isolation_unavailable");
@@ -82,9 +114,13 @@ pub(super) async fn handle(
             // Hosts may cache tools/list for the entire chat/connection. Keep
             // this data-free isolated catalog stable (listChanged is false),
             // so the successor can use the same tools after commit. Discovery
-            // grants nothing: every call below still requires an active run,
-            // except the explicitly scoped handoff preparation protocol.
-            let specs = crate::agent_isolation::tool_specs();
+            // grants nothing: business calls require an active run. Only the
+            // configured first-use entry points may enroll a fresh window.
+            let specs = if auth.is_native_host() {
+                contract::native_catalog()
+            } else {
+                crate::agent_isolation::tool_specs()
+            };
             McpOutcome::Ok(rpc_result(
                 request.id,
                 if stateless {
@@ -110,12 +146,16 @@ pub(super) async fn handle(
                     Ok(inner) => inner,
                     Err(_) => return denied("agent_invalid_input"),
                 };
-                let catalog = crate::agent_isolation::tool_specs();
-                let exact_native_contract = auth.is_native_host()
+                let catalog = if auth.is_native_host() {
+                    contract::native_catalog()
+                } else {
+                    crate::agent_isolation::tool_specs()
+                };
+                let native_contract = auth.is_native_host()
                     && inner.tool == "tool_manifest"
-                    && contract::exact(&catalog, &inner.arguments).is_ok();
+                    && contract::discover(&catalog, &inner.arguments).is_ok();
                 if !inner.arguments.is_object()
-                    || (!exact_native_contract
+                    || (!native_contract
                         && !catalog["tools"].as_array().is_some_and(|specs| {
                             specs.iter().any(|spec| spec["name"] == inner.tool)
                         }))
@@ -130,7 +170,12 @@ pub(super) async fn handle(
             // a Pending window, and again after commit for other isolated tools.
             // This branch never resolves a run or enters the legacy manifest.
             let native_contract = auth.is_native_host() && call.name == "tool_manifest";
+            let native_status = auth.is_native_host() && call.name == "runtime_status";
+            if native_status && !status_arguments_valid(&call.arguments) {
+                return denied("agent_invalid_input");
+            }
             if !native_contract
+                && !native_status
                 && !auth.has_scope(crate::agent_host_auth::tool_scope(
                     &call.name,
                     &call.arguments,
@@ -139,7 +184,7 @@ pub(super) async fn handle(
                 return denied("agent_host_scope_denied");
             }
             let result = if native_contract {
-                match contract::exact(&crate::agent_isolation::tool_specs(), &call.arguments) {
+                match contract::discover(&contract::native_catalog(), &call.arguments) {
                     Ok(metadata) => crate::tool_runtime::ToolResult::ok(metadata),
                     Err(code) => crate::agent_isolation::denial(code),
                 }
@@ -148,19 +193,63 @@ pub(super) async fn handle(
             } else if call.name == "goal_handoff" {
                 crate::agent_goal_handoff::call_host(db, &principal, window.key(), call.arguments)
             } else {
-                match db.resolve_agent_host_window(
-                    &principal,
-                    window.key(),
-                    chrono::Utc::now().timestamp_millis(),
-                ) {
-                    Ok(Some(AgentHostWindowBinding::Active(binding))) => {
+                // Bootstrap only the validated, selector-free first-use calls.
+                // Complex business arguments must not create an Agent before
+                // their normal validation; discovery tells fresh chats where to start.
+                let first_use = native_status
+                    || (auth.is_native_host()
+                        && matches!(call.name.as_str(), "agent_identity" | "agent_assignment")
+                        && call
+                            .arguments
+                            .as_object()
+                            .is_some_and(|args| args.is_empty()));
+                let binding = if first_use {
+                    match auth.native_host.as_ref() {
+                        Some(host) => db.ensure_native_host_window(
+                            host,
+                            window.key(),
+                            chrono::Utc::now().timestamp_millis(),
+                        ),
+                        None => return denied("agent_host_authorization_required"),
+                    }
+                } else {
+                    db.resolve_agent_host_window(
+                        &principal,
+                        window.key(),
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .and_then(|binding| match binding {
+                        Some(AgentHostWindowBinding::Active(binding)) => Ok(binding),
+                        _ => Err(webcodex_store::AgentIsolationError::new(
+                            "agent_host_window_not_active",
+                        )),
+                    })
+                };
+                match binding {
+                    Ok(binding) if native_status => connection_status(db, &binding),
+                    Ok(binding) => {
                         let mut effective = AuthContext::new(AuthKind::ModelAgent);
                         effective.agent_run = Some(binding);
                         runtime
                             .isolated_model_call_async(&call.name, call.arguments, Some(&effective))
                             .await
                     }
-                    _ => crate::agent_isolation::denial("agent_host_window_not_active"),
+                    Err(error)
+                        if native_status && error.code() == "agent_host_enrollment_required" =>
+                    {
+                        ToolResult::ok(json!({
+                            "connected":true,"scope":"current_window","runtime_exposure":"isolated_agent",
+                            "agent_state":"enrollment_required","shared_runtime_access":false,
+                            "next_action":"The operator must enable automatic enrollment for this host, or supply an exact agent_attach enrollment grant."
+                        }))
+                    }
+                    Err(error) => {
+                        let mut result = crate::agent_isolation::denial(error.code());
+                        if auth.is_native_host() && error.code() == "agent_host_window_not_active" {
+                            result.output["recovery"] = json!("For a fresh chat, call runtime_status or agent_identity with no selectors to start its independent Agent. Retired or revoked windows cannot be reactivated this way.");
+                        }
+                        result
+                    }
                 }
             };
             if !result.success {

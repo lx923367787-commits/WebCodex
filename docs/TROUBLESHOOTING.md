@@ -27,6 +27,26 @@ Client:
 
 ## Common issues
 
+### A new chat returns `agent_host_window_not_active`
+
+The window is a server-side chat-to-Agent binding, not desktop foreground state.
+For a native host, call `runtime_status` first (optionally with `compact: true`).
+When the operator has enabled automatic enrollment for that host, first use
+atomically creates a separate task, Agent, and private directory. Repeated calls
+in the same chat retain that identity. Status exposes only the current chat,
+never the shared Runner/project inventory.
+
+`connected: true` with `agent_state: enrollment_required` means transport works
+but the operator has not configured the exact `host_id`, `owner_user`, `project`,
+and `policy` through the Bootstrap-only `configure_native_host_auto_enrollment`
+control action. Launcher-issued, single-use `agent_attach` enrollment remains
+available. Never copy another chat's identity or enrollment credential.
+
+Chats with a cached old tool list can call `tool_manifest` without arguments to
+discover current isolated tools, then `agent_assignment` to read their task.
+Retired, revoked, and pending windows never receive a replacement identity;
+same-Agent continuation still uses the existing `goal_handoff` protocol.
+
 ### `webcodex connect` cannot finish
 
 `connect` waits up to 15 seconds for the complete path: Server reachable,

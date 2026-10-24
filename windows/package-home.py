@@ -23,7 +23,7 @@ CLIENT_FILES = ("WebCodex.exe", "webcodex-runtime/webcodex.exe",
 NPM_TREES = ("chat-handoff/extension-runtime/node_modules", "goal-provider/node_modules")
 GUIDES = ("configure-providers.ps1", "setup-providers.ps1", "launch-portable.cmd",
           "launch-portable.ps1", "PORTABLE.zh-CN.md", "DEPENDENCIES.zh-CN.md", "dependencies.json",
-          "HOME-DEVELOPMENT.zh-CN.md", "VALIDATION.md")
+          "HOME-DEVELOPMENT.zh-CN.md", "VALIDATION.md", "configure-native-host.py", "NATIVE-HOST-SETUP.zh-CN.md")
 
 
 def digest(path: Path) -> str:

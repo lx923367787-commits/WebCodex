@@ -1,4 +1,20 @@
-# Windows snapshot validation — 2026-10-24
+# Windows snapshot validation — updated 2026-10-25
+
+## Native fresh-chat connection repair — 2026-10-25
+
+The deployed repair was synchronized as 12 exact SHA-256-matched files: 10 Rust source/test files (including two new files) and two troubleshooting documents. It connects first-use native chats to independent Agent enrollment while preserving existing isolation, revocation and retired-window boundaries.
+
+Existing verification was reused only after matching every repaired source file to its recorded after-SHA: **4 Store + 15 enrollment HTTP + 5 contract tests passed (24 distinct tests)**, and the Server dogfood build succeeded. A separate three-test run was a subset of the 15 and is not counted again. The installed and packaged Server hash is `dc6cc07bf7a443be6032d323a8dc682a271f8074ace8c6fb31af62cf5d24f5e8`; its original build identity remains commit `15e4287cda7f5e673dc449c34ed2838f9bcad4ca`, dirty=true, built_at=1792858791. Desktop, CLI, Runner and third-party runtime bytes remain unchanged.
+
+The repair's live evidence reports successful connection, stable independent identity, readable assignment and 34 tools; existing runs were preserved. Some repeated connector calls returned older failures without reaching the new Server. The exact upstream replay/cache layer is not established, so this transfer does not claim to eliminate all stale connector responses.
+
+New machines must configure their own enabled native Host, owner and project through the local Bootstrap control API. `configure-native-host.py` and [NATIVE-HOST-SETUP.zh-CN.md](NATIVE-HOST-SETUP.zh-CN.md) provide that step without copying old identifiers or credentials. The deployed policy keeps `max_subagents=0` and `max_cli_calls=0`; this repair does not remove those existing execution limits.
+
+The portable setup helper passed eight offline tests using synthetic local state/SQLite and mocked API responses, including default read-only behavior, disabled-host refusal, exact-target checks, one-time apply/readback and no retry after an uncertain control response. It uses Python standard-library modules and no existing account or production configuration was changed during these tests.
+
+Changed-line whitespace validation passed. The repaired `agent_isolation.rs` import formatting does not pass the standalone rustfmt check; it is retained byte-for-byte with the tested deployment source. The other nine repaired Rust files pass that formatting check. No production service was restarted by this upload task.
+
+Updated source/client ZIPs are dated 20261025. The 20261024 draft remains available as a previous snapshot; use the newer draft for deployment.
 
 ## Complete home-computer transfer follow-up
 

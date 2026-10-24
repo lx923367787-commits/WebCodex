@@ -240,6 +240,12 @@ fn host_dispatch_control(db: &Database, auth: &AuthContext, body: &Value) -> Res
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Control {
+    ConfigureNativeHostAutoEnrollment {
+        host_id: String,
+        owner_user: String,
+        project: String,
+        policy: AgentEnrollmentPolicy,
+    },
     AgentHostManagerBindingRead {
         owner_user: String,
         project: String,
@@ -298,7 +304,8 @@ pub(crate) fn try_control(
     if !matches!(
         body.get("action").and_then(Value::as_str),
         Some(
-            "agent_host_manager_binding_read"
+            "configure_native_host_auto_enrollment"
+                | "agent_host_manager_binding_read"
                 | "agent_enrollment_reserve"
                 | "agent_enrollment_revoke"
                 | "agent_enrollment_status"
@@ -313,6 +320,16 @@ pub(crate) fn try_control(
         let request: Control =
             serde_json::from_value(body.clone()).map_err(|_| "invalid_agent_enrollment_request")?;
         match request {
+            Control::ConfigureNativeHostAutoEnrollment {
+                host_id,
+                owner_user,
+                project,
+                policy,
+            } => {
+                db.configure_native_host_auto_enrollment(&host_id, &owner_user, &project, policy)
+                    .map_err(|error| error.code())?;
+                Ok(json!({"configured":true,"host_id":host_id,"project":project}))
+            }
             Control::AgentHostManagerBindingRead {
                 owner_user,
                 project,
