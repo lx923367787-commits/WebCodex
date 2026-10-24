@@ -10,15 +10,15 @@
 
 ## 下载与核对
 
-在家中安装 Git/GitHub CLI 后，以同一 GitHub 账号登录：
+在家中安装 Git/GitHub CLI 后，以同一 GitHub 账号登录。使用新的 `WebCodex-Transfer-corrected` 下载目录，避免混入以前下载的旧 ZIP 或校验文件：
 
 ```powershell
 gh auth login
 gh api user --jq .login
-gh release download windows-home-20261025 --repo lx923367787-commits/WebCodex --dir .\WebCodex-Transfer
-Get-Content .\WebCodex-Transfer\SHA256SUMS.txt
-Get-FileHash .\WebCodex-Transfer\WebCodex-Windows-Home-20261025-corrected.zip -Algorithm SHA256
-Get-FileHash .\WebCodex-Transfer\WebCodex-Source-20261025-corrected.zip -Algorithm SHA256
+gh release download windows-home-20261025 --repo lx923367787-commits/WebCodex --dir .\WebCodex-Transfer-corrected
+Get-Content .\WebCodex-Transfer-corrected\SHA256SUMS.txt
+Get-FileHash .\WebCodex-Transfer-corrected\WebCodex-Windows-Home-20261025-corrected.zip -Algorithm SHA256
+Get-FileHash .\WebCodex-Transfer-corrected\WebCodex-Source-20261025-corrected.zip -Algorithm SHA256
 ```
 
 将哈希与 `SHA256SUMS.txt` 对比，再解压客户端包到一个新的目录。不要覆盖另一套安装或复制旧卸载器。包中 `MANIFEST.json` 逐文件记录大小与 SHA-256，独立的 `Windows-Package-MANIFEST.json` 供下载前检查。
