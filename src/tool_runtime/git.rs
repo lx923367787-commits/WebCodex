@@ -3864,7 +3864,7 @@ impl ToolRuntime {
         untracked_paths: &[String],
     ) -> (Vec<Value>, bool) {
         let truncated = untracked_paths.len() > SHOW_CHANGES_UNTRACKED_PREVIEW_MAX_FILES;
-        if self.resolve_project(project).await.is_err() {
+        if self.execution().resolve_project(project).await.is_err() {
             return (Vec::new(), truncated);
         }
         let mut previews = Vec::new();
@@ -3945,7 +3945,7 @@ impl ToolRuntime {
     }
 
     pub(crate) async fn git_status(&self, project: String) -> ToolResult {
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
@@ -3986,7 +3986,7 @@ impl ToolRuntime {
     }
 
     pub(crate) async fn git_diff(&self, project: String, args: Option<Vec<String>>) -> ToolResult {
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
@@ -4135,7 +4135,7 @@ impl ToolRuntime {
                 "",
             );
         }
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(resolved) => resolved,
             Err(error) => return error.into_tool_result(),
         };
@@ -4176,9 +4176,11 @@ impl ToolRuntime {
                 match decode_git_diff_hunks_continuation(
                     raw,
                     &scope,
-                    committed_scope
-                        .as_ref()
-                        .map(|_| self.git_diff_hunks_continuation_mac_key.as_ref()),
+                    committed_scope.as_ref().map(|_| {
+                        self.execution_state
+                            .git_diff_hunks_continuation_mac_key
+                            .as_ref()
+                    }),
                 ) {
                     Ok(token) => Some(token),
                     Err(GitDiffHunksContinuationError::Invalid) => {
@@ -4398,7 +4400,9 @@ impl ToolRuntime {
         let next_continuation = if wire.has_more {
             let encoded = if committed_scope.is_some() {
                 encode_git_diff_hunks_committed_continuation(
-                    self.git_diff_hunks_continuation_mac_key.as_ref(),
+                    self.execution_state
+                        .git_diff_hunks_continuation_mac_key
+                        .as_ref(),
                     &scope,
                     &wire.pre_fence,
                     wire.next_position,
@@ -4541,7 +4545,7 @@ impl ToolRuntime {
                 Ok(values) => values,
                 Err(error) => return ToolResult::err(error),
             };
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(project) => project,
             Err(error) => return ToolResult::err(error),
         };
@@ -4693,7 +4697,7 @@ impl ToolRuntime {
     }
 
     pub(crate) async fn git_diff_summary(&self, project: String) -> ToolResult {
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };

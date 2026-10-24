@@ -260,6 +260,7 @@ async fn authenticated_project_fixture_for(recipe: &str) -> AuthenticatedProject
     registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,

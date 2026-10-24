@@ -38,6 +38,8 @@ fn auth_kind_name(kind: AuthKind) -> &'static str {
     match kind {
         AuthKind::Bootstrap => "bootstrap",
         AuthKind::ApiToken => "api",
+        AuthKind::ModelAgent => "isolated-agent",
+        AuthKind::NativeHost => "native-host",
         AuthKind::AgentToken => "agent",
         AuthKind::AccountCredential => "account",
         AuthKind::OAuth2Token => "oauth2",

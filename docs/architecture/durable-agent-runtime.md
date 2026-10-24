@@ -1,5 +1,13 @@
 # Durable Agent runtime and asynchronous work
 
+The current takeover extension, including provider-failure resume and bounded
+execution evidence, is documented in [Agent takeover](agent-takeover.md). The
+historical A3 ownership baseline below remains distinct from executor dispatch.
+Calling an ordinary installed Agent CLI does not require a durable Agent,
+AgentTask or ACP Provider registration: use the existing process/Job tools.
+These durable identity contracts apply when that explicit coordination domain is
+needed; they are not universal invocation prerequisites.
+
 This document defines the standing product direction for durable Agent identity and
 asynchronous work in WebCodex. It builds on the implemented Agent/Conversation/Wake
 foundation without turning WebCodex into a generic swarm framework or workflow

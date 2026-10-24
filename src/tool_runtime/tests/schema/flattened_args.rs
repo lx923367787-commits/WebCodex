@@ -218,5 +218,13 @@ fn explicit_tool_call_request_extra_fields() -> BTreeMap<&'static str, &'static 
             crate::tool_runtime::sessions::TOOL_CALL_RECORDING_SESSION_ID_FIELD,
             "generic wrapper recorder metadata stripped before concrete tool dispatch",
         ),
+        (
+            webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD,
+            "goal execution binding consumed by admission before concrete tool parsing",
+        ),
+        (
+            webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD,
+            "caller-carried conversation key consumed before concrete tool parsing; grants no authority",
+        ),
     ])
 }

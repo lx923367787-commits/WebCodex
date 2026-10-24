@@ -1,2 +1,4 @@
 *.sh text eol=lf
 *.toml text eol=lf
+# Preserve the upstream font license bytes, including its original whitespace.
+windows/assets/fonts/OFL.txt -text -whitespace

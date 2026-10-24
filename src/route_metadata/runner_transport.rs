@@ -47,6 +47,16 @@ pub(super) const ROUTES: &[RouteSpec] = &[
         AuthMiddleware,
     ),
     route(
+        RunnerAgentExecutionCloseReceipt,
+        Post,
+        webcodex_core::runner_protocol::RUNNER_AGENT_EXECUTION_CLOSE_RECEIPT_PATH,
+        AgentSurface,
+        RunnerTransport,
+        Hidden,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
         RunnerPersistentShellResult,
         Post,
         "/api/shell/agent/persistent_shell_result",

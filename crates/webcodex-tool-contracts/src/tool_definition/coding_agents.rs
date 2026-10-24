@@ -52,7 +52,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 ),
                 &[CODING_AGENT_RUN, webcodex_core::authority::SCOPE_PROJECT_WRITE],
             ),
-            "Start one idempotent delegated ACP coding-agent Run on an exact registered Project and logical Runner provider. Autonomous execution may outlive this request; after any uncertain start, reuse the same idempotency key and observe the same Run rather than dispatching a replacement.",
+            "Optional ACP-specific execution: start one idempotent coding-agent Run on an exact registered Project and configured ACP provider. Ordinary Agent CLIs use run_process or run_detached_process directly; they do not require ACP or Provider registration. For this ACP path, uncertain starts reuse the same idempotency key and observe the same Run instead of dispatching a replacement.",
             coding_agent_start_input_schema,
         ),
         PERMISSION_RISK_JOB,

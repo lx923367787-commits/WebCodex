@@ -9,6 +9,61 @@ use webcodex_tool_contracts::{
 };
 use webcodex_workflow_session as sessions;
 
+#[path = "team_tool_contract_tests.rs"]
+mod team_tool_contract_tests;
+
+#[test]
+fn strict_tool_arguments_reject_unknown_fields_and_non_object_unit_inputs() {
+    for (name, args) in [
+        (
+            "run_process",
+            json!({"project":"demo","executable":"git","target":"other"}),
+        ),
+        (
+            "write_project_file",
+            json!({"project":"demo","path":"a.txt","content":"text","expected_hash":"wrong-precondition"}),
+        ),
+        ("computer_list_targets", json!({"target":"other"})),
+        ("computer_list_targets", json!(["unexpected"])),
+        (
+            "computer_list_targets",
+            json!("plain text is not a tool invocation"),
+        ),
+        (
+            "apply_text_edits",
+            json!({"project":"demo","path":"a.txt","edits":[{"kind":"replace_exact","old_text":"old","new_text":"new","expected_sha256":"ignored"}]}),
+        ),
+    ] {
+        assert!(
+            ToolCall::from_tool_name(name, args).is_err(),
+            "{name} must reject ambiguous execution input"
+        );
+    }
+}
+
+#[test]
+fn strict_tool_arguments_preserve_natural_language_and_typed_success_conditions() {
+    let content = "普通自然语言回复：请确认当前工作；这不是 JSON，也不应被自动转换。";
+    let call = ToolCall::from_tool_name(
+        "write_project_file",
+        json!({"project":"demo","path":"a.txt","content":content}),
+    )
+    .unwrap();
+    assert!(matches!(call, ToolCall::WriteProjectFile { content: text, .. } if text == content));
+    for invalid in [
+        json!({"project":"demo","executable":"git","result_expectation":"maybe"}),
+        json!({"project":"demo","executable":"git","accepted_exit_codes":["0"]}),
+        json!({"project":"demo","executable":"git","expected_failure":"false"}),
+        json!({"project":"demo","executable":"git","expected_failure_kind":17}),
+        json!({"project":"demo","executable":"git","assertion_name":false}),
+        json!({"project":"demo","executable":"git","result_expectation":"success","accepted_exit_codes":[1]}),
+    ] {
+        assert!(ToolCall::from_tool_name("run_process", invalid).is_err());
+    }
+    assert!(ToolCall::from_tool_name("computer_list_targets", Value::Null).is_ok());
+    assert!(ToolCall::from_tool_name("computer_list_targets", json!({})).is_ok());
+}
+
 #[test]
 fn from_tool_name_parses_unit_tools_without_arguments() {
     for name in [
@@ -292,6 +347,37 @@ fn from_tool_name_records_public_result_expectations_before_parsing() {
 }
 
 #[test]
+fn strict_conflicting_success_conditions_are_rejected_without_changing_legacy_intent() {
+    for expectation in [
+        json!({"expected_failure":true,"result_expectation":"success"}),
+        json!({"expected_failure":true,"result_expectation":"observe"}),
+        json!({"expected_failure":true,"accepted_exit_codes":[0,1]}),
+        json!({"expected_failure":false,"result_expectation":"failure"}),
+    ] {
+        let mut arguments = json!({"project":"demo","executable":"git"});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(expectation.as_object().unwrap().clone());
+        assert!(ToolCall::from_tool_name("run_process", arguments).is_err());
+    }
+    for expectation in [
+        json!({"expected_failure":true}),
+        json!({"expected_failure":true,"result_expectation":"failure"}),
+    ] {
+        let mut arguments = json!({"project":"demo","executable":"git"});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(expectation.as_object().unwrap().clone());
+        let (_, metadata) =
+            ToolCall::from_tool_name_with_recorder_metadata("run_process", arguments).unwrap();
+        assert!(metadata.expectation.expected_failure);
+    }
+    assert!(ToolCall::from_tool_name("run_process", json!({"project":"demo","executable":"git","expected_failure":false,"result_expectation":"success"})).is_ok());
+}
+
+#[test]
 fn from_tool_name_rejects_unsafe_result_expectation_combinations() {
     let invalid = [
         (
@@ -354,8 +440,8 @@ fn from_tool_name_rejects_unsafe_result_expectation_combinations() {
 }
 
 #[test]
-fn from_tool_name_does_not_treat_removed_failure_kind_alias_as_metadata() {
-    let (call, metadata) = ToolCall::from_tool_name_with_recorder_metadata(
+fn from_tool_name_rejects_removed_failure_kind_alias() {
+    let error = ToolCall::from_tool_name_with_recorder_metadata(
         "job_status",
         json!({
             "job_id": "abc",
@@ -364,14 +450,8 @@ fn from_tool_name_does_not_treat_removed_failure_kind_alias_as_metadata() {
             "assertion_name": "removed alias"
         }),
     )
-    .unwrap();
-    assert!(matches!(call, ToolCall::JobStatus { .. }));
-    assert!(metadata.expectation.expected_failure);
-    assert_eq!(metadata.expectation.expected_failure_kind, None);
-    assert_eq!(
-        metadata.expectation.assertion_name.as_deref(),
-        Some("removed alias")
-    );
+    .unwrap_err();
+    assert!(error.contains("test_expect_failure_kind"));
 }
 
 #[test]

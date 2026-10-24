@@ -1,5 +1,19 @@
 use super::*;
 
+fn without_goal_invocation_metadata(schema: &Value) -> Value {
+    let mut business_schema = schema.clone();
+    let properties = business_schema["properties"].as_object_mut().unwrap();
+    assert_eq!(
+        properties.remove(webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD),
+        Some(webcodex_tool_contracts::goal_context_input_schema())
+    );
+    assert_eq!(
+        properties.remove(webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD),
+        Some(webcodex_tool_contracts::context_epoch_input_schema())
+    );
+    business_schema
+}
+
 fn model_surface_direct_auth() -> crate::auth::AuthContext {
     // Exercise the declared direct surface without also admitting the separate
     // mcp_tool/ssh_resource gateways. Plugin scopes are explicit because
@@ -144,7 +158,11 @@ async fn apply_text_edits_discriminated_schema_reaches_full_and_local_coding_mcp
             .iter()
             .find(|tool| tool["name"] == "apply_text_edits")
             .unwrap_or_else(|| panic!("missing apply_text_edits on {surface:?}"))["inputSchema"];
-        assert_eq!(schema, &expected, "schema drift on {surface:?}");
+        assert_eq!(
+            without_goal_invocation_metadata(schema),
+            expected,
+            "business schema drift on {surface:?}"
+        );
     }
 }
 
@@ -180,7 +198,11 @@ async fn apply_patch_schema_reaches_full_local_and_adaptive_surfaces() {
             .iter()
             .find(|tool| tool["name"] == "apply_patch")
             .unwrap_or_else(|| panic!("missing apply_patch on {surface:?}"))["inputSchema"];
-        assert_eq!(schema, &expected, "schema drift on {surface:?}");
+        assert_eq!(
+            without_goal_invocation_metadata(schema),
+            expected,
+            "business schema drift on {surface:?}"
+        );
     }
 }
 
@@ -317,12 +339,13 @@ async fn adaptive_runtime_tools_list_is_small_core_plus_gateway() {
         direct_names.iter().map(String::as_str).collect::<Vec<_>>()
     );
     let serialized_tools_bytes = serde_json::to_vec(tools).unwrap().len();
-    // P5 admits directly actionable recovery targets and #317 adds the stable
-    // scope-gated plugin_tool gateway to the declared direct set. Measured
-    // post-#317 baseline is ~547,411 bytes (~534.6 KiB). Keep roughly the same
-    // ~13% schema-growth headroom without turning the exact tool count into an
-    // architectural lock.
+    // Keep the established catalog budget as new tools and invocation metadata
+    // are added. Repeated output subschemas are factored into tool-local $defs;
+    // all descriptions, constraints and direct tool names remain available.
     const MAX_ADAPTIVE_RUNTIME_TOOLS_LIST_BYTES: usize = 608 * 1024;
+    eprintln!(
+        "adaptive_tools_list_bytes={serialized_tools_bytes} budget_bytes={MAX_ADAPTIVE_RUNTIME_TOOLS_LIST_BYTES}"
+    );
     assert!(
         serialized_tools_bytes <= MAX_ADAPTIVE_RUNTIME_TOOLS_LIST_BYTES,
         "adaptive tools/list schema cost {serialized_tools_bytes} exceeded {MAX_ADAPTIVE_RUNTIME_TOOLS_LIST_BYTES} bytes"
@@ -822,7 +845,10 @@ async fn mcp_tool_manifest_advertises_image_mode_without_changing_runtime_schema
         };
         let output = &value["result"]["structuredContent"]["output"];
         assert_eq!(output["name"], "read_project_artifact");
-        assert_eq!(output["input_schema"]["properties"]["as_image"], image_option);
+        assert_eq!(
+            output["input_schema"]["properties"]["as_image"],
+            image_option
+        );
         assert!(output["description"]
             .as_str()
             .unwrap()
@@ -838,7 +864,7 @@ async fn mcp_tool_manifest_advertises_image_mode_without_changing_runtime_schema
         if model_surface == ModelSurface::AdaptiveRuntime {
             assert_eq!(output["route"]["via"], "call_runtime_tool");
         }
-        let mut projected_schema = output["input_schema"].clone();
+        let mut projected_schema = without_goal_invocation_metadata(&output["input_schema"]);
         projected_schema["properties"]
             .as_object_mut()
             .unwrap()
@@ -913,7 +939,15 @@ async fn adaptive_runtime_tool_manifest_exact_projection_is_sparse_and_routes_ex
             "exact sparse manifest retained redundant field {redundant}: {output}"
         );
     }
-    let canonical_bytes = serde_json::to_vec(&canonical_direct).unwrap().len();
+    assert_eq!(
+        without_goal_invocation_metadata(&output["input_schema"]),
+        canonical_direct.output["contract"]["input_schema"]
+    );
+    // Compare the same callable contract: MCP adds invocation metadata outside
+    // the concrete ToolSpec, so include that same wrapper in the verbose view.
+    let mut comparable_canonical = serde_json::to_value(&canonical_direct).unwrap();
+    comparable_canonical["output"]["contract"]["input_schema"] = output["input_schema"].clone();
+    let canonical_bytes = serde_json::to_vec(&comparable_canonical).unwrap().len();
     let sparse_bytes = serde_json::to_vec(&value["result"]["structuredContent"])
         .unwrap()
         .len();

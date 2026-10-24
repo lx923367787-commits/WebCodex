@@ -1,4 +1,5 @@
-use super::{RecoveryKind, ToolResult, ToolRuntime};
+use super::services::ExecutionService;
+use super::{RecoveryKind, ToolResult};
 use crate::auth::AuthContext;
 use crate::projects::ProjectConfig;
 use crate::runner_protocol::{RunnerProjectSummary, RunnerView};
@@ -124,7 +125,7 @@ pub(crate) fn runner_project_runtime_id(client_id: &str, project_id: &str) -> St
     format!("agent:{}:{}", client_id, project_id)
 }
 
-impl ToolRuntime {
+impl ExecutionService<'_> {
     fn project_candidate_from_view(
         client: &RunnerView,
         project: &RunnerProjectSummary,

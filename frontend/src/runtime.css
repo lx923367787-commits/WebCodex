@@ -325,6 +325,7 @@ h4 { margin-bottom: 5px; color: var(--muted); font-size: .7rem; letter-spacing: 
 .device-group-identity .small { overflow: hidden; color: var(--placeholder); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 .device-group-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pass); }
 .device-group.offline .device-group-dot { background: var(--fail); }
+.device-group.unknown .device-group-dot { background: var(--muted); }
 .device-project-list { display: grid; gap: 2px; margin: 0; padding: 0; border-left: 0; }
 .device-project-empty { margin: 4px 10px 8px; }
 .project-row { appearance: none; position: relative; width: 100%; min-width: 0; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 0 9px; align-items: start; padding: 8px; border: 0; border-radius: 9px; background: transparent; color: inherit; text-align: left; cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 120ms var(--ease-out); }
@@ -1042,3 +1043,38 @@ body:not(.runtime-has-session) .topbar-controls { padding-right: 0; }
 @media (max-height: 620px) {
   .conversation-empty { padding-top: 24px; }
 }
+
+.operations-goals { grid-column: 1 / -1; min-width: 0; }
+.goal-create { border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin: 18px 0; }
+.goal-create summary, .goal-round summary { cursor: pointer; padding: 5px 0; }
+.goal-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; border: 0; padding: 18px 0; margin: 0; min-width: 0; }
+.goal-form-grid label { display: grid; align-content: start; gap: 7px; font-size: .85rem; }
+.goal-form-grid input, .goal-form-grid textarea { width: 100%; min-width: 0; padding: 10px; }
+.goal-form-grid textarea { resize: vertical; }
+.goal-full-width { grid-column: 1 / -1; }
+.goal-workspace { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 2fr); gap: 22px; }
+.goal-workspace > section { min-width: 0; }
+.goal-list { display: grid; gap: 8px; }
+.goal-list-item { display: grid; gap: 7px; text-align: left; border: 1px solid var(--border); border-radius: 10px; padding: 12px; color: var(--text); background: var(--surface); cursor: pointer; overflow-wrap: anywhere; }
+.goal-list-item span { color: var(--muted-strong); font-size: .78rem; }
+.goal-list-item.selected { border-color: var(--accent); background: var(--accent-soft); }
+.goal-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0; }
+.goal-round { border-top: 1px solid var(--border); padding: 12px 0; }
+.goal-round pre, .goal-json-example { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; font-size: .78rem; line-height: 1.6; }
+.goal-check { margin: 10px 0; padding: 12px; border-left: 3px solid var(--border); background: var(--surface-inset); }
+.goal-check-pass { border-left-color: var(--accent); }
+.goal-check-fail { border-left-color: #c07836; }
+.goal-notice { border-left: 3px solid var(--accent); padding: 12px; background: var(--surface-inset); white-space: pre-wrap; overflow-wrap: anywhere; }
+.goal-notice[data-level="warning"], .goal-notice[data-level="handoff"] { border-left-color: #c07836; }
+.goal-notice p { margin: 8px 0 0; }
+.goal-host-text { width: 100%; box-sizing: border-box; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; font-size: .8rem; line-height: 1.6; }
+.goal-host-node { border-top: 1px solid var(--border); padding: 12px 0; overflow-wrap: anywhere; }
+.goal-host-node p { white-space: pre-wrap; margin: 8px 0; }
+#goal-host-state pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+#goal-detail-objective, #goal-detail-note, #goal-status { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .goal-form-grid, .goal-workspace { grid-template-columns: 1fr; } }
+.runtime-diagnostics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 16px; }
+.runtime-diagnostic { display: flex; flex-direction: column; gap: 4px; border-left: 3px solid currentColor; padding-left: 10px; overflow-wrap: anywhere; }
+.runtime-diagnostic[data-status="online"] { color: var(--success, #29966d); }
+.runtime-diagnostic[data-status="degraded"] { color: var(--warning, #a66b16); }
+.runtime-diagnostic[data-status="offline"] { color: var(--danger, #c44d58); }

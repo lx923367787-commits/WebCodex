@@ -148,7 +148,7 @@ impl ConnectorRuntime {
             db.clone(),
             context.clone(),
         )?;
-        tools.observations.set_connector_configured();
+        tools.observation.observations.set_connector_configured();
         Ok(Self {
             tools,
             db,
@@ -323,11 +323,14 @@ impl ConnectorRuntime {
         } else {
             "not_ready"
         };
-        self.tools.observations.record_connector_observation(
-            status,
-            "readiness_probe",
-            chrono::Utc::now().timestamp(),
-        );
+        self.tools
+            .observation
+            .observations
+            .record_connector_observation(
+                status,
+                "readiness_probe",
+                chrono::Utc::now().timestamp(),
+            );
         crate::project_entry::runtime_readiness(Some(self.context.project_name.clone()), probe)
     }
 
@@ -424,11 +427,14 @@ impl ConnectorRuntime {
                 .await
         };
         if outcome.ok {
-            self.tools.observations.record_connector_observation(
-                "request_succeeded",
-                "connector_request",
-                chrono::Utc::now().timestamp(),
-            );
+            self.tools
+                .observation
+                .observations
+                .record_connector_observation(
+                    "request_succeeded",
+                    "connector_request",
+                    chrono::Utc::now().timestamp(),
+                );
         }
         ConnectorCallOutcome::from_domain(outcome)
     }

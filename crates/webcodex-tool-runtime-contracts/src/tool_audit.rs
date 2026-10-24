@@ -1946,13 +1946,24 @@ mod computer_privacy_tests {
                 "memory_scope_id": scope_id,
                 "expected_catalog_revision": catalog_revision,
                 "confirm": true,
-                "body": private_body,
             }),
         );
         assert_eq!(purge_args["memory_scope_id"], scope_id);
         assert_eq!(purge_args["expected_catalog_revision"], catalog_revision);
         assert!(purge_args.get("confirm").is_none());
         assert!(!purge_args.to_string().contains(private_body));
+        let malformed_purge = json!({
+            "memory_scope_id": scope_id,
+            "expected_catalog_revision": catalog_revision,
+            "confirm": true,
+            "body": private_body,
+        });
+        assert!(ToolCall::from_tool_name("memory_scope_purge", malformed_purge.clone()).is_err());
+        assert_eq!(
+            session_log_arguments_for_tool_request("memory_scope_purge", &malformed_purge),
+            serde_json::json!({}),
+            "malformed hidden-tool arguments fail closed without retaining private fields"
+        );
         let typed_purge = ToolCall::MemoryScopePurge {
             memory_scope_id: scope_id.clone(),
             expected_catalog_revision: catalog_revision.clone(),
@@ -2817,6 +2828,80 @@ mod computer_privacy_tests {
 impl ToolCall {
     pub fn session_log_arguments(&self) -> Value {
         match self {
+            Self::TeamPolicyGet { project } => serde_json::json!({"project":project}),
+            Self::TeamPolicySave {
+                project,
+                expected_revision,
+                ..
+            } => serde_json::json!({
+                "project":project,"expected_revision":expected_revision
+            }),
+            Self::TeamPlanRegister {
+                project,
+                root_task_id,
+                expected_policy_revision,
+                plan,
+                ..
+            } => serde_json::json!({
+                "project":project,"root_task_id":root_task_id,"expected_policy_revision":expected_policy_revision,
+                "subagent_count":plan["subagents"].as_array().map(Vec::len)
+            }),
+            Self::TeamPlanList {
+                project,
+                offset,
+                limit,
+            } => serde_json::json!({"project":project,"offset":offset,"limit":limit}),
+            Self::TeamPlanRead {
+                project,
+                root_task_id,
+                attempts_offset,
+                attempts_limit,
+            } => {
+                serde_json::json!({"project":project,"root_task_id":root_task_id,"attempts_offset":attempts_offset,"attempts_limit":attempts_limit})
+            }
+            Self::TeamPlanCancel {
+                project,
+                root_task_id,
+            } => serde_json::json!({"project":project,"root_task_id":root_task_id}),
+            Self::TeamCliStart {
+                project,
+                root_task_id,
+                source_task_id,
+                call_index,
+                timeout_secs,
+                ..
+            } => serde_json::json!({
+                "project":project,"root_task_id":root_task_id,"source_task_id":source_task_id,
+                "call_index":call_index,"timeout_secs":timeout_secs
+            }),
+            Self::TeamCliObserve {
+                project,
+                source_attempt_id,
+            } => serde_json::json!({"project":project,"source_attempt_id":source_attempt_id}),
+            Self::TeamAgentStart {
+                project,
+                root_task_id,
+                source_task_id,
+                ..
+            } => {
+                serde_json::json!({"project":project,"root_task_id":root_task_id,"source_task_id":source_task_id})
+            }
+            Self::TeamAgentObserve {
+                project,
+                team_agent_attempt_id,
+            } => {
+                serde_json::json!({"project":project,"team_agent_attempt_id":team_agent_attempt_id})
+            }
+            Self::PresentDocument(args)
+            | Self::DocumentEdit(args)
+            | Self::DocumentConvert(args)
+            | Self::DocumentRestore(args) => serde_json::json!({
+                "project": args.project, "path": args.path, "job_id": args.job_id,
+                "output_path": args.output_path, "save_mode": args.save_mode,
+                "expected_sha256": args.expected_sha256, "backup_id": args.backup_id,
+                "operation_count": args.operations.as_ref().and_then(Value::as_array).map(Vec::len),
+                "view": args.view,
+            }),
             Self::RunProcess {
                 project,
                 executable,
@@ -2885,6 +2970,157 @@ impl ToolCall {
             }),
             Self::CodingAgentCancel { run_id } => serde_json::json!({
                 "run_id": run_id,
+            }),
+            Self::GoalStart {
+                project,
+                provider_id,
+                objective,
+                criteria,
+                artifact_paths,
+                reviewer_provider_id,
+                limits,
+                config,
+                idempotency_key,
+            } => serde_json::json!({
+                "project": project,
+                "provider_id": provider_id,
+                "objective_bytes": objective.len(),
+                "criterion_count": criteria.len(),
+                "artifact_count": artifact_paths.len(),
+                "reviewer_provider_id": reviewer_provider_id,
+                "limits": limits,
+                "config_count": config.as_ref().map(std::collections::BTreeMap::len).unwrap_or_default(),
+                "idempotency_key_present": !idempotency_key.is_empty(),
+            }),
+            Self::GoalRead {
+                goal_id,
+                round_offset,
+                round_limit,
+                history_after,
+                history_limit,
+                history_kind,
+                view,
+                source_context_epoch,
+                node_id,
+                section,
+                cursor,
+            } => serde_json::json!({
+                "goal_id": goal_id,
+                "round_offset": round_offset,
+                "round_limit": round_limit,
+                "history_after": history_after,
+                "history_limit": history_limit,
+                "history_kind": history_kind,
+                "view": view,
+                "source_context_epoch_present": source_context_epoch.is_some(),
+                "node_id": node_id,
+                "section": section,
+                "cursor_present": cursor.is_some(),
+            }),
+            Self::GoalCancel { goal_id } | Self::GoalResume { goal_id } => {
+                serde_json::json!({"goal_id": goal_id})
+            }
+            Self::GoalList { project, limit } => serde_json::json!({
+                "project": project,
+                "limit": limit,
+            }),
+            Self::GoalModeStart {
+                project,
+                task_directory,
+                objective,
+                idempotency_key,
+                context_epoch,
+                context_warning_tokens,
+                context_handoff_tokens,
+            } => serde_json::json!({
+                "project":project, "objective_bytes":objective.len(),
+                "task_directory":task_directory,
+                "idempotency_key_present":!idempotency_key.is_empty(),
+                "context_epoch_present":context_epoch.is_some(),
+                "context_warning_tokens":context_warning_tokens, "context_handoff_tokens":context_handoff_tokens,
+            }),
+            Self::GoalPlanSave {
+                goal_id,
+                expected_revision,
+                idempotency_key,
+                plan,
+                change_request,
+            } => serde_json::json!({
+                "goal_id":goal_id, "expected_revision":expected_revision,
+                "idempotency_key_present":!idempotency_key.is_empty(),
+                "plan_bytes":plan.to_string().len(),
+                "change_request_bytes":change_request.as_ref().map(String::len),
+            }),
+            Self::GoalConfirmPlan {
+                goal_id,
+                expected_revision,
+                plan_version,
+                confirmation,
+                idempotency_key,
+                ..
+            } => serde_json::json!({
+                "goal_id":goal_id, "expected_revision":expected_revision, "plan_version":plan_version,
+                "confirmation_bytes":confirmation.len(),
+                "idempotency_key_present":!idempotency_key.is_empty(),
+            }),
+            Self::GoalHandoff {
+                goal_id,
+                action,
+                handoff_id,
+                attempt_id,
+                checkpoint_sequence,
+                ..
+            } => serde_json::json!({
+                "goal_id":goal_id, "action":action, "handoff_id":handoff_id,
+                "attempt_id":attempt_id, "checkpoint_sequence":checkpoint_sequence,
+            }),
+            Self::GoalBootstrap {
+                goal_id,
+                project,
+                context_epoch,
+                activate,
+            } => serde_json::json!({
+                "goal_id":goal_id, "project":project, "context_epoch_present":context_epoch.is_some(), "activate":activate,
+            }),
+            Self::GoalClaimNode {
+                goal_id,
+                node_id,
+                expected_revision,
+                plan_version,
+                idempotency_key,
+                context_epoch,
+                rework,
+                takeover_attempt_id,
+            } => serde_json::json!({
+                "goal_id":goal_id, "node_id":node_id, "expected_revision":expected_revision,
+                "plan_version":plan_version, "idempotency_key_present":!idempotency_key.is_empty(),
+                "context_epoch_present":context_epoch.is_some(), "rework":rework,
+                "takeover_attempt_id":takeover_attempt_id,
+            }),
+            Self::GoalCheckpoint {
+                goal_id,
+                expected_revision,
+                idempotency_key,
+                patch,
+                context_epoch,
+            } => serde_json::json!({
+                "goal_id":goal_id, "expected_revision":expected_revision,
+                "idempotency_key_present":!idempotency_key.is_empty(), "patch_bytes":patch.to_string().len(),
+                "context_epoch_present":context_epoch.is_some(),
+            }),
+            Self::GoalCheckNode {
+                goal_id,
+                node_id,
+                attempt_id,
+                expected_revision,
+                plan_version,
+                idempotency_key,
+                evidence,
+            } => serde_json::json!({
+                "goal_id":goal_id, "node_id":node_id, "attempt_id":attempt_id,
+                "expected_revision":expected_revision, "plan_version":plan_version,
+                "idempotency_key_present":!idempotency_key.is_empty(),
+                "evidence_present":evidence.is_some(),
             }),
             Self::RunScript {
                 project,

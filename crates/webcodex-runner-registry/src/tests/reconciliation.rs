@@ -4,24 +4,22 @@ use super::reconciliation::{
     validate_job_inventory_without_project_membership, RECOVERY_SWEEP_PASS_CAP,
 };
 use super::state::{
-    JobLifecycleState, JobRecoveryPhase, JobRecoveryReason, PendingShellRequest,
-    ShellJobVisibility,
+    JobLifecycleState, JobRecoveryPhase, JobRecoveryReason, PendingShellRequest, ShellJobVisibility,
 };
 use super::{
-    clamp_grace, job_recovery_grace_secs, now_ts, RunnerRegistry, RUNNER_ONLINE_WINDOW_SECS,
-    JOB_RECOVERY_GRACE_SECS, MAX_OUTPUT_BYTES,
+    clamp_grace, job_recovery_grace_secs, now_ts, RunnerRegistry, JOB_RECOVERY_GRACE_SECS,
+    MAX_OUTPUT_BYTES, RUNNER_ONLINE_WINDOW_SECS,
+};
+use crate::runner_protocol::{
+    PersistentShellResult, RunnerCapabilities, RunnerJobUpdateRequest, RunnerPollRequest,
+    RunnerProjectSummary, RunnerRegisterRequest, RunnerRequest, ShellCommandExecutionState,
+    ShellJobContext, ShellJobInventory, ShellJobLogSnapshot, ShellJobOpRequest, ShellJobSnapshot,
+    ShellJobStreamSnapshot, ShellJobValidationMetadata, ShellJobValidationProgress,
+    ShellJobValidationStep, ShellProcessArgv, ShellScriptLanguage, ShellScriptPayload,
+    JOB_INVENTORY_MAX_TERMINAL_JOBS, JOB_SNAPSHOT_STREAM_MAX_BYTES, JOB_TERMINAL_RETENTION_SECS,
 };
 use webcodex_core::runner_operation::{
     RunnerInvocationMetadata, RunnerJobOperation, RunnerOperation,
-};
-use crate::runner_protocol::{
-    PersistentShellResult, RunnerJobUpdateRequest, RunnerPollRequest,
-    RunnerProjectSummary, RunnerRequest, RunnerCapabilities,
-    RunnerRegisterRequest, ShellCommandExecutionState, ShellJobContext, ShellJobInventory,
-    ShellJobLogSnapshot, ShellJobOpRequest, ShellJobSnapshot, ShellJobStreamSnapshot,
-    ShellJobValidationMetadata, ShellJobValidationProgress, ShellJobValidationStep,
-    ShellProcessArgv, ShellScriptLanguage, ShellScriptPayload, JOB_INVENTORY_MAX_TERMINAL_JOBS,
-    JOB_SNAPSHOT_STREAM_MAX_BYTES, JOB_TERMINAL_RETENTION_SECS,
 };
 
 const CLIENT_ID: &str = "oe";
@@ -77,6 +75,7 @@ fn empty_inventory() -> ShellJobInventory {
 
 fn register_request(instance: &str, inventory: ShellJobInventory) -> RunnerRegisterRequest {
     crate::test_support::current_runner_registration(RunnerRegisterRequest {
+        agent_execution_resources: Vec::new(),
         client_id: CLIENT_ID.to_string(),
         runner_instance_id: instance.to_string(),
         runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -481,9 +480,11 @@ async fn old_count_capable_runner_accepts_cargo_validation_without_explicit_exec
     registration
         .capabilities
         .structured_cargo_test_execution_policy = false;
-    assert!(registration
-        .capabilities
-        .structured_cargo_test_count_assertion);
+    assert!(
+        registration
+            .capabilities
+            .structured_cargo_test_count_assertion
+    );
     registry.register(registration).await.unwrap();
 
     registry
@@ -517,9 +518,11 @@ async fn old_count_capable_runner_fails_closed_on_explicit_cargo_execution_polic
         registration
             .capabilities
             .structured_cargo_test_execution_policy = false;
-        assert!(registration
-            .capabilities
-            .structured_cargo_test_count_assertion);
+        assert!(
+            registration
+                .capabilities
+                .structured_cargo_test_count_assertion
+        );
         registry.register(registration).await.unwrap();
 
         let error = registry
@@ -534,7 +537,10 @@ async fn old_count_capable_runner_fails_closed_on_explicit_cargo_execution_polic
             error.contains("structured_cargo_test_execution_policy_unavailable"),
             "case={label} error={error}"
         );
-        assert!(registry.list_jobs(Some(100)).await.is_empty(), "case={label}");
+        assert!(
+            registry.list_jobs(Some(100)).await.is_empty(),
+            "case={label}"
+        );
     }
 }
 
@@ -1568,10 +1574,12 @@ async fn terminal_observed_inventory_replay_is_idempotent() {
         let record = inner.jobs_by_id.get(&job.job_id).unwrap();
         (
             record
-                .observation.terminal_observed_at
+                .observation
+                .terminal_observed_at
                 .expect("terminal inventory is observed by the Server"),
             record
-                .observation.revision
+                .observation
+                .revision
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
     };
@@ -1591,7 +1599,8 @@ async fn terminal_observed_inventory_replay_is_idempotent() {
         );
         assert_eq!(
             record
-                .observation.revision
+                .observation
+                .revision
                 .load(std::sync::atomic::Ordering::Relaxed),
             first_revision,
             "idempotent terminal replay must not publish a new revision"
@@ -1603,17 +1612,23 @@ async fn terminal_observed_inventory_replay_is_idempotent() {
             .jobs_by_id
             .get_mut(&job.job_id)
             .unwrap()
-            .observation.terminal_observed_at = Some(now_ts() - JOB_TERMINAL_RETENTION_SECS);
+            .observation
+            .terminal_observed_at = Some(now_ts() - JOB_TERMINAL_RETENTION_SECS);
     }
     let aged_observation = {
         let inner = registry_b.inner.lock().await;
-        inner.jobs_by_id[&job.job_id].observation.terminal_observed_at
+        inner.jobs_by_id[&job.job_id]
+            .observation
+            .terminal_observed_at
     };
     register(&registry_b, INSTANCE_A, inventory).await;
     {
         let inner = registry_b.inner.lock().await;
         assert_eq!(
-            inner.jobs_by_id[&job.job_id].observation.terminal_observed_at, aged_observation,
+            inner.jobs_by_id[&job.job_id]
+                .observation
+                .terminal_observed_at,
+            aged_observation,
             "replay at the retention boundary must not re-anchor the deadline"
         );
     }
@@ -1657,7 +1672,8 @@ async fn terminal_observed_future_inventory_ended_at_cannot_bypass_prune() {
     let observed_at = {
         let inner = registry_b.inner.lock().await;
         inner.jobs_by_id[&job.job_id]
-            .observation.terminal_observed_at
+            .observation
+            .terminal_observed_at
             .expect("terminal inventory observation time")
     };
     assert!((before_register..=after_register).contains(&observed_at));
@@ -1686,6 +1702,7 @@ async fn terminal_observed_future_inventory_ended_at_cannot_bypass_prune() {
         inner.pending_by_id.insert(
             original_request_id.clone(),
             PendingShellRequest {
+                agent_cli: None,
                 request: request.clone(),
                 operation: request.decode_operation().unwrap(),
                 waiter: None,
@@ -1708,6 +1725,7 @@ async fn terminal_observed_future_inventory_ended_at_cannot_bypass_prune() {
         inner.pending_by_id.insert(
             control_request_id.clone(),
             PendingShellRequest {
+                agent_cli: None,
                 request: control_request.clone(),
                 operation: control_request.decode_operation().unwrap(),
                 waiter: None,
@@ -1734,7 +1752,8 @@ async fn terminal_observed_future_inventory_ended_at_cannot_bypass_prune() {
             .jobs_by_id
             .get_mut(&job.job_id)
             .unwrap()
-            .observation.terminal_observed_at = Some(now_ts() - JOB_TERMINAL_RETENTION_SECS);
+            .observation
+            .terminal_observed_at = Some(now_ts() - JOB_TERMINAL_RETENTION_SECS);
     }
     registry_b.record_hidden_cleanup_intent(job.job_id.clone(), None);
 
@@ -1779,7 +1798,8 @@ async fn terminal_observed_completed_job_is_retained_then_pruned() {
     let observed_at = {
         let inner = registry.inner.lock().await;
         inner.jobs_by_id[&job.job_id]
-            .observation.terminal_observed_at
+            .observation
+            .terminal_observed_at
             .expect("normal completed job has Server observation time")
     };
     assert!(observed_at <= now_ts());
@@ -1805,7 +1825,8 @@ async fn terminal_observed_completed_job_is_retained_then_pruned() {
             .jobs_by_id
             .get_mut(&job.job_id)
             .unwrap()
-            .observation.terminal_observed_at = Some(now_ts() - JOB_TERMINAL_RETENTION_SECS);
+            .observation
+            .terminal_observed_at = Some(now_ts() - JOB_TERMINAL_RETENTION_SECS);
     }
     recovery_timeout_sweep(&registry).await;
     assert!(!registry
@@ -1874,7 +1895,8 @@ async fn terminal_observed_missing_internal_time_is_backfilled_before_prune() {
         record.ended_at = Some(ancient_ended_at);
         record.observation.terminal_observed_at = None;
         record
-            .observation.revision
+            .observation
+            .revision
             .load(std::sync::atomic::Ordering::Relaxed)
     };
     let before_sweep = now_ts();
@@ -1893,7 +1915,8 @@ async fn terminal_observed_missing_internal_time_is_backfilled_before_prune() {
         assert_eq!(record.ended_at, Some(ancient_ended_at));
         assert_eq!(
             record
-                .observation.revision
+                .observation
+                .revision
                 .load(std::sync::atomic::Ordering::Relaxed),
             revision_before,
             "internal lifecycle backfill is not a public Job mutation"
@@ -1907,7 +1930,8 @@ async fn terminal_observed_missing_internal_time_is_backfilled_before_prune() {
             .jobs_by_id
             .get_mut(&job.job_id)
             .unwrap()
-            .observation.terminal_observed_at = Some(now_ts() - JOB_TERMINAL_RETENTION_SECS);
+            .observation
+            .terminal_observed_at = Some(now_ts() - JOB_TERMINAL_RETENTION_SECS);
     }
     recovery_timeout_sweep(&registry).await;
     assert!(registry.get_job(&job.job_id).await.is_err());
@@ -1938,10 +1962,12 @@ async fn terminal_observed_sequenced_terminal_classes_are_recorded_once() {
             let record = inner.jobs_by_id.get(&job.job_id).unwrap();
             (
                 record
-                    .observation.terminal_observed_at
+                    .observation
+                    .terminal_observed_at
                     .expect("terminal update has Server observation time"),
                 record
-                    .observation.revision
+                    .observation
+                    .revision
                     .load(std::sync::atomic::Ordering::Relaxed),
             )
         };
@@ -1972,7 +1998,8 @@ async fn terminal_observed_sequenced_terminal_classes_are_recorded_once() {
         assert_eq!(record.observation.terminal_observed_at, Some(observed_at));
         assert_eq!(
             record
-                .observation.revision
+                .observation
+                .revision
                 .load(std::sync::atomic::Ordering::Relaxed),
             revision
         );
@@ -2400,6 +2427,8 @@ fn standalone_snapshot(job_id: &str, status: &str) -> ShellJobSnapshot {
         error: None,
         command_execution_state: None,
         context: ShellJobContext {
+            agent_execution: None,
+            document: None,
             runtime_project_id: None,
             workflow_session_id: None,
             ssh_resource: None,
@@ -2417,6 +2446,93 @@ fn standalone_snapshot(job_id: &str, status: &str) -> ShellJobSnapshot {
         validation_progress: None,
         activity: None,
     }
+}
+
+#[tokio::test]
+async fn document_job_reconciliation_preserves_immutable_continuation_and_rejects_retargeting() {
+    use webcodex_core::runner_protocol::{
+        DocumentJobMetadata, ShellJobStructuredExecutionMetadata,
+    };
+    let mut snapshot = standalone_snapshot("document-recovery", "running");
+    snapshot.context.runtime_project_id = Some(RUNTIME_PROJECT_ID.into());
+    snapshot.context.cwd = Some("/srv/demo".into());
+    snapshot.context.project_cwd = Some(".".into());
+    snapshot.context.shell = Some("direct_argv".into());
+    snapshot.context.structured_execution = Some(ShellJobStructuredExecutionMetadata {
+        execution_source: "run_process".into(),
+        language: None,
+        script_bytes: None,
+        arg_count: 5,
+        stdin_present: true,
+        validation_identity: None,
+        validation_tool: None,
+        assertion_name: None,
+    });
+    snapshot.context.document = Some(DocumentJobMetadata {
+        request_id: "a".repeat(32),
+        operation: "present_document".into(),
+        project_root: "/srv/demo".into(),
+        source_path: "report.pdf".into(),
+        provider_id: "office".into(),
+        provider_instance_id: "office-v1".into(),
+        export_file: false,
+    });
+    let inventory = |item| ShellJobInventory {
+        active_complete: true,
+        jobs: vec![item],
+    };
+    validate_job_inventory(
+        CLIENT_ID,
+        &[project_summary()],
+        &inventory(snapshot.clone()),
+    )
+    .unwrap();
+    let registry = RunnerRegistry::default();
+    register(&registry, INSTANCE_A, inventory(snapshot.clone())).await;
+    assert_eq!(
+        registry.get_job(&snapshot.job_id).await.unwrap().document,
+        snapshot.context.document
+    );
+    for variant in 0..5 {
+        let mut changed = snapshot.clone();
+        match variant {
+            0 => changed.context.document.as_mut().unwrap().request_id = "b".repeat(32),
+            1 => changed.context.document.as_mut().unwrap().source_path = "other.pdf".into(),
+            2 => {
+                changed
+                    .context
+                    .document
+                    .as_mut()
+                    .unwrap()
+                    .provider_instance_id = "office-v2".into()
+            }
+            3 => changed.context.document.as_mut().unwrap().project_root = "/other".into(),
+            _ => changed.context.document = None,
+        }
+        assert!(registry
+            .register(register_request(INSTANCE_A, inventory(changed)))
+            .await
+            .unwrap_err()
+            .contains("inconsistent ownership context"));
+    }
+    for variant in 0..4 {
+        let mut invalid = snapshot.clone();
+        let document = invalid.context.document.as_mut().unwrap();
+        match variant {
+            0 => document.request_id = "../result".into(),
+            1 => document.source_path = "../other.pdf".into(),
+            2 => document.project_root = "relative".into(),
+            _ => invalid.context.structured_execution = None,
+        }
+        assert!(
+            validate_job_inventory_without_project_membership(CLIENT_ID, &inventory(invalid))
+                .is_err()
+        );
+    }
+    assert_eq!(
+        registry.get_job(&snapshot.job_id).await.unwrap().document,
+        snapshot.context.document
+    );
 }
 
 #[tokio::test]
@@ -2745,7 +2861,11 @@ async fn job_reconciliation_malformed_inventory_does_not_mutate_registry() {
         Some(&queued.job_id)
     );
     assert_eq!(
-        inner.jobs_by_id.get(&queued.job_id).unwrap().public_status(),
+        inner
+            .jobs_by_id
+            .get(&queued.job_id)
+            .unwrap()
+            .public_status(),
         "queued"
     );
 }
@@ -2782,13 +2902,12 @@ async fn job_reconciliation_absent_capability_keeps_immediate_lost_semantics() {
 
     let registry = RunnerRegistry::default();
     let mut request = register_request(INSTANCE_A, empty_inventory());
-    request.capabilities =
-        crate::test_support::current_runner_capabilities(RunnerCapabilities {
-            jobs: true,
-            async_jobs: true,
-            async_shell_jobs: true,
-            ..Default::default()
-        });
+    request.capabilities = crate::test_support::current_runner_capabilities(RunnerCapabilities {
+        jobs: true,
+        async_jobs: true,
+        async_shell_jobs: true,
+        ..Default::default()
+    });
     request.job_inventory = None;
     registry.register(request).await.unwrap();
     let job = registry
@@ -2945,10 +3064,12 @@ async fn terminal_observed_recovery_sweep_is_idempotent() {
         let record = inner.jobs_by_id.get(&job.job_id).unwrap();
         (
             record
-                .observation.terminal_observed_at
+                .observation
+                .terminal_observed_at
                 .expect("lost transition has Server observation time"),
             record
-                .observation.revision
+                .observation
+                .revision
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
     };
@@ -2975,7 +3096,8 @@ async fn terminal_observed_recovery_sweep_is_idempotent() {
     );
     assert_eq!(
         record
-            .observation.revision
+            .observation
+            .revision
             .load(std::sync::atomic::Ordering::Relaxed),
         first_revision,
         "no public revision without a public state change"
@@ -3184,7 +3306,8 @@ async fn terminal_observed_late_update_after_timeout_is_idempotent() {
         (
             record.observation.terminal_observed_at.unwrap(),
             record
-                .observation.revision
+                .observation
+                .revision
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
     };
@@ -3225,7 +3348,8 @@ async fn terminal_observed_late_update_after_timeout_is_idempotent() {
     );
     assert_eq!(
         record
-            .observation.revision
+            .observation
+            .revision
             .load(std::sync::atomic::Ordering::Relaxed),
         first_revision
     );

@@ -13,9 +13,12 @@ mod communication;
 mod computer;
 mod diagnostics;
 mod discovery;
+mod documents;
 mod edits;
 mod files;
 mod git;
+mod goals;
+mod host_goals;
 mod hygiene;
 mod jobs;
 mod lsp;
@@ -26,6 +29,7 @@ mod runner_config;
 mod sessions;
 mod skills;
 mod ssh_resources;
+mod team_task;
 mod testing;
 
 use super::metadata::{
@@ -714,6 +718,7 @@ pub const TOOL_CATEGORY_AGENT_TASK: &str = "agent_task";
 pub const TOOL_CATEGORY_ARTIFACT: &str = "artifact";
 pub const TOOL_CATEGORY_CHECKPOINT: &str = "checkpoint";
 pub const TOOL_CATEGORY_CODING_AGENT: &str = "coding_agent";
+pub const TOOL_CATEGORY_GOAL: &str = "goal";
 pub const TOOL_CATEGORY_COMPUTER: &str = "computer";
 pub const TOOL_CATEGORY_COMMUNICATION: &str = "communication";
 pub const TOOL_CATEGORY_CLEANUP: &str = "cleanup";
@@ -987,17 +992,21 @@ const TOOL_DEFINITION_GROUPS: &[&[ToolDefinition]] = &[
     sessions::DEFINITIONS,
     communication::DEFINITIONS,
     agent_tasks::DEFINITIONS,
+    team_task::DEFINITIONS,
     memory::DEFINITIONS,
     skills::DEFINITIONS,
     hygiene::DEFINITIONS,
     checkpoints::DEFINITIONS,
     coding_agents::DEFINITIONS,
+    goals::DEFINITIONS,
+    host_goals::DEFINITIONS,
     computer::DEFINITIONS,
     diagnostics::DEFINITIONS,
     discovery::DEFINITIONS,
     runner_config::DEFINITIONS,
     ssh_resources::DEFINITIONS,
     plugins::DEFINITIONS,
+    documents::DEFINITIONS,
     jobs::EXECUTION_DEFINITIONS,
     files::SEARCH_DEFINITIONS,
     git::SUMMARY_DEFINITIONS,

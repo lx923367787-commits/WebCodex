@@ -3,27 +3,29 @@ use webcodex_runner_registry::{DetachedInitiatorIdentity, RunnerAccess, RunnerAc
 pub(crate) fn runner_access_from_auth(
     auth: Option<&crate::auth::AuthContext>,
 ) -> Option<RunnerAccess> {
-    auth.map(|auth| RunnerAccess {
-        global_visibility: auth.is_admin(),
-        owner_bypass: auth.is_bootstrap(),
-        username: auth.username.clone(),
-        group: match auth.kind {
-            crate::auth::AuthKind::ProjectCredential | crate::auth::AuthKind::AgentToken => auth
-                .project_grant_id
-                .clone()
-                .map(RunnerAccessGroup::ProjectGrant),
-            crate::auth::AuthKind::SharedKey => auth
-                .shared_key_hash
-                .clone()
-                .map(RunnerAccessGroup::SharedKey),
-            crate::auth::AuthKind::OAuth2Token if auth.is_oauth_shared_key_subject() => auth
-                .shared_key_hash
-                .clone()
-                .map(RunnerAccessGroup::SharedKey),
-            crate::auth::AuthKind::OpenAnonymous => Some(RunnerAccessGroup::OpenAnonymous),
-            _ => None,
-        },
-    })
+    auth.filter(|auth| !auth.is_native_host())
+        .map(|auth| RunnerAccess {
+            global_visibility: auth.is_admin(),
+            owner_bypass: auth.is_bootstrap(),
+            username: auth.username.clone(),
+            group: match auth.kind {
+                crate::auth::AuthKind::ProjectCredential | crate::auth::AuthKind::AgentToken => {
+                    auth.project_grant_id
+                        .clone()
+                        .map(RunnerAccessGroup::ProjectGrant)
+                }
+                crate::auth::AuthKind::SharedKey => auth
+                    .shared_key_hash
+                    .clone()
+                    .map(RunnerAccessGroup::SharedKey),
+                crate::auth::AuthKind::OAuth2Token if auth.is_oauth_shared_key_subject() => auth
+                    .shared_key_hash
+                    .clone()
+                    .map(RunnerAccessGroup::SharedKey),
+                crate::auth::AuthKind::OpenAnonymous => Some(RunnerAccessGroup::OpenAnonymous),
+                _ => None,
+            },
+        })
 }
 
 pub(crate) fn detached_initiator_identity_from_auth(
@@ -32,6 +34,9 @@ pub(crate) fn detached_initiator_identity_from_auth(
     let Some(auth) = auth else {
         return Ok(DetachedInitiatorIdentity::internal());
     };
+    if auth.is_native_host() {
+        return Err("native_host_runner_audience_denied".into());
+    }
     if auth.is_bootstrap() {
         return Ok(DetachedInitiatorIdentity::from_stable_principal(
             "bootstrap".to_string(),

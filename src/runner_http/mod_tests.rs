@@ -10,6 +10,8 @@ fn auth_context(username: Option<&str>, is_bootstrap: bool) -> crate::auth::Auth
         ("user".to_string(), Vec::new())
     };
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: if is_bootstrap {
             crate::auth::AuthKind::Bootstrap
         } else {
@@ -40,6 +42,8 @@ fn agent_auth_context(
     scopes: Vec<&str>,
 ) -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::AgentToken,
         user_id: Some(format!("user-{}", username)),
         username: Some(username.to_string()),
@@ -60,6 +64,8 @@ fn open_auth_context() -> crate::auth::AuthContext {
 
 fn oauth_bridge_auth_context(hash: &str, scopes: Vec<&str>) -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::OAuth2Token,
         user_id: None,
         username: None,
@@ -100,6 +106,7 @@ fn runner_registration(
     _projects: Vec<RunnerProjectSummary>,
 ) -> RunnerRegisterRequest {
     RunnerRegisterRequest {
+        agent_execution_resources: Vec::new(),
         process_started_at: None,
         build: None,
         job_concurrency_limit: None,

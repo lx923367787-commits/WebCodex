@@ -50,6 +50,7 @@ impl ToolRuntime {
             Some(Err(error)) => return Err(error.clone().into_tool_result()),
             None => {
                 resolved = self
+                    .execution()
                     .resolve_project_for_auth(project, auth)
                     .await
                     .map_err(ProjectResolverError::into_tool_result)?;

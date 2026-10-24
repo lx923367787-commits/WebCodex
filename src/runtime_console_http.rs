@@ -400,6 +400,10 @@ struct RuntimeConsoleOverview {
     version: Option<String>,
     build_git_commit: Option<String>,
     build_git_dirty: Option<bool>,
+    server_time: Option<i64>,
+    connection_layers: Value,
+    version_compatibility: Value,
+    jobs: Value,
     runner_count: usize,
     runners_online: usize,
     runners_stale: usize,
@@ -1784,6 +1788,7 @@ async fn visible_window_summary_for_auth(
     project_filter: Option<&str>,
 ) -> Result<Option<RuntimeConsoleWindowSummary>, RuntimeConsoleError> {
     let db = runtime
+        .observation
         .window_activity_db
         .as_ref()
         .ok_or(RuntimeConsoleError::Internal)?;
@@ -1843,6 +1848,7 @@ async fn visible_window_summary_for_auth(
 
     let mut active_count = 0usize;
     for request in runtime
+        .observation
         .window_activity
         .list_for_window(window_key, principal)
     {
@@ -1886,6 +1892,7 @@ async fn windows_for_auth(
         authorize_exact_project(runtime, auth, project).await?;
     }
     let db = runtime
+        .observation
         .window_activity_db
         .as_ref()
         .ok_or(RuntimeConsoleError::Internal)?;
@@ -1897,7 +1904,10 @@ async fn windows_for_auth(
     let durable = db
         .list_window_activity_summaries(principal_ref, MAX_WINDOW_LIMIT)
         .map_err(|_| RuntimeConsoleError::Internal)?;
-    let active = runtime.window_activity.active_windows(principal_ref);
+    let active = runtime
+        .observation
+        .window_activity
+        .active_windows(principal_ref);
     let mut by_key = BTreeMap::<String, RuntimeConsoleWindowSummary>::new();
     let total;
     let source_truncated;
@@ -2029,6 +2039,7 @@ async fn window_for_auth(
         return Err(RuntimeConsoleError::Invalid);
     }
     let db = runtime
+        .observation
         .window_activity_db
         .as_ref()
         .ok_or(RuntimeConsoleError::Internal)?;
@@ -2056,6 +2067,7 @@ async fn window_for_auth(
     let mut active_requests = Vec::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
     for request in runtime
+        .observation
         .window_activity
         .list_for_window(&input.client_window_key, principal_ref)
     {
@@ -2210,6 +2222,7 @@ async fn workflow_session_detail_with_windows(
         });
     }
     let db = runtime
+        .observation
         .window_activity_db
         .as_ref()
         .ok_or(RuntimeConsoleError::Internal)?;
@@ -2401,6 +2414,29 @@ async fn overview_for_auth(
         version: safe_string(status.get("version"), 80),
         build_git_commit: safe_string(build.get("git_commit"), 80),
         build_git_dirty: build.get("git_dirty").and_then(Value::as_bool),
+        server_time: status.get("server_time").and_then(Value::as_i64),
+        connection_layers: [
+            "tunnel",
+            "runner_process",
+            "server_transport",
+            "server_registration",
+            "project_registry",
+            "connector_endpoint",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            status
+                .get("connection_layers")?
+                .get(name)
+                .map(|value| (name.to_string(), value.clone()))
+        })
+        .collect::<serde_json::Map<String, Value>>()
+        .into(),
+        version_compatibility: status
+            .get("version_compatibility")
+            .cloned()
+            .unwrap_or(Value::Null),
+        jobs: status.get("jobs").cloned().unwrap_or(Value::Null),
         runner_count,
         runners_online: online,
         runners_stale: stale,
@@ -2955,7 +2991,12 @@ async fn communication_agents(req: &mut Request, depot: &mut Depot, res: &mut Re
     };
     render_communication_result(
         res,
-        runtime.list_agent_identities(Some(&auth), input.agent_id, input.offset, input.limit),
+        runtime.communication.list_agent_identities(
+            Some(&auth),
+            input.agent_id,
+            input.offset,
+            input.limit,
+        ),
     );
 }
 
@@ -2974,7 +3015,7 @@ async fn communication_agent_create(req: &mut Request, depot: &mut Depot, res: &
     };
     render_communication_result(
         res,
-        runtime.create_agent_identity(
+        runtime.communication.create_agent_identity(
             Some(&auth),
             input.handle,
             input.display_name,
@@ -3000,7 +3041,7 @@ async fn communication_agent_update(req: &mut Request, depot: &mut Depot, res: &
     };
     render_communication_result(
         res,
-        runtime.update_agent_identity(
+        runtime.communication.update_agent_identity(
             Some(&auth),
             input.agent_id,
             input.expected_profile_revision,
@@ -3027,7 +3068,7 @@ async fn communication_endpoint_attach(req: &mut Request, depot: &mut Depot, res
     };
     render_communication_result(
         res,
-        runtime.attach_agent_endpoint(
+        runtime.communication.attach_agent_endpoint(
             Some(&auth),
             input.agent_id,
             input.host,
@@ -3052,7 +3093,7 @@ async fn communication_endpoint_renew(req: &mut Request, depot: &mut Depot, res:
     };
     render_communication_result(
         res,
-        runtime.renew_agent_endpoint(
+        runtime.communication.renew_agent_endpoint(
             Some(&auth),
             input.endpoint_id,
             input.expected_controller_generation,
@@ -3075,7 +3116,9 @@ async fn communication_endpoint_detach(req: &mut Request, depot: &mut Depot, res
     };
     render_communication_result(
         res,
-        runtime.detach_agent_endpoint(Some(&auth), input.endpoint_id),
+        runtime
+            .communication
+            .detach_agent_endpoint(Some(&auth), input.endpoint_id),
     );
 }
 
@@ -3094,7 +3137,7 @@ async fn communication_conversations(req: &mut Request, depot: &mut Depot, res: 
     };
     render_communication_result(
         res,
-        runtime.list_conversations(
+        runtime.communication.list_conversations(
             Some(&auth),
             input.agent_id,
             input.endpoint_id,
@@ -3127,7 +3170,7 @@ async fn communication_conversation_create(
     };
     render_communication_result(
         res,
-        runtime.create_conversation(
+        runtime.communication.create_conversation(
             Some(&auth),
             input.title,
             input.agent_ids,
@@ -3151,7 +3194,7 @@ async fn communication_conversation(req: &mut Request, depot: &mut Depot, res: &
     };
     render_communication_result(
         res,
-        runtime.read_conversation(
+        runtime.communication.read_conversation(
             Some(&auth),
             input.conversation_id,
             input.agent_id,
@@ -3178,7 +3221,7 @@ async fn communication_message_post(req: &mut Request, depot: &mut Depot, res: &
     };
     render_communication_result(
         res,
-        runtime.post_conversation_message(
+        runtime.communication.post_conversation_message(
             Some(&auth),
             input.conversation_id,
             input.body,
@@ -3209,7 +3252,7 @@ async fn communication_inbox(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
     render_communication_result(
         res,
-        runtime.list_agent_inbox(
+        runtime.communication.list_agent_inbox(
             Some(&auth),
             input.agent_id,
             input.endpoint_id,
@@ -3235,7 +3278,7 @@ async fn communication_inbox_consume(req: &mut Request, depot: &mut Depot, res: 
     };
     render_communication_result(
         res,
-        runtime.consume_agent_deliveries(
+        runtime.communication.consume_agent_deliveries(
             Some(&auth),
             input.agent_id,
             input.endpoint_id,
@@ -3258,6 +3301,77 @@ mod tests {
     use salvo::test::{ResponseExt, TestClient};
     use salvo::Service;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn overview_preserves_connection_freshness_and_canonical_build_diagnostics() {
+        let runtime = test_runtime();
+        let auth = crate::auth::shared_key_context("runtime-console-diagnostics");
+        let mut registration =
+            crate::test_support::current_runner_registration(RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
+                client_id: "diagnostic-runner".to_string(),
+                runner_instance_id: "diagnostic-instance".to_string(),
+                runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
+                display_name: None,
+                owner: None,
+                hostname: None,
+                host_context: None,
+                capabilities: RunnerCapabilities::default(),
+                policy: None,
+                process_started_at: None,
+                build: None,
+                job_concurrency_limit: None,
+                job_inventory: None,
+                coding_agent_providers: None,
+                coding_agent_inventory: None,
+            });
+        registration.build = Some(crate::runner_protocol::RunnerBuildInfo {
+            version: Some("0.0.0-test-mismatch".to_string()),
+            git_commit: Some("different-build".to_string()),
+            git_dirty: Some(false),
+        });
+        runtime
+            .runner_registry
+            .register_with_auth(
+                registration,
+                Some(&crate::test_support::runner_access(&auth)),
+            )
+            .await
+            .unwrap();
+        let console_overview = overview_for_auth(&runtime, &auth).await.unwrap();
+        assert!(console_overview.server_time.is_some());
+        assert_eq!(
+            console_overview.connection_layers["tunnel"]["status"],
+            "not_observed"
+        );
+        assert!(console_overview
+            .connection_layers
+            .get("last_successful_tool_call")
+            .is_none());
+        assert_eq!(
+            console_overview.connection_layers["server_transport"]["status"],
+            "connected"
+        );
+        assert!(console_overview.mixed_builds_present);
+        assert_eq!(
+            console_overview.runners[0].version_matches_server,
+            Some(false)
+        );
+        assert_eq!(console_overview.jobs["active_count"], 0);
+        runtime
+            .runner_registry
+            .reconcile_disconnect("diagnostic-runner", "diagnostic-instance")
+            .await;
+        let disconnected = overview_for_auth(&runtime, &auth).await.unwrap();
+        assert_eq!(
+            disconnected.connection_layers["server_transport"]["status"],
+            "disconnected"
+        );
+        assert_eq!(
+            disconnected.connection_layers["runner_process"]["status"],
+            "stale"
+        );
+    }
 
     fn project(id: &str, private_path: &str) -> RunnerProjectSummary {
         RunnerProjectSummary {
@@ -3292,6 +3406,7 @@ mod tests {
             .runner_registry
             .register_with_auth(
                 RunnerRegisterRequest {
+                    agent_execution_resources: Vec::new(),
                     process_started_at: None,
                     build: None,
                     job_concurrency_limit: None,
@@ -4475,7 +4590,7 @@ mod tests {
         let client_window = crate::client_window::ClientWindow::for_test("concurrent-window");
         let guards = (0..12)
             .map(|index| {
-                runtime.window_activity.start(
+                runtime.observation.window_activity.start(
                     &client_window,
                     &format!("trace-{index}"),
                     "tools/list",
@@ -4519,9 +4634,11 @@ mod tests {
                 2_000 + index as i64,
             );
         }
-        let _active = runtime
-            .window_activity
-            .start(&old, "old-active", "tools/call", None);
+        let _active =
+            runtime
+                .observation
+                .window_activity
+                .start(&old, "old-active", "tools/call", None);
         let list = windows_for_auth(&runtime, &auth, None, None).await.unwrap();
         assert_eq!(list.total, MAX_WINDOW_LIMIT + 1);
         assert!(list.truncated);
@@ -4639,13 +4756,13 @@ mod tests {
         let pre_resolution_key = pre_resolution_window.key().to_string();
         let (principal_kind, principal_id) =
             crate::tool_runtime::runtime_observation_principal(Some(&auth_a)).unwrap();
-        let _pre_resolution = runtime.window_activity.start(
+        let _pre_resolution = runtime.observation.window_activity.start(
             &pre_resolution_window,
             "trace-pre-resolution",
             "tools/call",
             Some((&principal_kind, &principal_id)),
         );
-        runtime.window_activity.update(
+        runtime.observation.window_activity.update(
             "trace-pre-resolution",
             Some("workspace_hygiene_check"),
             None,

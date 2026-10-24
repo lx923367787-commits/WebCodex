@@ -103,9 +103,11 @@ pub(crate) use pat::{
     is_unique_constraint_error, normalize_token_hash, token_prefix, validate_allowed_client_id,
     validate_role, validate_token_prefix, validate_username,
 };
+#[cfg(test)]
+pub(crate) use shared_key::open_anonymous_context;
 pub(crate) use shared_key::{
-    allow_anonymous_enabled, is_managed_token_prefix, open_anonymous_context, shared_key_context,
-    shared_key_enabled, shared_key_hash_of, DIRECT_SHARED_KEY_MODEL_SCOPES,
+    allow_anonymous_enabled, is_managed_token_prefix, shared_key_context, shared_key_enabled,
+    shared_key_hash_of, DIRECT_SHARED_KEY_MODEL_SCOPES,
 };
 
 /// Root auth policy for OAuth client-secret verification. Persistence returns
@@ -238,19 +240,23 @@ pub(crate) async fn authenticate_bearer(
     db: Option<&Arc<Database>>,
     token: Option<&str>,
 ) -> Option<AuthContext> {
+    // Model run secrets have no Runner/QUIC audience, including local mode.
+    if token.is_some_and(|token| {
+        token.starts_with("wc_ar_")
+            || token.starts_with(webcodex_store::NATIVE_AGENT_HOST_TOKEN_PREFIX)
+    }) {
+        return None;
+    }
     // Auth disabled in development -> bootstrap (full access), identical to
     // AuthMiddleware's behavior. This lets local QUIC integration tests run
     // without a configured token.
     if !config.is_auth_enabled() {
-        return Some(bootstrap_context());
+        return None;
     }
     // No token: only allowed when the server is explicitly --open.
     let token = match token {
         Some(t) => t,
         None => {
-            if allow_anonymous_enabled() {
-                return Some(open_anonymous_context());
-            }
             return None;
         }
     };

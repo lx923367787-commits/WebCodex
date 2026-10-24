@@ -1,9 +1,13 @@
+pub(crate) mod http;
+pub(crate) mod polling;
+
 use super::config::{
     max_concurrent_jobs, project_registry_dir, validate_quic_config, HotRunnerConfig,
     QuicClientConfig, ReloadableRunnerConfig, RunnerConfig,
 };
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use super::detached_job::DetachedJobStore;
+use super::dispatch_request_with_outcome;
 #[cfg(windows)]
 use super::exit_diagnostics::RunnerExitDiagnostics;
 use super::lsp::LspSupervisor;
@@ -26,11 +30,16 @@ use crate::runner_protocol::{
     ShellJobInventory, ShellProjectInventoryPage, ShellProjectInventoryStatus,
     PROJECT_INVENTORY_PAGE_MAX_SERIALIZED_BYTES, PROJECT_INVENTORY_PAGE_MAX_SUMMARIES,
 };
-use crate::{
-    build_register_request_with_provider_status, dispatch_request_with_outcome, handle_one_poll,
-    register, CommandResult, JobManager, PollingDispatchSupervisor, PollingRecoveryAction,
-    RegisterRecoveryAction, RunnerHttpError, RunnerHttpErrorKind,
-};
+use crate::webcodex_runner::jobs::JobManager;
+use crate::webcodex_runner::registration::build_register_request_with_provider_status;
+use crate::webcodex_runner::registration::register;
+use crate::webcodex_runner::registration::RegisterRecoveryAction;
+use crate::webcodex_runner::transport::http::RunnerHttpError;
+use crate::webcodex_runner::transport::http::RunnerHttpErrorKind;
+use crate::webcodex_runner::transport::polling::handle_one_poll;
+use crate::webcodex_runner::transport::polling::PollingDispatchSupervisor;
+use crate::webcodex_runner::transport::polling::PollingRecoveryAction;
+use crate::CommandResult;
 use reqwest::blocking::Client;
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -183,13 +192,44 @@ impl RunnerRuntimeState {
     fn with_shutdown_budget(cfg: &RunnerConfig, path: PathBuf, budget: Duration) -> Self {
         let jobs = JobManager::new(max_concurrent_jobs(cfg))
             .with_detached_profile_identity(&cfg.server_url);
+        let config = Arc::new(ReloadableRunnerConfig::new(cfg.clone(), path));
+        #[cfg(windows)]
+        {
+            let requested = !cfg.agent_execution_resources.profiles.is_empty();
+            if let Ok(durable_root) =
+                DetachedJobStore::default_root_for_runner(&cfg.client_id, &cfg.server_url)
+            {
+                let configured = requested
+                    && super::jobs::agent_resources::validate_profiles(
+                        &cfg.agent_execution_resources,
+                    )
+                    .and_then(|profiles| {
+                        jobs.configure_agent_execution_resources(profiles, durable_root.clone())
+                    })
+                    .is_ok();
+                if configured {
+                    config.set_agent_execution_ready(jobs.agent_execution_ready());
+                } else {
+                    // Existing closed work remains readable after a provider is
+                    // removed/upgraded. This cannot create metadata or enable execution.
+                    let _ = jobs.configure_agent_delivery_history(durable_root);
+                    if requested {
+                        tracing::warn!("isolated Agent execution disabled: local backend/resources unavailable");
+                    }
+                }
+            } else if requested {
+                tracing::warn!(
+                    "isolated Agent execution disabled: local durable identity unavailable"
+                );
+            }
+        }
         // Persistent shells reuse the same authenticated OpenSSH multiplex pool
         // as async jobs: one transport per (session, resource, generation),
         // never a second SSH configuration or connection pool.
         let persistent_shells = PersistentShellManager::new(&cfg.shell, jobs.ssh_pool.clone());
         Self {
             lsp: LspSupervisor::default(),
-            config: Arc::new(ReloadableRunnerConfig::new(cfg.clone(), path)),
+            config,
             jobs,
             persistent_shells,
             coordinator: Arc::new(ShutdownCoordinator::new(budget)),
@@ -1015,6 +1055,62 @@ fn submit_result_http(
 }
 
 impl RunnerSink {
+    /// Delivery only. Keep the durable Runner proof even on Ok: push transports
+    /// only queue it; the authenticated Store bridge owns durable acceptance.
+    pub(crate) fn send_agent_execution_close_receipt(
+        &self,
+        request_id: &str,
+        receipt: &crate::runner_protocol::AgentExecutionCloseReceipt,
+    ) -> Result<(), String> {
+        use crate::runner_protocol::{
+            RunnerAgentExecutionCloseReceiptRequest, RunnerAgentExecutionCloseReceiptResponse,
+            AGENT_EXECUTION_ID_MAX_BYTES, JOB_INVENTORY_MAX_SERIALIZED_BYTES,
+            RUNNER_AGENT_EXECUTION_CLOSE_RECEIPT_PATH,
+        };
+        if request_id.trim().is_empty()
+            || request_id.len() > AGENT_EXECUTION_ID_MAX_BYTES
+            || request_id.chars().any(char::is_control)
+            || receipt.target.client_id != self.client_id()
+            || receipt.target.runner_instance_id != self.runner_instance_id()
+        {
+            return Err("agent_execution_close_transport_identity_mismatch".into());
+        }
+        let body = RunnerAgentExecutionCloseReceiptRequest {
+            request_id: request_id.into(),
+            receipt: receipt.clone(),
+        };
+        if serde_json::to_vec(&body)
+            .map_err(|_| "agent_execution_close_encoding_failed")?
+            .len()
+            > JOB_INVENTORY_MAX_SERIALIZED_BYTES
+        {
+            return Err("agent_execution_close_payload_too_large".into());
+        }
+        match self {
+            RunnerSink::Http(h) => {
+                let response: RunnerAgentExecutionCloseReceiptResponse = post_json_raw(
+                    &h.client,
+                    &h.server_url,
+                    &h.token,
+                    RUNNER_AGENT_EXECUTION_CLOSE_RECEIPT_PATH,
+                    &body,
+                )
+                .map_err(|_| "agent_execution_close_submission_failed")?;
+                if response.stored {
+                    Ok(())
+                } else {
+                    Err("agent_execution_close_not_persisted".into())
+                }
+            }
+            RunnerSink::WebSocket { tx, .. } | RunnerSink::Quic { tx, .. } => tx
+                .try_send(RunnerEnvelope::AgentExecutionCloseReceipt {
+                    request_id: request_id.into(),
+                    receipt: receipt.clone(),
+                })
+                .map_err(|_| "agent_execution_close_delivery_unavailable".into()),
+        }
+    }
+
     pub(crate) fn client_id(&self) -> &str {
         match self {
             RunnerSink::Http(h) => &h.client_id,
@@ -1449,7 +1545,9 @@ where
     T: serde::Serialize + ?Sized,
     R: serde::de::DeserializeOwned,
 {
-    crate::post_json_with_auth(client, server_url, token, path, body)
+    crate::webcodex_runner::transport::http::post_json_with_auth(
+        client, server_url, token, path, body,
+    )
 }
 
 pub(crate) fn non_empty_token(token: &str) -> Option<String> {
@@ -1482,12 +1580,12 @@ pub(crate) fn run_runner(
         .to_string();
     #[cfg(windows)]
     let exit_diagnostics = {
-        let build = crate::runner_build_info();
+        let build = crate::webcodex_runner::registration::runner_build_info();
         match RunnerExitDiagnostics::start(
             &cfg.client_id,
             &cfg.server_url,
             &transport,
-            crate::process_started_at(),
+            crate::webcodex_runner::registration::process_started_at(),
             build.version.as_deref(),
             build.git_commit.as_deref(),
             build.git_dirty,
@@ -2184,7 +2282,7 @@ enum PollFailureDirective {
 
 #[allow(clippy::too_many_arguments)]
 fn handle_poll_failure(
-    error: crate::PollError,
+    error: crate::webcodex_runner::transport::polling::PollError,
     cfg: &RunnerConfig,
     runtime: &RunnerRuntimeState,
     shutdown: &AtomicBool,

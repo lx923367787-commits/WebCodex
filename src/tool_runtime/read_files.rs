@@ -1,5 +1,10 @@
 //! Bounded multi-file reads built from the canonical single-file read core.
 
+#[cfg(test)]
+use super::batch_output::serialized_batch_len;
+use super::batch_output::{
+    batch_output, mark_final_hard_cap_truncation, projected_batch_len, serialized_value_len,
+};
 use super::project_resolution::ResolvedProject;
 use super::{ReadFilesItem, ToolCall, ToolResult, ToolRuntime};
 use futures_util::{stream, StreamExt};
@@ -376,48 +381,6 @@ fn normalized_result_budget(max_result_bytes: Option<usize>) -> usize {
         .clamp(MIN_READ_FILES_RESULT_BYTES, MAX_SERIALIZED_OUTPUT_BYTES)
 }
 
-fn batch_output(
-    project: &str,
-    requested_count: usize,
-    items: Vec<Value>,
-    output_truncated: bool,
-    next_index: Option<usize>,
-    truncation_reason: Option<&str>,
-) -> Value {
-    let succeeded_count = items
-        .iter()
-        .filter(|item| item["success"].as_bool() == Some(true))
-        .count();
-    let returned_count = items.len();
-    let mut output = json!({
-        "project": project,
-        "requested_count": requested_count,
-        "returned_count": returned_count,
-        "succeeded_count": succeeded_count,
-        "failed_count": returned_count - succeeded_count,
-        "items": items,
-        "output_truncated": output_truncated,
-        "next_index": next_index,
-    });
-    if let Some(reason) = truncation_reason {
-        output["truncation_reason"] = json!(reason);
-    }
-    output
-}
-
-#[cfg(test)]
-fn serialized_batch_len(output: &Value) -> usize {
-    serde_json::to_vec(&ToolResult::ok(output.clone()))
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
-}
-
-fn serialized_value_len(value: &Value) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
-}
-
 fn projected_batch_serialized_len(output: &Value, projection: &ReadModelProjection) -> usize {
     let mut projected = ToolResult::ok(output.clone());
     add_actionable_read_continuations(projection, &mut projected);
@@ -456,12 +419,6 @@ fn projected_read_item_len(item: &Value, projection: &ReadModelProjection) -> us
         }
     }
     serialized_value_len(&projected)
-}
-
-fn projected_batch_len(base_len: usize, item_bytes: usize, item_count: usize) -> usize {
-    base_len
-        .saturating_add(item_bytes)
-        .saturating_add(item_count.saturating_sub(1))
 }
 
 fn truncate_read_item(item: &Value, keep_lines: usize) -> Option<Value> {
@@ -711,34 +668,6 @@ fn final_model_result_len(output: &Value, projection: &ReadModelProjection) -> u
         .unwrap_or(usize::MAX)
 }
 
-fn mark_final_hard_cap_truncation(output: &mut Value, next_index: usize) {
-    let Some(root) = output.as_object_mut() else {
-        return;
-    };
-    let (returned_count, succeeded_count) = root
-        .get("items")
-        .and_then(Value::as_array)
-        .map(|items| {
-            (
-                items.len(),
-                items
-                    .iter()
-                    .filter(|item| item["success"].as_bool() == Some(true))
-                    .count(),
-            )
-        })
-        .unwrap_or_default();
-    root.insert("returned_count".to_string(), json!(returned_count));
-    root.insert("succeeded_count".to_string(), json!(succeeded_count));
-    root.insert(
-        "failed_count".to_string(),
-        json!(returned_count.saturating_sub(succeeded_count)),
-    );
-    root.insert("output_truncated".to_string(), json!(true));
-    root.insert("next_index".to_string(), json!(next_index));
-    root.insert("truncation_reason".to_string(), json!("hard_result_cap"));
-}
-
 /// Enforce the repository-wide 256 KiB ceiling against the actual final
 /// serialized ToolResult, including Session/continuity overlays. The primary
 /// batch budget remains independent; this pass only removes/shortens read body
@@ -844,7 +773,7 @@ impl ToolRuntime {
         items: Vec<ReadFilesItem>,
         with_line_numbers: Option<bool>,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(project) => project,
             Err(error) => return ToolResult::err(error),
         };
@@ -867,7 +796,7 @@ impl ToolRuntime {
         let runtime_project_id = resolved.resolved_id.clone();
         let requested_count = items.len();
         let with_line_numbers = with_line_numbers.unwrap_or(false);
-        let deadline = Instant::now() + self.read_files_deadline;
+        let deadline = Instant::now() + self.config.read_files_deadline;
 
         // The concurrency slot covers validation, enqueue, and response wait.
         // No request can reach the Runner until its future is polled by

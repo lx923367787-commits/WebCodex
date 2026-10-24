@@ -58,7 +58,8 @@ fn canonical_runner_feature_wire_names_round_trip() {
 }
 
 #[test]
-fn canonical_runner_feature_set_tracks_each_individual_wire_bool() {
+fn canonical_runner_feature_set_tracks_explicit_wire_bools() {
+    assert!(!RunnerCapabilities::default().agent_isolated_execution_v1());
     let all_false = RunnerFeatureSet::from_wire_for_test(&wire_capabilities_with_only(None));
     for feature in RunnerFeature::all() {
         assert!(!all_false.supports(*feature), "{}", feature.as_wire_name());
@@ -98,6 +99,7 @@ fn capability_classification_keeps_environment_dependent_features_registration_r
         RunnerFeature::ComputerTextInput,
         RunnerFeature::JobStateReconciliation,
         RunnerFeature::CodingAgentRuns,
+        RunnerFeature::AgentIsolatedExecutionV1,
         RunnerFeature::SkillStoreRead,
         RunnerFeature::SkillStoreManage,
         RunnerFeature::ManagedSshResources,
@@ -228,7 +230,7 @@ fn v2_generation_baseline_requires_explicit_bool_projection_without_silent_or() 
 }
 
 #[test]
-fn v2_registration_required_features_are_never_inferred_from_generation() {
+fn v2_registration_required_features_need_explicit_true_not_generation() {
     let baseline = v2_baseline_capabilities();
     let baseline_only = RunnerFeatureSet::try_from_registration(&baseline).unwrap();
 
@@ -277,6 +279,40 @@ fn missing_additive_wire_fields_remain_false_in_canonical_semantics() {
         }
     }
     assert!(!semantics.supports_wire_name("future_runner_feature"));
+}
+
+#[test]
+fn agent_isolated_execution_v1_requires_its_explicit_registration_bit() {
+    let feature = RunnerFeature::AgentIsolatedExecutionV1;
+    assert_eq!(
+        feature.inference(),
+        RunnerFeatureInference::RegistrationRequired
+    );
+    assert_eq!(feature.as_wire_name(), "agent_isolated_execution_v1");
+
+    // Even every existing execution/OS-related capability plus the complete
+    // generation baseline cannot imply this distinct isolation contract.
+    let mut capabilities = v2_baseline_capabilities();
+    for other in RunnerFeature::all()
+        .iter()
+        .copied()
+        .filter(|other| *other != feature)
+    {
+        capabilities = with_wire_feature(&capabilities, other, true);
+    }
+    let absent = RunnerFeatureSet::try_from_registration(&capabilities).unwrap();
+    assert!(!absent.supports(feature));
+    assert!(!absent.supports_wire_name(feature.as_wire_name()));
+
+    let injected = with_wire_feature(&capabilities, feature, true);
+    let reserved = RunnerFeatureSet::try_from_registration(&injected).unwrap();
+    assert!(reserved.supports(feature));
+    assert!(reserved.supports_wire_name(feature.as_wire_name()));
+    assert!(reserved.wire_capabilities().agent_isolated_execution_v1());
+    assert_eq!(
+        serde_json::to_value(reserved.wire_capabilities()).unwrap()[feature.as_wire_name()],
+        serde_json::json!(true)
+    );
 }
 
 #[tokio::test]

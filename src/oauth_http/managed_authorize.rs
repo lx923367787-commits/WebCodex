@@ -850,7 +850,12 @@ pub(crate) async fn oauth_authorize_consent(
 }
 
 pub(super) fn is_authorize_identity_allowed(ctx: &AuthContext) -> bool {
-    matches!(ctx.kind, AuthKind::Bootstrap | AuthKind::ApiToken)
+    // These HandlerManaged routes bypass AuthMiddleware. A model run must
+    // never be exchanged for the owning user's browser session or OAuth grant,
+    // even if an adapter accidentally projects it as an ordinary API token.
+    ctx.agent_run.is_none()
+        && !ctx.is_native_host()
+        && matches!(ctx.kind, AuthKind::Bootstrap | AuthKind::ApiToken)
 }
 
 /// Authorization endpoint.

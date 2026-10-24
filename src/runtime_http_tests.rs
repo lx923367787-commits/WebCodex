@@ -251,6 +251,8 @@ fn build_projects_router(
                     Router::with_path("projects/git_diff_summary").post(projects_git_diff_summary),
                 )
                 .push(Router::with_path("jobs/list").post(jobs_list))
+                .push(Router::with_path("jobs/status").post(job_status))
+                .push(Router::with_path("jobs/log").post(job_log))
                 .push(Router::with_path("jobs/stop").post(job_stop))
                 .push(Router::with_path("jobs/tail").post(job_tail))
                 .push(Router::with_path("runtime/status").post(runtime_status)),
@@ -270,6 +272,7 @@ async fn register_import_agent_with_capabilities(
     registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -320,6 +323,127 @@ async fn register_import_agent_with_capabilities(
 
 async fn register_import_agent(root: &std::path::Path) -> (Arc<ToolRuntime>, Arc<RunnerRegistry>) {
     register_import_agent_with_capabilities(root, None).await
+}
+
+#[tokio::test]
+async fn dedicated_http_actions_reject_discarded_execution_constraints_before_runner_dispatch() {
+    let config = test_config(Some("secret"));
+    let (_temp, db) = test_db();
+    let project_root = tempfile::tempdir().unwrap();
+    let (runtime, registry) = register_import_agent(project_root.path()).await;
+    let service = Service::new(build_projects_router(config, db, runtime));
+    let project = "agent:importer:demo";
+    for (route, arguments) in [
+        (
+            "projects/register",
+            json!({"client_id":"importer","id":"new","name":"New","path":project_root.path()}),
+        ),
+        (
+            "projects/create",
+            json!({"client_id":"importer","id":"new","name":"New","path":project_root.path().join("new")}),
+        ),
+        (
+            "projects/read_file",
+            json!({"project":project,"path":"README.md"}),
+        ),
+        ("projects/git_status", json!({"project":project})),
+        ("projects/git_diff", json!({"project":project})),
+        ("projects/git_diff_summary", json!({"project":project})),
+        ("projects/list_files", json!({"project":project})),
+        (
+            "projects/search_text",
+            json!({"project":project,"pattern":"hello"}),
+        ),
+        (
+            "projects/apply_unified_diff",
+            json!({"project":project,"diff":"patch"}),
+        ),
+        (
+            "projects/git_restore_paths",
+            json!({"project":project,"paths":["README.md"]}),
+        ),
+        (
+            "projects/discard_untracked",
+            json!({"project":project,"paths":["untracked.txt"]}),
+        ),
+        (
+            "projects/run_shell",
+            json!({"project":project,"command":"must-not-run"}),
+        ),
+        (
+            "projects/run_job",
+            json!({"project":project,"command":"must-not-run"}),
+        ),
+        ("jobs/list", json!({"project":project})),
+        ("jobs/status", json!({"job_id":"unrelated-job"})),
+        ("jobs/log", json!({"job_id":"unrelated-job"})),
+        ("jobs/tail", json!({"job_id":"unrelated-job"})),
+        ("jobs/stop", json!({"job_id":"unrelated-job"})),
+        (
+            "artifacts/import",
+            json!({"project":project,"openaiFileIdRefs":[]}),
+        ),
+    ] {
+        for field in ["target", "preconditions", "success_conditions"] {
+            let mut invalid = arguments.clone();
+            invalid[field] = json!({"must_be_enforced":true});
+            let mut response = tokio::time::timeout(
+                Duration::from_secs(2),
+                TestClient::post(format!("http://localhost/api/{route}"))
+                    .bearer_auth("secret")
+                    .json(&invalid)
+                    .send(&service),
+            )
+            .await
+            .expect("invalid action must not wait for a Runner response");
+            assert_eq!(
+                effective_status(&response),
+                StatusCode::BAD_REQUEST,
+                "{route}: {field}"
+            );
+            let body: Value = response.take_json().await.unwrap();
+            let error = body["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("unknown field") && error.contains(field),
+                "{route}: {field}: {body}"
+            );
+        }
+    }
+    // Retired fields are rejected even when their value is null, which used to
+    // bypass Option<Value> sentinels before ordinary create dispatch.
+    for field in ["managed_temporary_project", "allow_existing_empty"] {
+        let mut arguments = json!({"client_id":"importer","id":"new","name":"New","path":project_root.path().join("new")});
+        arguments[field] = Value::Null;
+        let mut response = TestClient::post("http://localhost/api/projects/create")
+            .bearer_auth("secret")
+            .json(&arguments)
+            .send(&service)
+            .await;
+        assert_eq!(effective_status(&response), StatusCode::BAD_REQUEST);
+        let body: Value = response.take_json().await.unwrap();
+        assert!(body["error"].as_str().unwrap_or_default().contains(field));
+    }
+    let mut response = TestClient::post("http://localhost/api/artifacts/import")
+        .bearer_auth("secret")
+        .json(&json!({"project":project,"openaiFileIdRefs":[{"download_link":"https://files.oaiusercontent.com/file","target":"other-project"}]}))
+        .send(&service).await;
+    assert_eq!(effective_status(&response), StatusCode::BAD_REQUEST);
+    let body: Value = response.take_json().await.unwrap();
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("unknown field"));
+    assert!(
+        registry
+            .poll(crate::runner_protocol::RunnerPollRequest {
+                client_id: "importer".into(),
+                runner_instance_id: "inst-import".into(),
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "rejected actions must not enqueue Runner requests"
+    );
 }
 
 async fn complete_one_agent_request(
@@ -835,16 +959,104 @@ async fn http_start_coding_task_uses_ordinary_unknown_tool_path() {
 }
 
 #[test]
-fn extract_tool_call_params_precede_flattened_fields() {
-    let (tool, params) = extract_tool_call(&json!({
-        "tool": "git_status",
-        "project": "wrong",
-        "params": {"project": "right"},
-    }))
-    .unwrap();
+fn extract_tool_call_rejects_invalid_recorder_metadata() {
+    for value in [
+        Value::Null,
+        json!(false),
+        json!(42),
+        json!([]),
+        json!(""),
+        json!("  "),
+    ] {
+        let input = json!({"tool":"list_projects", "recording_session_id":value});
+        assert!(extract_tool_call(&input)
+            .unwrap_err()
+            .contains("recording_session_id"));
+    }
+}
 
-    assert_eq!(tool, "git_status");
-    assert_eq!(params, json!({"project": "right"}));
+#[test]
+fn extract_tool_call_rejects_mixed_argument_envelopes() {
+    for (field, value) in [
+        ("project", json!("private-wrong-target")),
+        ("expected_sha256", json!("private-precondition")),
+        ("expected_failure", json!("false")),
+        ("unknown_business_field", json!(true)),
+        ("project", Value::Null),
+    ] {
+        let mut request = json!({"tool":"git_status","params":{"project":"right"}});
+        request[field] = value;
+        let error = extract_tool_call(&request).unwrap_err();
+        assert!(error.contains(field), "{error}");
+        assert!(error.contains("outside non-null 'params'"), "{error}");
+        assert!(!error.contains("private-"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn http_tools_call_rejects_misplaced_preconditions_before_runner_dispatch() {
+    use crate::runner_protocol::{RunnerCapabilities, RunnerPollRequest};
+
+    let config = test_config(Some("secret"));
+    let (_tmp, db) = test_db();
+    let project = tempfile::tempdir().unwrap();
+    let (runtime, registry) = register_import_agent_with_capabilities(
+        project.path(),
+        Some(RunnerCapabilities {
+            file_write: true,
+            ..Default::default()
+        }),
+    )
+    .await;
+    let service = Service::new(build_projects_router(config, db, runtime));
+    for (field, value) in [
+        ("expected_sha256", json!("a".repeat(64))),
+        ("path", json!("different-target.txt")),
+        ("unknown_business_field", Value::Null),
+    ] {
+        let mut request = json!({
+            "tool":"write_project_file",
+            "params":{"project":"agent:importer:demo","path":"must-not-write.txt","content":"text"}
+        });
+        request[field] = value;
+        let (status, response) =
+            tokio::time::timeout(Duration::from_secs(5), http_tool_call(&service, request))
+                .await
+                .expect("invalid envelope must be rejected before waiting on a Runner");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert!(response["error"].as_str().unwrap().contains(field));
+        assert!(registry
+            .poll(RunnerPollRequest {
+                client_id: "importer".into(),
+                runner_instance_id: "inst-import".into(),
+            })
+            .await
+            .unwrap()
+            .is_none());
+    }
+    assert!(!project.path().join("must-not-write.txt").exists());
+}
+
+#[test]
+fn host_goal_http_wrapper_metadata_survives_both_argument_envelopes() {
+    let context = json!({"goal_id":"wc_goal_test","node_id":"step","attempt_id":"attempt","plan_version":1,"fence":1,"operation_id":"op"});
+    let nested = json!({"tool":"plugin_tool","params":{"action":"list"},"goal_context":context,"context_epoch":"conversation-1"});
+    let flattened = json!({"tool":"plugin_tool","action":"list","goal_context":context,"context_epoch":"conversation-1"});
+    for input in [nested, flattened] {
+        let (tool, arguments) = extract_tool_call(&input).unwrap();
+        assert_eq!(tool, "plugin_tool");
+        assert_eq!(arguments["goal_context"], context);
+        assert_eq!(arguments["context_epoch"], "conversation-1");
+        assert_eq!(arguments["action"], "list");
+    }
+    for field in ["goal_context", "context_epoch"] {
+        let mut input = json!({"tool":"plugin_tool","params":{"action":"list"}});
+        input[field] = json!("private-outer");
+        input["params"][field] = json!("private-inner");
+        let error = extract_tool_call(&input).unwrap_err();
+        assert!(error.contains("both outside and inside"));
+        assert!(!error.contains("private-"));
+    }
 }
 
 #[test]

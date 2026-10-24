@@ -42,6 +42,7 @@ async fn activation_stops_if_connection_identity_changes_during_config_retry() {
             std::fs::write(&token_file, "wc_pat_project_activation_test").unwrap();
 
             let error = run_project_activate(ProjectActivateOptions {
+                expected_project_path: None,
                 config: config_path.clone(),
                 user_token_file: token_file,
                 project,

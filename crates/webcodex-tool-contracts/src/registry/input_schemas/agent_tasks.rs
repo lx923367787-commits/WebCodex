@@ -180,8 +180,8 @@ pub fn start_agent_task_coding_run_input_schema() -> Value {
             "type": "integer",
             "minimum": CODING_AGENT_TIMEOUT_MIN_SECS,
             "maximum": CODING_AGENT_TIMEOUT_MAX_SECS,
-            "default": 300,
-            "description": "Total CodingAgentRun budget. It participates in immutable binding intent."
+            "default": webcodex_core::coding_agent::CODING_AGENT_LONG_RESPONSE_TIMEOUT_SECS,
+            "description": "Wait for this delegated long-task AI response (default 900s, maximum 3600s), including provider setup. It participates in immutable binding intent and does not limit the parent Agent Task or WebCodex workflow lifetime."
         }),
     );
     json!({

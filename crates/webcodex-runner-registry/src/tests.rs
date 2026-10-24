@@ -67,6 +67,7 @@ fn runner_registration(
     _projects: Vec<RunnerProjectSummary>,
 ) -> RunnerRegisterRequest {
     RunnerRegisterRequest {
+        agent_execution_resources: Vec::new(),
         process_started_at: None,
         build: None,
         job_concurrency_limit: None,
@@ -135,6 +136,7 @@ async fn register_computer_test_runner(
 ) {
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -167,6 +169,7 @@ async fn register_computer_test_runner(
 async fn register_quic_v1_runner(registry: &RunnerRegistry, client_id: &str) {
     registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -199,6 +202,7 @@ async fn register_instance_with_capabilities(
 ) -> Result<RunnerView, String> {
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -237,6 +241,7 @@ async fn register_with_instance(
 ) -> RunnerView {
     registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,

@@ -587,7 +587,7 @@ impl ToolRuntime {
             Err(error) => return input_rejection(error),
         };
 
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(project) => project,
             Err(error) => {
                 return pre_apply_rejection(error, &analysis, "project_unavailable", "fix_project")

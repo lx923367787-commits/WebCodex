@@ -734,6 +734,7 @@ impl ToolRuntime {
         // Pre-execution validation happens before any execution is created, so
         // a rejection never leaves a Job or a running process behind.
         let resolved = match self
+            .execution()
             .resolve_project_for_auth(&request.project, request.auth)
             .await
         {
@@ -907,6 +908,7 @@ impl ToolRuntime {
                 },
                 "tool_runtime".to_string(),
                 ShellJobStartMetadata {
+                    document: None,
                     project_id: Some(project.to_string()),
                     session_id: session_id.clone(),
                     ssh_resource: ssh_resource.map(str::to_string),
@@ -995,6 +997,7 @@ impl ToolRuntime {
         // is cheap and total sleep stays bounded by that grace. The wait is
         // taken from the runtime's injectable clock so tests can shrink it.
         let wait = self
+            .config
             .validation_sync_wait
             .min(std::time::Duration::from_secs(sync_wait_secs));
         let deadline = std::time::Instant::now() + wait;
@@ -1409,7 +1412,7 @@ impl ToolRuntime {
         timeout_secs: u64,
         adapter: &'static dyn ValidationAdapter,
     ) -> ToolResult {
-        let config = match self.resolve_project(&project).await {
+        let config = match self.execution().resolve_project(&project).await {
             Ok(config) => config,
             Err(e) => {
                 return ToolResult::err(command_rejected_message(

@@ -5,11 +5,13 @@ use salvo::prelude::*;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobStatusRequest {
     pub job_id: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobLogRequest {
     pub job_id: String,
     #[serde(default)]
@@ -23,11 +25,13 @@ struct JobLogRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobStopRequest {
     pub job_id: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunShellRequest {
     pub project: String,
     pub command: String,
@@ -47,6 +51,7 @@ struct RunShellRequest {
 /// callRuntimeTool / MCP tools/call. Poll with `getRuntimeJobStatus` and read
 /// output with `getRuntimeJobTail` / `getRuntimeJobLog`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StartProjectShellJobRequest {
     pub project: String,
     pub command: String,
@@ -59,6 +64,7 @@ struct StartProjectShellJobRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListJobsRequest {
     #[serde(default)]
     pub limit: Option<usize>,
@@ -71,6 +77,7 @@ struct ListJobsRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobTailRequest {
     pub job_id: String,
     #[serde(default)]

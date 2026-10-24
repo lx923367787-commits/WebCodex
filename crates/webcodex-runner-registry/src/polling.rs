@@ -92,6 +92,14 @@ impl RunnerRegistry {
             let Some(request_id) = request_id else {
                 return Ok(None);
             };
+            if let Some(error) = inner
+                .pending_by_id
+                .get(&request_id)
+                .and_then(|pending| crate::agent_cli::validate_pending(&inner, pending).err())
+            {
+                crate::agent_cli::reject_pending(&mut inner, &request_id, error);
+                continue;
+            }
             let stale_runner_config_error =
                 inner.pending_by_id.get(&request_id).and_then(|pending| {
                     match (
@@ -566,6 +574,39 @@ impl RunnerRegistry {
                 inner.persistent_waiters.remove(&request_id);
                 continue;
             }
+            if let Some(error) = inner.pending_by_id.get(&request_id).and_then(|pending| {
+                crate::agent_execution::dispatch_fence(&inner, &pending.operation).err()
+            }) {
+                // A delayed isolated start cannot move to another instance or
+                // cross a close. Preserve its original Job as unresolved.
+                if let Some(pending) =
+                    super::requests::remove_pending_request_locked(&mut inner, &request_id)
+                {
+                    if let Some(job) = pending
+                        .job_id
+                        .as_ref()
+                        .and_then(|id| inner.jobs_by_id.get_mut(id))
+                    {
+                        job.error = Some(error);
+                        super::jobs::notify_job_update(job);
+                    }
+                }
+                continue;
+            }
+            if let Some(close) = inner.agent_execution_closes.get_mut(&request_id) {
+                close.dispatched = true;
+            }
+            let isolated_job_id = inner
+                .pending_by_id
+                .get(&request_id)
+                .and_then(|pending| pending.job_id.clone());
+            if let Some(state) = isolated_job_id
+                .as_ref()
+                .and_then(|id| inner.jobs_by_id.get_mut(id))
+                .and_then(|job| job.agent_execution.as_mut())
+            {
+                state.transport_dispatched = true;
+            }
             let Some((request, operation, job_id)) =
                 inner.pending_by_id.get_mut(&request_id).map(|pending| {
                     pending.dispatched = true;
@@ -662,6 +703,28 @@ impl RunnerRegistry {
         };
         if pending.request.client_id != body.client_id {
             return Err("request_id does not belong to client_id".to_string());
+        }
+        if crate::agent_cli::is_query(&pending.operation) {
+            if expected_connection_id.is_some_and(|expected| {
+                inner
+                    .runners
+                    .get(&body.client_id)
+                    .and_then(|runner| runner.connection_id.as_deref())
+                    != Some(expected)
+            }) {
+                return Err("agent_cli_stale_connection".into());
+            }
+            if let Err(error) = crate::agent_cli::validate_pending(&inner, pending) {
+                crate::agent_cli::reject_pending(&mut inner, &body.request_id, error.clone());
+                return Err(error);
+            }
+        }
+        if matches!(
+            &pending.operation,
+            RunnerOperation::AgentExecutionClose(_)
+                | RunnerOperation::Job(RunnerJobOperation::StartIsolatedProcess(_))
+        ) {
+            return Err("agent_execution_typed_observation_required".into());
         }
         if !matches!(&pending.operation, RunnerOperation::CodingAgent(_))
             && payload.coding_agent.is_some()
@@ -806,7 +869,9 @@ impl RunnerRegistry {
         let request_id = body.request_id.clone();
         let client_id = body.client_id.clone();
         let error = body.error.clone();
-        let stdout = if pending.operation.is_large_native_image_request() {
+        let stdout = if matches!(&pending.operation, RunnerOperation::AgentCliDelivery(_)) {
+            truncate_output_to(body.stdout, crate::agent_cli::DELIVERY_RESPONSE_MAX_BYTES)
+        } else if pending.operation.is_large_native_image_request() {
             truncate_output_to(
                 body.stdout,
                 webcodex_core::artifact_policy::MAX_MCP_IMAGE_RESPONSE_BYTES,

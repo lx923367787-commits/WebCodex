@@ -54,7 +54,11 @@ impl ToolRuntime {
         {
             return result;
         }
-        let resolved = match self.resolve_project_input_for_auth(&project, auth).await {
+        let resolved = match self
+            .execution()
+            .resolve_project_input_for_auth(&project, auth)
+            .await
+        {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };
@@ -271,14 +275,20 @@ impl ToolRuntime {
         // deliberately stronger than a per-Session lock because candidate
         // acquisition itself is batched across Sessions.
         #[cfg(test)]
-        self.validation_terminal_reconciliation_test_hook
+        self.validation
+            .validation_terminal_reconciliation_test_hook
             .before_reconciliation_lock();
-        let _reconciliation_guard = self.validation_terminal_reconciliation.lock().await;
+        let _reconciliation_guard = self
+            .validation
+            .validation_terminal_reconciliation
+            .lock()
+            .await;
         let mut grouped = self
             .validation_job_candidates_for_sessions(project, session_ids, auth)
             .await;
         #[cfg(test)]
-        self.validation_terminal_reconciliation_test_hook
+        self.validation
+            .validation_terminal_reconciliation_test_hook
             .after_snapshot_acquired()
             .await;
         for session_id in session_ids {

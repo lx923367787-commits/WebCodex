@@ -235,6 +235,42 @@ pub struct ProjectSelection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegisteredProject {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub revision: String,
+    pub enabled: bool,
+    pub connected: bool,
+    pub agent_status: String,
+    pub active_jobs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectRegistrySnapshot {
+    pub projects: Vec<RegisteredProject>,
+    pub can_manage: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectAction {
+    Enable,
+    Disable,
+    Unregister,
+}
+
+impl ProjectAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+            Self::Unregister => "unregister",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BinaryInfo {
     pub directory: String,
     pub version: String,
@@ -263,10 +299,34 @@ pub enum RegularTunnelStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegularTunnelState {
     pub provider: String,
+    #[serde(default, deserialize_with = "deserialize_native_host_id")]
+    pub host_id: Option<String>,
     pub status: RegularTunnelStatus,
     pub clipboard_state: String,
     pub clipboard_contains: String,
     pub ready_for_chatgpt: bool,
+}
+
+pub(crate) fn deserialize_native_host_id<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    if value.as_deref().is_some_and(|id| !is_native_host_id(id)) {
+        return Err(serde::de::Error::custom("invalid_native_host_id"));
+    }
+    Ok(value)
+}
+
+pub(crate) fn is_native_host_id(id: &str) -> bool {
+    id.strip_prefix("wc_host_").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +334,7 @@ pub struct RegularTunnelState {
 pub enum DesktopOperationKind {
     LocalSetup,
     LocalProjectActivate,
+    ProjectManagement,
     RemoteSetup,
     QuickShareStart,
     QuickShareStop,
@@ -291,6 +352,7 @@ impl DesktopOperationKind {
         match self {
             Self::LocalSetup => "local_setup",
             Self::LocalProjectActivate => "local_project_activate",
+            Self::ProjectManagement => "project_management",
             Self::RemoteSetup => "remote_setup",
             Self::QuickShareStart => "quick_share_start",
             Self::QuickShareStop => "quick_share_stop",
@@ -462,6 +524,9 @@ pub struct StoredDesktopConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredRuntime {
     pub server_url: String,
+    /// A current owned Tunnel ready observation, never a credential or cached authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_host_id: Option<String>,
     pub server_env_file: Option<PathBuf>,
     pub runner_config: Option<PathBuf>,
     pub user_token_file: Option<PathBuf>,

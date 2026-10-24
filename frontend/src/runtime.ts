@@ -1,3 +1,4 @@
+import { GoalPanel, GOAL_ZH_TEXT } from "./goal_panel.js";
 import {
   workflowSessionOverviewPresentation,
   workflowSessionLivenessPresentation,
@@ -8,6 +9,11 @@ import {
 } from "./workflow_session_state.js";
 import {
   initialRuntimeConsoleState,
+  runtimeDiagnostics,
+  runtimeOverviewFreshUntil,
+  runtimeProjectProjection,
+  RUNTIME_OVERVIEW_STALE_MS,
+  fetchRuntimeResponse,
   runtimeDeviceIds,
   runtimeProjectsForDevice,
   filterAndSortRuntimeProjects,
@@ -80,6 +86,12 @@ type RuntimeLanguage = "en" | "zh-CN";
 type RuntimeWorkspaceView = "sessions" | "operations" | "windows";
 
 const RUNTIME_ZH_TEXT: Record<string, string> = {
+  ...GOAL_ZH_TEXT,
+  "degraded": "降级",
+  "unconfigured": "未配置",
+  "Runner transport": "Runner 连接",
+  "Build consistency": "构建一致性",
+  "Last observed": "上次观测，当前未验证",
   "Your workspace": "你的工作空间",
   "Pick up where work happens": "从这里继续工作",
   "Find a project": "查找项目",
@@ -479,6 +491,10 @@ let homeProjectRows: any[] = [];
 let runnerRows: any[] = [];
 let recentSessionRows: any[] = [];
 let runtimeOverviewSnapshot: any | null = null;
+let runtimeOverviewReceivedAt = 0;
+let runtimeOverviewFailure: string | null = null;
+let runtimeOverviewExpiryTimer = 0;
+let runtimeProjectsExpiryTimer = 0;
 let recentSessionMetaSnapshot: any | null = null;
 let projectSearch = "";
 let projectDeviceFilter = "";
@@ -533,6 +549,13 @@ let pendingAgentCreate: { fingerprint: string; key: string } | null = null;
 let pendingConversationCreate: { fingerprint: string; key: string } | null = null;
 let pendingConversationMessage: { fingerprint: string; key: string } | null = null;
 const pageAttachmentId = "runtime-console-" + operationKey("page");
+const goalPanel = new GoalPanel(document.getElementById("runtime-operations-goals")!, {
+  context: () => ({ key: String(state.credentialGeneration), project: String(state.selectedProject || ""), connected: !!token }),
+  call: (tool, params) => api("tools/call", { tool, params }, undefined, "/api/"),
+  translate: tr,
+  operationKey: () => operationKey("goal"),
+  unauthorized: () => lock("Runtime credential expired or was rejected."),
+});
 
 function el(id: string): HTMLElement | null {
   return document.getElementById(id);
@@ -591,7 +614,7 @@ function captureStaticUiSources(): void {
 }
 
 function renderLanguageSensitiveUi(): void {
-  renderRuntimeOverviewMetrics(runtimeOverviewSnapshot);
+  renderRuntimeDiagnostics();
   if (projectRows.length || knownProjectDevices.length || runnerRows.length) {
     renderProjectSelectors(projectRows, projectRowsTruncated);
   } else {
@@ -605,6 +628,7 @@ function renderLanguageSensitiveUi(): void {
   else if (!state.workflow?.selectedSessionId) hideDetail();
   if (!snapshot) renderCollaboration(undefined, false);
   renderCommunicationSurface();
+  goalPanel.sync();
   syncCollaborationComposer();
   renderWorkspaceHeading();
   setRuntimeConnectionState(token ? "connected" : "disconnected");
@@ -750,11 +774,14 @@ function revealOperationsSection(targetId: string): void {
   const scroll = document.querySelector(".operations-scroll");
   if (scroll) scroll.scrollTop = 0;
   el(targetId)?.focus({ preventScroll: true });
+  if (targetId === "runtime-operations-goals") void goalPanel.refresh();
 }
 
 type RuntimeConnectionState = "connected" | "connecting" | "stale" | "disconnected";
 
 function setRuntimeConnectionState(connection: RuntimeConnectionState): void {
+  const overviewFailed = runtimeOverviewFailure && runtimeOverviewFailure !== "runtime_read_unavailable";
+  if (connection === "connected" && (overviewFailed || (runtimeOverviewReceivedAt > 0 && !runtimeOverviewIsFresh()))) connection = "stale";
   const label = connection === "connected"
     ? tr("Connected")
     : connection === "connecting"
@@ -1277,21 +1304,13 @@ function abortAll(): void {
   windowDetailAbort = null;
 }
 
-async function api(path: string, payload: any, signal?: AbortSignal): Promise<any> {
-  try {
-    const response = await fetch(API_BASE + path, {
-      method: "POST",
-      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal,
-    });
-    let data: any = null;
-    try { data = await response.json(); } catch { data = null; }
-    return { ok: response.ok, status: response.status, data };
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") return null;
-    return { ok: false, status: 0, data: null };
-  }
+async function api(path: string, payload: any, signal?: AbortSignal, base = API_BASE): Promise<any> {
+  return fetchRuntimeResponse(base + path, {
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
 }
 
 function windowDateTimeLabel(timestampMs: unknown): string {
@@ -1705,11 +1724,16 @@ function lock(message = "", clearRemembered = true): void {
   }
   abortAll();
   invalidateRuntimeCredential(state);
+  goalPanel.sync();
   projectRows = [];
   homeProjectRows = [];
   runnerRows = [];
   recentSessionRows = [];
   runtimeOverviewSnapshot = null;
+  runtimeOverviewReceivedAt = 0;
+  runtimeOverviewFailure = null;
+  window.clearTimeout(runtimeOverviewExpiryTimer);
+  window.clearTimeout(runtimeProjectsExpiryTimer);
   recentSessionMetaSnapshot = null;
   projectRowsTotal = 0;
   projectRowsTruncated = false;
@@ -1797,7 +1821,45 @@ function attentionLabel(attention: any): string {
   return parts.length ? parts.join(" · ") : tr("No retained pending attention");
 }
 
+function runtimeOverviewIsFresh(): boolean {
+  return runtimeOverviewReceivedAt > 0 && !runtimeOverviewFailure
+    && Date.now() >= runtimeOverviewReceivedAt
+    && Date.now() < runtimeOverviewFreshUntil(runtimeOverviewSnapshot, runtimeOverviewReceivedAt);
+}
+
+function renderRuntimeDiagnostics(): void {
+  const node = el("runtime-diagnostics");
+  clearNode(node);
+  if (!node) return;
+  for (const diagnostic of runtimeDiagnostics(runtimeOverviewSnapshot, runtimeOverviewReceivedAt, Date.now(), runtimeOverviewFailure)) {
+    const row = document.createElement("div");
+    row.className = "runtime-diagnostic";
+    row.dataset.status = diagnostic.status;
+    const title = document.createElement("strong");
+    title.textContent = tr(diagnostic.name) + " · " + tr(diagnostic.status);
+    const reason = document.createElement("span");
+    reason.className = "muted small";
+    reason.textContent = diagnostic.reason;
+    row.append(title, reason);
+    node.appendChild(row);
+  }
+  setText("runtime-diagnostics-note", runtimeLanguage === "zh-CN"
+    ? "连接恢复不代表任务成功。未知结果需核对原 Operation / Job；不会自动重新执行。" : "Connection recovery does not prove task success. Reconcile the original Operation / Job; unknown results are never automatically replayed.");
+  setText("runtime-observation-age", runtimeOverviewIsFresh()
+    ? new Date(runtimeOverviewReceivedAt).toLocaleTimeString() : tr("refresh unavailable") + " · " + tr("unknown"));
+  renderRunnerFleet(runnerRows);
+  renderRuntimeOverviewMetrics(runtimeOverviewSnapshot);
+  renderRecentSessions(recentSessionRows, recentSessionMetaSnapshot);
+  renderProjectSelectors(projectRows, projectRowsTruncated);
+}
+
 function renderRuntimeOverviewMetrics(data: any): void {
+  if (!runtimeOverviewIsFresh()) {
+    for (const id of ["runtime-server-runners", "runtime-server-alignment", "runtime-server-projects", "runtime-server-jobs", "runtime-server-attention", "runtime-server-sessions", "runtime-recent-status"]) {
+      setText(id, tr("unknown") + " · " + tr("Last observed"));
+    }
+    return;
+  }
   if (!data) return;
   setText("runtime-server-identity", [data.service, data.version].filter(Boolean).join(" · "));
   setText("runtime-server-build", data.build_git_commit
@@ -1822,6 +1884,7 @@ async function fetchOverview(request: any): Promise<boolean> {
   abort(overviewAbort);
   const controller = new AbortController();
   overviewAbort = controller;
+  const requestStartedAt = Date.now();
   const response = await api("overview", {}, controller.signal);
   if (overviewAbort === controller) overviewAbort = null;
   if (!response || !isCurrentRuntimeOverviewRequest(state, request)) return false;
@@ -1831,6 +1894,9 @@ async function fetchOverview(request: any): Promise<boolean> {
     runnerRows = [];
     recentSessionRows = [];
     runtimeOverviewSnapshot = null;
+    runtimeOverviewReceivedAt = 0;
+    runtimeOverviewFailure = "runtime_read_unavailable";
+    renderRuntimeDiagnostics();
     recentSessionMetaSnapshot = null;
     show("runtime-overview-unavailable", true);
     show("runtime-runner-unavailable", true);
@@ -1845,6 +1911,8 @@ async function fetchOverview(request: any): Promise<boolean> {
     return true;
   }
   if (!response.ok || !response.data) {
+    runtimeOverviewFailure = response.reason || "overview_response_unavailable";
+    renderRuntimeDiagnostics();
     setText("runtime-overview-access", tr("refresh unavailable"));
     setText("runtime-runner-access", tr("refresh unavailable"));
     setText("runtime-recent-status", tr("refresh unavailable"));
@@ -1858,12 +1926,21 @@ async function fetchOverview(request: any): Promise<boolean> {
   setText("runtime-runner-access", "runtime:read");
   const data = response.data;
   runtimeOverviewSnapshot = data;
+  // Include server handling and transit time conservatively; never subtract
+  // clocks belonging to different hosts to establish observation freshness.
+  runtimeOverviewReceivedAt = requestStartedAt;
+  runtimeOverviewFailure = null;
+  window.clearTimeout(runtimeOverviewExpiryTimer);
+  runtimeOverviewExpiryTimer = window.setTimeout(() => {
+    renderRuntimeDiagnostics();
+    setRuntimeConnectionState("stale");
+  }, Math.max(0, runtimeOverviewFreshUntil(data, requestStartedAt) - Date.now()));
   homeProjectRows = Array.isArray(data.projects) ? data.projects : [];
   runnerRows = Array.isArray(data.runners) ? data.runners : [];
   recentSessionRows = Array.isArray(data.recent_sessions?.sessions) ? data.recent_sessions.sessions : [];
   const recentMeta = data.recent_sessions || {};
   recentSessionMetaSnapshot = recentMeta;
-  renderRuntimeOverviewMetrics(data);
+  renderRuntimeDiagnostics();
   renderRecentSessions(recentSessionRows, recentMeta);
   renderRunnerFleet(runnerRows);
   renderProjectSelectors(projectRows, projectRowsTruncated);
@@ -1875,7 +1952,7 @@ function projectLabel(project: any): string {
   const name = project && project.name ? String(project.name) : "";
   const id = project && project.id ? String(project.id) : "";
   const identity = name && name !== id ? name + " — " + id : id;
-  const status = project && project.connected ? String(project.agent_status || "online") : "offline";
+  const status = project?.connection_fresh ? project.connected ? String(project.agent_status || "online") : "offline" : "unknown";
   return identity + " · " + status;
 }
 
@@ -1889,6 +1966,7 @@ async function fetchProjects(request: any, unlocking = false): Promise<boolean> 
   const query = String(request?.query || "").trim();
   if (clientId) payload.client_id = clientId;
   if (query) payload.query = query;
+  const requestStartedAt = Date.now();
   const response = await api("projects", payload, controller.signal);
   if (projectsAbort === controller) projectsAbort = null;
   if (!response || !isCurrentRuntimeProjectsRequest(state, request)) return false;
@@ -1897,6 +1975,8 @@ async function fetchProjects(request: any, unlocking = false): Promise<boolean> 
     return false;
   }
   if (!response.ok || !response.data) {
+    state.projectsObservationFailed = true;
+    renderProjectSelectors(projectRows, projectRowsTruncated);
     if (unlocking) lock("Runtime Console is unavailable.");
     else {
       showError("Could not refresh projects.");
@@ -1905,6 +1985,12 @@ async function fetchProjects(request: any, unlocking = false): Promise<boolean> 
     return false;
   }
   projectRows = Array.isArray(response.data.projects) ? response.data.projects : [];
+  state.projectsObservedAt = requestStartedAt;
+  state.projectsObservationFailed = false;
+  window.clearTimeout(runtimeProjectsExpiryTimer);
+  runtimeProjectsExpiryTimer = window.setTimeout(() => {
+    renderProjectSelectors(projectRows, projectRowsTruncated);
+  }, Math.max(0, requestStartedAt + RUNTIME_OVERVIEW_STALE_MS - Date.now()));
   const reportedTotal = typeof response.data.total === "number" && Number.isFinite(response.data.total)
     ? Math.max(0, Math.floor(response.data.total))
     : projectRows.length;
@@ -1966,7 +2052,10 @@ function effectiveProjects(projects: any[]): any[] {
   }
   return (Array.isArray(projects) ? projects : []).map((project) => {
     const aggregate = aggregates.get(String(project?.id || ""));
-    return aggregate ? { ...project, sessions: aggregate.sessions } : project;
+    const now = Date.now();
+    const projectsFresh = !state.projectsObservationFailed && state.projectsObservedAt > 0
+      && now >= state.projectsObservedAt && now - state.projectsObservedAt < RUNTIME_OVERVIEW_STALE_MS;
+    return runtimeProjectProjection(project, aggregate, state.projectsObservedAt, runtimeOverviewReceivedAt, projectsFresh, runtimeOverviewIsFresh());
   });
 }
 
@@ -2005,6 +2094,7 @@ function renderWorkspaceBreadcrumb(): void {
 }
 
 function renderSelectedProjectIdentity(): void {
+  goalPanel.sync();
   const project = selectedProjectRow();
   renderWorkspaceBreadcrumb();
   if (runtimeLanguage !== "zh-CN") {
@@ -2043,7 +2133,9 @@ function renderProjectSelectors(projects: any[], truncated: boolean): void {
   const projectList = el("runtime-project-list");
   if (!deviceSelect || !projectList) return;
   const effective = effectiveProjects(projects);
+  const fresh = runtimeOverviewIsFresh();
   const signature = renderFingerprint({
+    fresh,
     language: runtimeLanguage,
     selectedDevice: state.selectedDevice,
     selectedProject: state.selectedProject,
@@ -2091,9 +2183,12 @@ function renderProjectSelectors(projects: any[], truncated: boolean): void {
   for (const clientId of visibleDevices) {
     const deviceProjects = projectsByDevice.get(clientId) || [];
     const runner = runnerRows.find((candidate) => String(candidate?.client_id || "") === clientId);
-    const connected = runner ? runner.connected !== false : deviceProjects.some((project) => project?.connected);
+    const latestProject = deviceProjects.reduce((latest, project) => !latest || project.connection_observed_at > latest.connection_observed_at ? project : latest, null);
+    const useRunner = !!runner && (!latestProject || runtimeOverviewReceivedAt >= latestProject.connection_observed_at);
+    const connectionFresh = useRunner ? fresh : !!latestProject?.connection_fresh;
+    const connected = useRunner ? runner.connected === true : latestProject?.connected === true;
     const group = document.createElement("details");
-    group.className = "device-group" + (connected ? " online" : " offline");
+    group.className = "device-group" + (connectionFresh ? connected ? " online" : " offline" : " unknown");
     group.dataset.runnerId = clientId;
     group.setAttribute("aria-label", runtimeLanguage === "zh-CN" ? "设备 " + clientId : "Device " + clientId);
     const storedDisclosure = storedDeviceDisclosure(clientId);
@@ -2104,7 +2199,7 @@ function renderProjectSelectors(projects: any[], truncated: boolean): void {
     const deviceIdentity = document.createElement("div"); deviceIdentity.className = "device-group-identity";
     const deviceName = document.createElement("strong"); deviceName.textContent = clientId;
     const deviceMeta = document.createElement("span"); deviceMeta.className = "muted small";
-    const status = runner ? String(runner.status || (connected ? "online" : "offline")) : (connected ? "online" : "offline");
+    const status = connectionFresh ? String((useRunner ? runner.status : latestProject?.agent_status) || (connected ? "online" : "offline")) : "unknown";
     deviceMeta.textContent = tr(status) + " · " + countLabel(deviceProjects.length, "Project");
     const deviceDot = document.createElement("span"); deviceDot.className = "device-group-dot"; deviceDot.title = tr(status);
     deviceIdentity.appendChild(deviceName); deviceIdentity.appendChild(deviceMeta);
@@ -2148,9 +2243,10 @@ function renderProjectSelectors(projects: any[], truncated: boolean): void {
       };
       const runningSessions = Math.max(0, Number(project.sessions?.running_sessions || 0));
       const projectAttention = pendingAttentionCount(project.sessions?.attention);
-      if (!project.connected) addSignal(tr("OFFLINE"), "tone-fail");
+      if (!project.connection_fresh) addSignal(tr("unknown") + " · " + tr("Last observed"), "tone-warn");
+      else if (!project.connected) addSignal(tr("OFFLINE"), "tone-fail");
       else if (project.agent_status && project.agent_status !== "online") addSignal(tr(String(project.agent_status).toUpperCase()), "tone-warn");
-      if (runningSessions > 0) {
+      if (runningSessions > 0 && project.sessions_fresh) {
         addSignal(
           runtimeLanguage === "zh-CN" ? "运行中 " + runningSessions : runningSessions + " running",
           "tone-runtime",
@@ -2267,7 +2363,8 @@ function runnerAttentionCount(runner: any): number {
 function renderRunnerFleet(runners: any[]): void {
   const node = el("runtime-runner-list");
   if (!node) return;
-  const signature = renderFingerprint([runtimeLanguage, state.selectedDevice, runners]);
+  const fresh = runtimeOverviewIsFresh();
+  const signature = renderFingerprint([runtimeLanguage, state.selectedDevice, runners, fresh]);
   if (signature === renderedRunnerFleetSignature) return;
   renderedRunnerFleetSignature = signature;
   clearNode(node);
@@ -2283,7 +2380,7 @@ function renderRunnerFleet(runners: any[]): void {
     const title = document.createElement("div"); title.className = "fleet-row-title"; title.textContent = clientId;
     const meta = document.createElement("div"); meta.className = "muted small fleet-row-meta";
     const metaParts = [
-      tr(runner.connected ? String(runner.status || "online") : "offline"),
+      tr(fresh ? runner.connected ? String(runner.status || "online") : "offline" : "unknown"),
       runner.version ? "v" + String(runner.version) : (runtimeLanguage === "zh-CN" ? "版本不可用" : "version unavailable"),
       runner.transport ? String(runner.transport) : (runtimeLanguage === "zh-CN" ? "传输方式不可用" : "transport unavailable"),
       runner.source_alignment
@@ -2300,9 +2397,10 @@ function renderRunnerFleet(runners: any[]): void {
     const signals = document.createElement("div"); signals.className = "fleet-row-signals";
     const working = Math.max(Number(runner.jobs_running || 0), Number(runner.sessions?.running_sessions || 0));
     const attention = runnerAttentionCount(runner);
-    if (working > 0) appendChip(signals, tr("RUNNING"), "tone-runtime");
+    if (working > 0 && fresh) appendChip(signals, tr("RUNNING"), "tone-runtime");
     if (attention > 0) appendChip(signals, tr("ATTENTION") + " " + attention, "tone-warn");
-    if (!runner.connected) appendChip(signals, tr("OFFLINE"), "tone-fail");
+    if (!fresh) appendChip(signals, tr("unknown") + " · " + tr("Last observed"), "tone-warn");
+    else if (!runner.connected) appendChip(signals, tr("OFFLINE"), "tone-fail");
     else if (String(runner.status || "") === "stale") appendChip(signals, tr("STALE"), "tone-warn");
     if (runner.source_alignment === "different") appendChip(signals, tr("SOURCE DIFFERENT"), "tone-fail");
     if (runner.version_matches_server === false) appendChip(signals, tr("BUILD DIFFERENT"), "tone-warn");
@@ -2336,7 +2434,9 @@ function renderRunnerFleet(runners: any[]): void {
 function renderRecentSessions(sessions: any[], meta: any): void {
   const node = el("runtime-recent-session-list");
   if (!node) return;
+  const fresh = runtimeOverviewIsFresh();
   const signature = renderFingerprint([
+    fresh,
     runtimeLanguage,
     state.selectedProject,
     state.workflow.selectedSessionId,
@@ -2364,12 +2464,13 @@ function renderRecentSessions(sessions: any[], meta: any): void {
     main.appendChild(title); main.appendChild(location);
     const signals = document.createElement("div"); signals.className = "recent-session-signals";
     const liveness = localizedLivenessPresentation(session);
-    if (liveness.state === "working") appendChip(signals, tr("RUNNING"), "tone-runtime");
+    if (!fresh) appendChip(signals, tr("unknown") + " · " + tr("Last observed"), "tone-warn");
+    else if (liveness.state === "working") appendChip(signals, tr("RUNNING"), "tone-runtime");
     const attention = attentionLabel(session.overview?.attention);
     if (pendingAttentionCount(session.overview?.attention) > 0) appendChip(signals, attention, "tone-warn");
-    const lifecycle = document.createElement("span"); lifecycle.className = "muted small"; lifecycle.textContent = [tr(String(session.lifecycle || "")), liveness.label, (runtimeLanguage === "zh-CN" ? "更新于 " : "updated ") + updatedLabel(session.updated_at)].filter(Boolean).join(" · "); lifecycle.title = liveness.tooltip; signals.appendChild(lifecycle);
+    const lifecycle = document.createElement("span"); lifecycle.className = "muted small"; lifecycle.textContent = [tr(String(session.lifecycle || "")), fresh ? liveness.label : tr("Last observed"), (runtimeLanguage === "zh-CN" ? "更新于 " : "updated ") + updatedLabel(session.updated_at)].filter(Boolean).join(" · "); lifecycle.title = fresh ? liveness.tooltip : tr("Last observed"); signals.appendChild(lifecycle);
     row.appendChild(main); row.appendChild(signals);
-    appendPreview(row, tr("Now"), session.current_activity);
+    appendPreview(row, tr(fresh ? "Now" : "Last observed"), session.current_activity);
     appendPreview(row, tr("Last"), session.last_activity);
     const select = (): void => selectRecentSession(session);
     row.addEventListener("click", select);
@@ -2378,7 +2479,7 @@ function renderRecentSessions(sessions: any[], meta: any): void {
   if (meta) {
     setText(
       "runtime-recent-status",
-      countLabel(meta.returned, "Session")
+      (fresh ? "" : tr("unknown") + " · " + tr("Last observed") + " · ") + countLabel(meta.returned, "Session")
         + (meta.truncated ? (runtimeLanguage === "zh-CN" ? " · 前 " : " · top ") + String(meta.returned || 0) : "")
         + (meta.scan_truncated ? (runtimeLanguage === "zh-CN" ? " · 扫描不完整" : " · partial scan") : "")
     );
@@ -4311,6 +4412,7 @@ async function refreshAll(): Promise<void> {
       fetchOverview(overviewRequest),
       fetchProjects(projectsRequest),
       refreshCommunication(),
+      goalPanel.refresh(),
     ]);
     if (!token) return;
     if (overviewOk && projectsOk && communicationOk) {
@@ -4329,14 +4431,19 @@ async function refreshAll(): Promise<void> {
 
 function refreshAutoSurfaces(): void {
   if (!token) return;
+  renderRuntimeDiagnostics();
   if (document.hidden) {
     void refreshCommunication(false);
     return;
   }
   void fetchOverview(refreshRuntimeOverview(state));
+  if (runtimeOverviewFailure === "runtime_read_unavailable") {
+    void fetchProjects(refreshRuntimeProjects(state, projectSearch, projectDeviceFilter));
+  }
   const request = refreshRuntimeSessionList(state);
   if (request) void fetchSessions(request);
   void refreshCommunication(workspaceView === "operations");
+  if (!el("runtime-operations-goals")?.hidden && workspaceView === "operations") void goalPanel.refresh();
 }
 
 function startAuto(): void {

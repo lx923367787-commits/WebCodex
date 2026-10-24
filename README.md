@@ -1,5 +1,7 @@
 # WebCodex
 
+**Windows snapshot (2026-10-24): [source, tools, dependencies and build instructions](windows/README.md).**
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 **WebCodex lets ChatGPT, Claude, and other AI agents work directly with code and developer tools on your own machines.**

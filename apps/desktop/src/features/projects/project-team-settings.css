@@ -1,0 +1,14 @@
+.project-team-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.project-team-heading h1 { margin-top: 8px; }
+.project-team-folder { display: flex; align-items: center; gap: 14px; padding: 20px 0 10px; }
+.project-team-folder > span { display: grid; place-items: center; width: 45px; height: 45px; flex: 0 0 45px; border-radius: 12px; background: #e8efdf; color: #527149; font-size: 30px; }
+.project-team-folder h2 { margin: 0 0 5px; font-size: 20px; }
+.project-team-folder .project-path { margin: 0; overflow-wrap: anywhere; }
+.project-team-settings.ai-office { min-height: 0; margin-top: 22px; padding: 25px; overflow: visible; }
+.project-team-loading { padding: 24px 0; }
+.project-team-load-error { margin-top: 20px; padding: 18px; border: 1px solid #d8b7ae; border-radius: 12px; background: #fff7f3; color: #8d4d3e; }
+.project-team-load-error p { margin-top: 0; }
+@media (max-width: 720px) {
+  .project-team-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .project-team-settings.ai-office { padding: 14px; }
+}

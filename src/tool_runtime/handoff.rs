@@ -83,6 +83,7 @@ impl ToolRuntime {
             .filter(|project| !project.is_empty())
         {
             let requested = match self
+                .execution()
                 .resolve_project_input_for_auth(request_project, auth)
                 .await
             {
@@ -215,6 +216,7 @@ impl ToolRuntime {
             .filter(|project| !project.is_empty())
         {
             Some(project) => self
+                .execution()
                 .resolve_project_input_for_auth(project, auth)
                 .await
                 .map(|resolved| resolved.resolved_id)

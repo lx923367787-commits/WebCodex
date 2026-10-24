@@ -1,6 +1,4 @@
-use super::{
-    cloudflared_service, executable_name, remove_npm_wrapper_network_environment, ProductError,
-};
+use super::{cloudflared_service, executable_name, ProductError};
 use reqwest::header::USER_AGENT;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -29,6 +27,8 @@ const TUNNEL_CLIENT_CONTROL_PLANE_PROBE_TIMEOUT: Duration = Duration::from_secs(
 const TUNNEL_CLIENT_READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const TUNNEL_CLIENT_HEALTH_URL_BYTES: usize = 512;
 const TUNNEL_CLIENT_OVERRIDE: &str = "WEBCODEX_TUNNEL_CLIENT_BIN";
+const TUNNEL_RECONNECT_LIMIT: u32 = 3;
+const TUNNEL_RECONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -41,7 +41,7 @@ struct TunnelClientAsset {
     member_name: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct OpenAiTunnelPrerequisites {
     pub(super) binary: PathBuf,
     pub(super) tunnel_id: String,
@@ -50,6 +50,11 @@ pub(super) struct OpenAiTunnelPrerequisites {
 #[derive(Debug)]
 pub(super) struct OpenAiTunnel {
     child: Child,
+    prerequisites: OpenAiTunnelPrerequisites,
+    mcp_url: String,
+    authorization_file: PathBuf,
+    session_dir: PathBuf,
+    reconnect_attempts: u32,
 }
 
 impl OpenAiTunnel {
@@ -61,8 +66,50 @@ impl OpenAiTunnel {
         Err(ProductError::new(
             "tunnel_unavailable",
             format!("OpenAI Secure MCP Tunnel stopped unexpectedly ({status})"),
-            Some("Check the OpenAI tunnel-client and network connectivity, then retry webcodex share --tunnel openai."),
+            Some("Check the OpenAI tunnel-client and network connectivity, then retry."),
         ))
+    }
+
+    pub(super) async fn wait_with_recovery(
+        &mut self,
+        mut observe: impl FnMut(&str) -> Result<(), ProductError>,
+    ) -> Result<(), ProductError> {
+        loop {
+            if self.child.wait().await.is_err() {
+                observe("failed")?;
+                return Err(tunnel_runtime_error(
+                    "OpenAI tunnel-client could not be supervised",
+                ));
+            }
+            // Only a confirmed exit of our own transport child permits recovery.
+            // No tool/Job result is an input, and no business request is replayed.
+            eprintln!("WebCodex: Tunnel exited; verifying a bounded transport reconnect. In-flight operation outcomes remain unknown until reconciled.");
+            observe("reconnecting")?;
+            let recovered = reconnect_tunnel(
+                &mut self.reconnect_attempts,
+                Instant::now() + TUNNEL_RECONNECT_TIMEOUT,
+                Duration::from_secs(1),
+                |deadline| {
+                    start_verified_tunnel_child(
+                        &self.prerequisites,
+                        &self.mcp_url,
+                        &self.authorization_file,
+                        &self.session_dir,
+                        deadline,
+                    )
+                },
+            )
+            .await;
+            self.child = match recovered {
+                Ok(child) => child,
+                Err(error) => {
+                    observe("failed")?;
+                    return Err(error);
+                }
+            };
+            observe("ready")?;
+            eprintln!("WebCodex: Tunnel reconnected and readiness verified; reconcile original operations before continuing.");
+        }
     }
 
     pub(super) async fn stop(&mut self) {
@@ -85,10 +132,72 @@ pub(super) async fn start_openai_tunnel(
     session_dir: &Path,
     deadline: Instant,
 ) -> Result<OpenAiTunnel, ProductError> {
+    let child = start_verified_tunnel_child(
+        prerequisites,
+        mcp_url,
+        authorization_file,
+        session_dir,
+        deadline,
+    )
+    .await?;
+    Ok(OpenAiTunnel {
+        child,
+        prerequisites: prerequisites.clone(),
+        mcp_url: mcp_url.to_string(),
+        authorization_file: authorization_file.to_path_buf(),
+        session_dir: session_dir.to_path_buf(),
+        reconnect_attempts: 0,
+    })
+}
+
+async fn reconnect_tunnel<T, F, Fut>(
+    attempts: &mut u32,
+    deadline: Instant,
+    delay: Duration,
+    mut start: F,
+) -> Result<T, ProductError>
+where
+    F: FnMut(Instant) -> Fut,
+    Fut: std::future::Future<Output = Result<T, ProductError>>,
+{
+    let mut last_error = tunnel_runtime_error("Tunnel reconnect budget exhausted");
+    while *attempts < TUNNEL_RECONNECT_LIMIT && Instant::now() < deadline {
+        *attempts += 1;
+        tokio::time::sleep(delay.min(deadline.saturating_duration_since(Instant::now()))).await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, start(deadline)).await {
+            Ok(Ok(child)) => return Ok(child),
+            Ok(Err(error)) => last_error = error,
+            Err(_) => {
+                return Err(tunnel_runtime_error(
+                    "Tunnel reconnect verification timed out",
+                ))
+            }
+        }
+    }
+    Err(last_error)
+}
+
+async fn start_verified_tunnel_child(
+    prerequisites: &OpenAiTunnelPrerequisites,
+    mcp_url: &str,
+    authorization_file: &Path,
+    session_dir: &Path,
+    deadline: Instant,
+) -> Result<Child, ProductError> {
+    native_tunnel_binary_digest(&prerequisites.binary)?;
     run_doctor(prerequisites, mcp_url, authorization_file, deadline).await?;
     run_control_plane_probe(prerequisites, deadline).await?;
 
-    let health_url_file = session_dir.join("openai-tunnel-health-url");
+    // Each child must publish its own readiness endpoint. A previous process's
+    // health file must never validate a replacement process.
+    let health_url_file = session_dir.join(format!(
+        "openai-tunnel-health-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     let log_file = session_dir.join("openai-tunnel.log");
     let mut command = Command::new(&prerequisites.binary);
     suppress_windows_console(&mut command);
@@ -118,7 +227,37 @@ pub(super) async fn start_openai_tunnel(
         let _ = child.wait().await;
         return Err(error);
     }
-    Ok(OpenAiTunnel { child })
+    Ok(child)
+}
+
+// Native authority is only injected into this controlled relay. Profiles,
+// alternate control-plane origins, MCP bindings, extra headers, trace toggles,
+// custom CA bundles and broad credentials cannot be inherited accidentally.
+fn configure_relay_environment(command: &mut Command, tunnel_id: &str) {
+    command.env_clear();
+    for key in [
+        "SYSTEMROOT",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "CONTROL_PLANE_API_KEY",
+        "CONTROL_PLANE_CLIENT_CERT",
+        "CONTROL_PLANE_CLIENT_KEY",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command
+        .env("CONTROL_PLANE_TUNNEL_ID", tunnel_id)
+        .env("CONTROL_PLANE_BASE_URL", "https://api.openai.com")
+        .env("CONTROL_PLANE_URL_PATH", "")
+        .env("NO_PROXY", "localhost,127.0.0.1,::1")
+        .env("no_proxy", "localhost,127.0.0.1,::1");
 }
 
 fn configure_runtime_command(
@@ -127,7 +266,7 @@ fn configure_runtime_command(
     mcp_url: &str,
     authorization_file: &Path,
 ) {
-    remove_npm_wrapper_network_environment(command);
+    configure_relay_environment(command, &prerequisites.tunnel_id);
     command
         .env("CONTROL_PLANE_TUNNEL_ID", &prerequisites.tunnel_id)
         // The runtime key remains in the inherited environment. Explicitly keep
@@ -210,7 +349,7 @@ async fn run_control_plane_probe(
 ) -> Result<(), ProductError> {
     let mut command = Command::new(&prerequisites.binary);
     suppress_windows_console(&mut command);
-    remove_npm_wrapper_network_environment(&mut command);
+    configure_relay_environment(&mut command, &prerequisites.tunnel_id);
     command
         .arg("admin")
         .arg("tunnels")
@@ -397,6 +536,21 @@ fn valid_tunnel_id(value: &str) -> bool {
     })
 }
 
+/// Local source verification shared by native launcher and Bootstrap control.
+pub(crate) fn native_tunnel_binary_digest(path: &Path) -> Result<String, ProductError> {
+    if !path.is_absolute() {
+        return Err(tunnel_runtime_error("native relay binary must be absolute"));
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| tunnel_runtime_error("native relay binary unavailable"))?;
+    if !metadata.file_type().is_file() || metadata.len() > TUNNEL_CLIENT_MAX_BINARY_BYTES {
+        return Err(tunnel_runtime_error("native relay binary unavailable"));
+    }
+    let asset = tunnel_client_asset_for(std::env::consts::OS, std::env::consts::ARCH)?;
+    verify_sha256(path, asset.binary_sha256, "native relay binary")?;
+    Ok(asset.binary_sha256.to_owned())
+}
+
 async fn resolve_tunnel_client() -> Result<PathBuf, ProductError> {
     let override_bin = std::env::var_os(TUNNEL_CLIENT_OVERRIDE).map(PathBuf::from);
     if let Some(binary) = override_bin.as_deref() {
@@ -407,6 +561,7 @@ async fn resolve_tunnel_client() -> Result<PathBuf, ProductError> {
                 Some("Fix or unset WEBCODEX_TUNNEL_CLIENT_BIN, then retry webcodex share --tunnel openai."),
             ));
         }
+        native_tunnel_binary_digest(binary)?;
         verify_tunnel_client_version(binary).await?;
         return Ok(binary.to_path_buf());
     }
@@ -414,7 +569,10 @@ async fn resolve_tunnel_client() -> Result<PathBuf, ProductError> {
     if let Some(path) = std::env::var_os("PATH") {
         for directory in std::env::split_paths(&path) {
             let candidate = directory.join(executable_name("tunnel-client"));
-            if candidate.is_file() && verify_tunnel_client_version(&candidate).await.is_ok() {
+            if candidate.is_file()
+                && native_tunnel_binary_digest(&candidate).is_ok()
+                && verify_tunnel_client_version(&candidate).await.is_ok()
+            {
                 return Ok(candidate);
             }
         }

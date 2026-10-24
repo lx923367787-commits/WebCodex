@@ -4,6 +4,11 @@ These rules apply to ordinary repository work. Read linked domain guidance only 
 
 WebCodex is actively developed. Requested features, fixes, and reliability improvements are welcome; preserve credential, process-tree, transport, durability, and boundedness contracts.
 
+## Model selection when delegating
+
+- Before calling an external Agent CLI (including CodeBuddy/WorkBuddy, Gemini, or Codex), discover the installed CLI/version and its actual model and reasoning options using the configured discovery tool, that CLI's help/model catalog, or its official documentation. The coordinating GPT selects the model and supported effort for the task and passes them explicitly through native arguments; do not silently use defaults or copy another CLI's option names. If effort is unsupported, state that and omit it. Help listings do not prove account availability. Preserve the recorded selection when resuming the same CLI task.
+- For browser child tasks, discover `chat-agents` profiles and pass an explicit `thinking_profile_id`. A long-running child uses its own real Host Goal and registers it with `bind_chat_task_goal` before relying on automatic handoff; child successors preserve the original selection. Unbound main Goal handoffs use the current highest Pro setting. Missing child binding/evidence must stop, never silently fall back to the main setting. These preferences grant no additional authority.
+
 ## 1. Verify and preserve
 
 - Work only in the repository, worktree, and external targets authorized by the user.
@@ -69,3 +74,37 @@ For release, recovery, or deployment work, follow [`docs/agent/release-process.m
 - Architecture decisions: [`docs/agent/architecture-decisions.md`](docs/agent/architecture-decisions.md).
 
 Use these as domain sources of truth rather than duplicating their detailed contracts here.
+
+## 7. 文件生命周期管理（长期生效）
+
+### 范围与责任
+
+- AI 对本项目文件的创建、修改、合并、清理和删除负责；创建前先查找可复用实现，避免重复文件和临时产物长期堆积。
+- 本章适用于本仓库及其子目录中的开发任务，仅授权处理当前任务已授权的仓库或 worktree。不得将权限扩大到用户主目录、其他项目、其他 worktree 或项目外文件；操作前核实绝对路径及符号链接、目录联接的实际目标。
+- 本章补充而不覆盖前述开发、验证、保密、发布及协作规则，也不削弱子目录的重要指令。确认无用且满足以下恢复及并发保护条件的普通项目文件，允许自主清理和删除，无需逐项征求用户批准；这不授权批量 `git clean`、重置工作区、改写历史或自动提交。
+
+### 调查与判断
+
+- 对用途不明的文件，主动调查入口、引用、导入、构建与打包配置、动态加载、测试、文档和 Git 历史；优先使用 `rg`、Git 和现有项目工具。不得仅凭文件名、时间、一次搜索无结果、未跟踪或被忽略状态断言无用，也不得仅因不了解用途而永久保留。
+- 清理重复实现、废弃代码时，应验证调用方、运行时约定及外部消费方式，并同步处理本轮受影响的引用和相关测试。只运行能验证受影响行为的现有检查；纯规则或文档变更按第 4 节处理，不引入额外框架。
+- 对无法验证的候选文件暂时保留，在现有任务记录或交接记录中记下路径、已查证据、保留原因及下一步验证条件，后续相关任务继续调查；没有现成记录时在交付说明中记录，不为每个文件另建报告。
+
+### 删除前必须可恢复
+
+- 删除前必须确保能恢复文件的当前完整内容，并记录恢复来源和方法。对已提交且工作区、暂存区均未变化的文件，可使用已验证存在的 Git 提交及路径作为恢复依据；仅仅“被 Git 跟踪”不代表当前版本已经备份。
+- 对未提交修改、暂存内容、未跟踪文件及被忽略文件，Git 提交通常不能完整恢复。删除或破坏性合并前，使用现有备份机制，或在本项目内明确隔离、不会进入提交和发布产物的恢复目录保存副本；验证副本可读且内容一致（例如大小和哈希），记录原路径、备份位置及恢复方法。无 Git 时同样要求已验证的备份。
+- 备份不得放入即将删除的目录，不得覆盖旧备份或在同一轮清理中删除恢复副本；不得把密钥或敏感数据加入 Git、普通日志或共享备份。无法安全备份或验证恢复时保留原文件并记录原因。
+- 不得自动永久删除用户数据、数据库及其恢复文件、密钥或项目外文件；即使被忽略或名称像临时文件，也不获得删除授权。此类内容不属于普通自主清理对象，另需用户针对具体对象和操作的明确授权。
+
+### 并发保护与开发收尾
+
+- 不得删除其他 Agent 正在修改的文件。任务开始时检查工作区现状和可用的协作记录；删除前重新检查目标的内容、状态及任务归属。已有未提交或未跟踪内容不能视为本轮垃圾，Git 状态干净也不能证明没有其他 Agent 在操作。
+- 使用现有协作机制和 worktree 隔离，不新增锁框架；协作记录不是文件锁。发现并发变化、活动写入或无法排除其他 Agent 正在修改时，停止对该文件的删除，保留并记录待协调原因。
+- 每次开发结束后，自动检查本轮产生的临时文件、重复实现、废弃代码及未跟踪文件，同时检查本轮涉及的被忽略产物。结合任务开始时的状态，优先使用 `git status --short`、`git diff`、`git diff --cached`、`git ls-files --others --exclude-standard`；对具体候选使用 `git check-ignore -v -- <path>`。不把全仓历史存量自动纳入本轮清理。
+- 对确认无用且恢复、依赖及并发检查均通过的文件自主清理；对无法验证的文件保留并记录原因。完成后复查差异、相关测试和工作区状态，在交付说明中简述清理项、恢复来源和保留项；无候选时注明无本轮清理项即可。
+
+### 单一规则来源
+
+- 文件生命周期规则仅维护在本文件本章。其他 Agent 的入口文件仅引用根目录 `AGENTS.md`，不得复制本章正文；已有其他重要指令必须保留。
+- Agent 开始工作及接续任务时读取本文件和相关子目录指令。若客户端不自动加载 `AGENTS.md`，通过其现有指令入口显式要求读取本文件；文件可读取不等于已经加载，正在运行的会话需重新读取后才能应用更新。
+- 本机制是随开发任务执行的持久项目指令，不是后台定时清理服务。本次安装仅修改并验证规则，不执行历史文件的大规模清理。

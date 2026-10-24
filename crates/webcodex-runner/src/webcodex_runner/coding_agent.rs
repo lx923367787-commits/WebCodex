@@ -38,6 +38,7 @@ use webcodex_core::coding_agent::{
 };
 use webcodex_process::ManagedChild;
 use webcodex_runner_config::paths::paths_equal;
+mod recovery;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -46,7 +47,6 @@ use windows_sys::Win32::Storage::FileSystem::{
 const STORE_SCHEMA_VERSION: u32 = 1;
 const STORE_FILE: &str = "state.json";
 const STORE_MAX_BYTES: usize = 64 * 1024;
-const STORE_RETENTION_SECS: i64 = 15 * 60;
 const ACP_MESSAGE_MAX_BYTES: usize = 1024 * 1024;
 const ACP_SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 const ACP_CANCEL_GRACE: Duration = Duration::from_secs(5);
@@ -68,10 +68,14 @@ enum DurableDispatchPhase {
 #[serde(deny_unknown_fields)]
 struct DurableRunRecord {
     schema_version: u32,
+    #[serde(default)]
+    observation_revision: u64,
     run_id: String,
     intent_fingerprint: String,
     authority_fingerprint: String,
     runtime_project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_root: Option<String>,
     provider_id: String,
     provider_instance_id: String,
     state: CodingAgentRunState,
@@ -94,7 +98,7 @@ impl DurableRunRecord {
             provider_instance_id: self.provider_instance_id.clone(),
             state: self.state.clone(),
             execution_state: self.execution_state,
-            observation_revision,
+            observation_revision: self.observation_revision.max(observation_revision),
             created_at: self.created_at,
             updated_at: self.updated_at,
             terminal: self.terminal.clone(),
@@ -150,6 +154,65 @@ impl TerminalWriteGate {
 
 #[cfg(test)]
 #[derive(Debug, Default)]
+struct PromptDispatchTestGateState {
+    reached: bool,
+    released: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct PromptDispatchTestGate {
+    state: Mutex<PromptDispatchTestGateState>,
+    changed: Condvar,
+    deadline: Instant,
+}
+
+#[cfg(test)]
+impl PromptDispatchTestGate {
+    fn new(deadline: Instant) -> Self {
+        Self {
+            state: Mutex::new(PromptDispatchTestGateState::default()),
+            changed: Condvar::new(),
+            deadline,
+        }
+    }
+
+    fn block_dispatch(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.reached = true;
+        self.changed.notify_all();
+        while !state.released {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, _) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+        }
+        true
+    }
+
+    fn wait_until_reached(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        while !state.reached {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, _) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+        }
+        true
+    }
+
+    fn release(&self) {
+        self.state.lock().unwrap().released = true;
+        self.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
 struct DurableRunStoreTestControl {
     fail_next_terminal_writes: std::sync::atomic::AtomicUsize,
     terminal_write_gate: Mutex<Option<Arc<TerminalWriteGate>>>,
@@ -158,6 +221,7 @@ struct DurableRunStoreTestControl {
 #[derive(Debug, Clone)]
 struct DurableRunStore {
     root: PathBuf,
+    recovery_incomplete: Arc<AtomicBool>,
     #[cfg(test)]
     test_control: Arc<DurableRunStoreTestControl>,
 }
@@ -166,6 +230,7 @@ impl DurableRunStore {
     fn new(root: PathBuf) -> Self {
         Self {
             root,
+            recovery_incomplete: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             test_control: Arc::new(DurableRunStoreTestControl::default()),
         }
@@ -313,30 +378,40 @@ impl DurableRunStore {
                 return Err("ACP Run durable state exceeds bounded record count".to_string());
             }
             let path = entry.path().join(STORE_FILE);
-            let bytes = match fs::read(&path) {
+            let bytes = match File::open(&path).and_then(|file| {
+                let mut bytes = Vec::new();
+                file.take((STORE_MAX_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)?;
+                Ok(bytes)
+            }) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     tracing::error!(state_path = %path.display(), error = %error, "ACP Run durable state unavailable during recovery; preserving tombstone");
+                    self.recovery_incomplete.store(true, Ordering::Release);
                     continue;
                 }
             };
             if bytes.is_empty() || bytes.len() > STORE_MAX_BYTES {
                 tracing::error!(state_path = %path.display(), "ACP Run durable state has invalid bounded size; preserving tombstone");
+                self.recovery_incomplete.store(true, Ordering::Release);
                 continue;
             }
             let record: DurableRunRecord = match serde_json::from_slice(&bytes) {
                 Ok(record) => record,
                 Err(_) => {
                     tracing::error!(state_path = %path.display(), "ACP Run durable state is malformed; preserving tombstone");
+                    self.recovery_incomplete.store(true, Ordering::Release);
                     continue;
                 }
             };
             if let Err(error) = validate_durable_record(&record) {
                 tracing::error!(state_path = %path.display(), error = %error, "ACP Run durable state is invalid; preserving tombstone");
+                self.recovery_incomplete.store(true, Ordering::Release);
                 continue;
             }
             if self.run_dir(&record.run_id) != entry.path() {
                 tracing::error!(state_path = %path.display(), "ACP Run durable state directory identity mismatch; preserving tombstone");
+                self.recovery_incomplete.store(true, Ordering::Release);
                 continue;
             }
             records.push(record);
@@ -370,6 +445,20 @@ fn publish_state_file(temp: &Path, state_path: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn publish_state_file(temp: &Path, state_path: &Path) -> Result<(), String> {
+    // Rust's filesystem APIs support long paths, but this direct Win32 call
+    // needs the verbatim prefix returned by canonicalize. The destination may
+    // not exist yet, so resolve its existing parent and retain the filename.
+    let temp = fs::canonicalize(temp)
+        .map_err(|error| format!("failed to resolve ACP Run temp state path: {error}"))?;
+    let parent = state_path
+        .parent()
+        .ok_or_else(|| "ACP Run state path has no parent".to_string())?;
+    let filename = state_path
+        .file_name()
+        .ok_or_else(|| "ACP Run state path has no filename".to_string())?;
+    let state_path = fs::canonicalize(parent)
+        .map_err(|error| format!("failed to resolve ACP Run state directory: {error}"))?
+        .join(filename);
     let from = temp
         .as_os_str()
         .encode_wide()
@@ -440,6 +529,7 @@ struct LiveRunState {
     events: VecDeque<CodingAgentEvent>,
     first_retained_sequence: u64,
     next_sequence: u64,
+    evidence_incomplete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,6 +545,18 @@ struct RunEntry {
     cancel_requested: AtomicBool,
     prompt_dispatch: Mutex<PromptDispatchGateState>,
     terminal_transition: Mutex<()>,
+    workspace_root: Mutex<Option<PathBuf>>,
+    worker_active: AtomicBool,
+    evidence_path: Mutex<Option<PathBuf>>,
+    evidence_failed: AtomicBool,
+}
+
+struct ActiveRunGuard(Arc<RunEntry>);
+
+impl Drop for ActiveRunGuard {
+    fn drop(&mut self) {
+        self.0.worker_active.store(false, Ordering::Release);
+    }
 }
 
 impl RunEntry {
@@ -465,11 +567,16 @@ impl RunEntry {
                 events: VecDeque::new(),
                 first_retained_sequence: 1,
                 next_sequence: 1,
+                evidence_incomplete: false,
             }),
             changed: Condvar::new(),
             cancel_requested: AtomicBool::new(false),
             prompt_dispatch: Mutex::new(PromptDispatchGateState::PrePrompt),
             terminal_transition: Mutex::new(()),
+            workspace_root: Mutex::new(None),
+            worker_active: AtomicBool::new(false),
+            evidence_path: Mutex::new(None),
+            evidence_failed: AtomicBool::new(false),
         }
     }
 
@@ -491,6 +598,7 @@ impl RunEntry {
         update(&mut state.snapshot);
         state.snapshot.observation_revision = state.snapshot.observation_revision.saturating_add(1);
         state.snapshot.updated_at = now();
+        self.persist_evidence(&state);
         self.changed.notify_all();
     }
 
@@ -519,6 +627,7 @@ impl RunEntry {
         }
         state.snapshot.observation_revision = state.snapshot.observation_revision.saturating_add(1);
         state.snapshot.updated_at = now();
+        self.persist_evidence(&state);
         self.changed.notify_all();
     }
 
@@ -552,8 +661,9 @@ impl RunEntry {
             state = next;
         }
         let requested = after.unwrap_or_else(|| state.first_retained_sequence.saturating_sub(1));
-        let history_lost =
-            after.is_some_and(|value| value.saturating_add(1) < state.first_retained_sequence);
+        let history_lost = state.evidence_incomplete
+            || state.first_retained_sequence > 1 && after.is_none()
+            || after.is_some_and(|value| value.saturating_add(1) < state.first_retained_sequence);
         let effective = requested.max(state.first_retained_sequence.saturating_sub(1));
         let mut events = state
             .events
@@ -607,7 +717,7 @@ pub(crate) struct CodingAgentManager {
     #[cfg(test)]
     admission_after_accepting_test_reached: AtomicBool,
     #[cfg(test)]
-    prompt_dispatch_test_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
+    prompt_dispatch_test_gate: Mutex<Option<Arc<PromptDispatchTestGate>>>,
     #[cfg(test)]
     prompt_after_barrier_test_delay: Mutex<Option<Duration>>,
     #[cfg(test)]
@@ -648,7 +758,7 @@ impl CodingAgentManager {
             #[cfg(test)]
             admission_after_accepting_test_reached: AtomicBool::new(false),
             #[cfg(test)]
-            prompt_dispatch_test_barrier: Mutex::new(None),
+            prompt_dispatch_test_gate: Mutex::new(None),
             #[cfg(test)]
             prompt_after_barrier_test_delay: Mutex::new(None),
             #[cfg(test)]
@@ -688,7 +798,7 @@ impl CodingAgentManager {
             #[cfg(test)]
             admission_after_accepting_test_reached: AtomicBool::new(false),
             #[cfg(test)]
-            prompt_dispatch_test_barrier: Mutex::new(None),
+            prompt_dispatch_test_gate: Mutex::new(None),
             #[cfg(test)]
             prompt_after_barrier_test_delay: Mutex::new(None),
             #[cfg(test)]
@@ -710,7 +820,6 @@ impl CodingAgentManager {
     }
 
     pub(crate) fn inventory(&self) -> CodingAgentRunInventory {
-        self.cleanup_expired();
         let mut runs = self
             .runs
             .lock()
@@ -981,7 +1090,7 @@ impl CodingAgentManager {
         let _ = self.worker_threads.reap_finished();
     }
 
-    fn cleanup_run_io(&self, child: &mut ManagedChild, outbound: &mut AcpOutboundWriter) {
+    fn cleanup_run_io(&self, child: &mut ManagedChild, outbound: &mut AcpOutboundWriter) -> bool {
         outbound.close();
         let graceful_deadline = Instant::now() + ACP_IO_CLEANUP_TIMEOUT;
         loop {
@@ -994,14 +1103,16 @@ impl CodingAgentManager {
             }
             thread::sleep(ACP_POLL);
         }
+        // The direct provider can exit while a descendant still writes files.
+        // A protocol terminal response is not a process-tree exit receipt.
+        let _ = child.terminate_tree();
         let forced_deadline = Instant::now() + ACP_IO_CLEANUP_TIMEOUT;
         let _ = outbound.wait_finished_until(forced_deadline);
         let remaining = forced_deadline.saturating_duration_since(Instant::now());
-        if !remaining.is_zero() {
-            let _ = child.wait_tree_exit(remaining);
-        }
+        let exited = child.wait_tree_exit(remaining).unwrap_or(false);
         let _ = child.try_wait();
         let _ = self.worker_threads.reap_finished();
+        exited
     }
 
     fn write_post_prompt_frame(
@@ -1086,7 +1197,6 @@ impl CodingAgentManager {
                 barrier.wait();
             }
         }
-        self.cleanup_expired();
         if let Some(existing) = self.runs.lock().unwrap().get(&request.run_id).cloned() {
             let snapshot = existing.snapshot();
             if snapshot.intent_fingerprint != request.intent_fingerprint {
@@ -1101,6 +1211,17 @@ impl CodingAgentManager {
             return CodingAgentResponse::success(CodingAgentResponsePayload::Start {
                 run: snapshot,
             });
+        }
+        if self.store.recovery_incomplete.load(Ordering::Acquire) {
+            return response_error(CodingAgentDispatchState::OutcomeUnknown,
+                "coding_agent_durable_state_unavailable",
+                "Unreconciled durable state may still own a workspace; inspect preserved evidence before new execution",
+                "durable_state_unavailable", "reconcile");
+        }
+        if self.runs.lock().unwrap().len() >= CODING_AGENT_MAX_INVENTORY_RUNS {
+            return response_error(CodingAgentDispatchState::NotStarted,
+                "coding_agent_history_capacity", "Run history capacity reached; archive reviewed evidence before admitting more work",
+                "capacity", "user_action");
         }
         let Some(provider) = self.providers.get(&request.provider_id).cloned() else {
             return response_error(
@@ -1139,7 +1260,9 @@ impl CodingAgentManager {
             .lock()
             .unwrap()
             .values()
-            .filter(|entry| !entry.snapshot().state.terminal())
+            .filter(|entry| {
+                !entry.snapshot().state.terminal() || entry.worker_active.load(Ordering::Acquire)
+            })
             .count();
         if active >= self.max_concurrent_runs {
             return response_error(
@@ -1148,6 +1271,41 @@ impl CodingAgentManager {
                 "Runner ACP concurrency is full",
                 "capacity",
                 "wait",
+            );
+        }
+        let requested_root = match canonicalize_existing(Path::new(&request.project_root)) {
+            Ok(root) => root,
+            Err(_) => {
+                return response_error(
+                    CodingAgentDispatchState::NotStarted,
+                    "coding_agent_workspace_unavailable",
+                    "Cannot resolve the execution workspace",
+                    "stale_state",
+                    "reobserve",
+                )
+            }
+        };
+        if self.runs.lock().unwrap().values().any(|entry| {
+            let snapshot = entry.snapshot();
+            let unresolved = !snapshot.state.terminal()
+                || snapshot.execution_state == CodingAgentExecutionState::OutcomeUnknown
+                || entry.worker_active.load(Ordering::Acquire);
+            unresolved
+                && entry.workspace_root.lock().unwrap().as_ref().map_or(
+                    // Legacy recovery records cannot prove a disjoint workspace.
+                    true,
+                    |root| {
+                        paths_equal(root, &requested_root)
+                            || root.starts_with(&requested_root)
+                            || requested_root.starts_with(root)
+                    },
+                )
+        }) {
+            return response_error(
+                CodingAgentDispatchState::NotStarted,
+                "coding_agent_workspace_busy",
+                "An overlapping workspace has an active or uncertain Run; reconcile it before replacement",
+                "capacity", "reconcile",
             );
         }
         let environment = match resolve_environment(&provider.config) {
@@ -1175,6 +1333,8 @@ impl CodingAgentManager {
                     );
                 }
                 let entry = Arc::new(RunEntry::new(snapshot.clone()));
+                *entry.workspace_root.lock().unwrap() = record.workspace_root.map(PathBuf::from);
+                entry.restore_evidence(&self.store, true);
                 self.runs
                     .lock()
                     .unwrap()
@@ -1199,9 +1359,11 @@ impl CodingAgentManager {
         let record = DurableRunRecord {
             schema_version: STORE_SCHEMA_VERSION,
             run_id: request.run_id.clone(),
+            observation_revision: 0,
             intent_fingerprint: request.intent_fingerprint.clone(),
             authority_fingerprint: request.authority_fingerprint.clone(),
             runtime_project_id: request.runtime_project_id.clone(),
+            workspace_root: Some(requested_root.to_string_lossy().into_owned()),
             provider_id: request.provider_id.clone(),
             provider_instance_id: request.provider_instance_id.clone(),
             state: CodingAgentRunState::Starting,
@@ -1228,6 +1390,9 @@ impl CodingAgentManager {
             );
         }
         let entry = Arc::new(RunEntry::new(record.snapshot(0)));
+        *entry.workspace_root.lock().unwrap() = Some(requested_root);
+        entry.restore_evidence(&self.store, false);
+        entry.worker_active.store(true, Ordering::Release);
         self.runs
             .lock()
             .unwrap()
@@ -1246,6 +1411,7 @@ impl CodingAgentManager {
             ))
             .spawn(move || {
                 let _worker_guard = worker_guard;
+                let _execution_guard = ActiveRunGuard(Arc::clone(&thread_entry));
                 if start_rx.recv().is_ok() {
                     thread_manager.run_turn(request, provider, environment, thread_entry);
                 }
@@ -1256,6 +1422,7 @@ impl CodingAgentManager {
                 let _ = start_tx.send(());
             }
             Err(error) => {
+                entry.worker_active.store(false, Ordering::Release);
                 manager_finish_setup_failure(
                     self,
                     &run_id,
@@ -1534,7 +1701,6 @@ impl CodingAgentManager {
         };
         let session_id = new_session.session_id.to_string();
         let mut advertised = new_session.config_options.unwrap_or_default();
-
         for (key, value) in &request.config {
             if self.pre_prompt_should_stop(&request.run_id, &entry, run_deadline) {
                 self.terminate_run_io(&mut child, &mut outbound);
@@ -1645,10 +1811,49 @@ impl CodingAgentManager {
 
         #[cfg(test)]
         {
-            let barrier = self.prompt_dispatch_test_barrier.lock().unwrap().clone();
-            if let Some(barrier) = barrier {
-                barrier.wait();
+            let gate = self.prompt_dispatch_test_gate.lock().unwrap().clone();
+            if gate.is_some_and(|gate| !gate.block_dispatch()) {
+                self.setup_failure(
+                    &request.run_id,
+                    &entry,
+                    "coding_agent_test_gate_timeout",
+                    "Test prompt dispatch gate was not released before its deadline",
+                );
+                self.terminate_run_io(&mut child, &mut outbound);
+                return;
             }
+        }
+        // Record the actual post-override model, independently of Agent and
+        // provider identity. Providers without model metadata remain unknown.
+        if let Some(model) = advertised
+            .iter()
+            .find(|option| option.id.to_string() == "model")
+        {
+            if let SessionConfigKind::Select(selected) = &model.kind {
+                entry.push_event(event(
+                    CodingAgentEventKind::AgentMessage,
+                    None,
+                    Some("model".into()),
+                    Some(
+                        selected
+                            .current_value
+                            .to_string()
+                            .chars()
+                            .take(256)
+                            .collect(),
+                    ),
+                ));
+            }
+        }
+        if entry.evidence_failed.load(Ordering::Acquire) {
+            self.terminate_run_io(&mut child, &mut outbound);
+            self.setup_failure(
+                &request.run_id,
+                &entry,
+                "coding_agent_evidence_persist_failed",
+                "Cannot persist execution evidence",
+            );
+            return;
         }
         let prompt_id = next_id;
         let prompt_frame = match request_frame(
@@ -1829,6 +2034,15 @@ impl CodingAgentManager {
                     if message.get("method").and_then(Value::as_str) == Some("session/update") {
                         if let Some(event) = normalize_update(&message) {
                             entry.push_event(event);
+                            if entry.evidence_failed.load(Ordering::Acquire) {
+                                self.terminate_run_io(&mut child, &mut outbound);
+                                self.mark_lost(
+                                    &request.run_id,
+                                    &entry,
+                                    "coding_agent_evidence_persist_failed",
+                                );
+                                return;
+                            }
                         }
                         continue;
                     }
@@ -1921,6 +2135,20 @@ impl CodingAgentManager {
                         continue;
                     }
                     if message.get("method").is_some() {
+                        // JSON-RPC extension notifications have no response or
+                        // execution semantics. Ignore unknown notifications;
+                        // unknown client requests still fail closed below.
+                        if message.get("id").is_none() {
+                            continue;
+                        }
+                        entry.push_event(event(
+                            CodingAgentEventKind::ToolActivity,
+                            None,
+                            message["method"]
+                                .as_str()
+                                .map(|name| name.chars().take(256).collect()),
+                            Some("unsupported_client_method".into()),
+                        ));
                         let deadline = *cancel_deadline
                             .get_or_insert_with(|| Instant::now() + ACP_CANCEL_GRACE);
                         if let Some(id) = message.get("id").and_then(Value::as_u64) {
@@ -1958,36 +2186,42 @@ impl CodingAgentManager {
                         continue;
                     }
                     if message.get("id").and_then(Value::as_u64) == Some(prompt_id) {
+                        if !self.cleanup_run_io(&mut child, &mut outbound) {
+                            self.mark_lost(
+                                &request.run_id,
+                                &entry,
+                                "coding_agent_process_exit_unconfirmed",
+                            );
+                            return;
+                        }
                         if let Some(error) = message.get("error") {
+                            if message.get("result").is_some()
+                                || error.get("code").and_then(Value::as_i64).is_none()
+                                || error.get("message").and_then(Value::as_str).is_none()
+                            {
+                                self.mark_lost(
+                                    &request.run_id,
+                                    &entry,
+                                    "coding_agent_prompt_error_invalid",
+                                );
+                                return;
+                            }
                             self.finish_failed(
                                 &request.run_id,
                                 &entry,
-                                "prompt_error",
+                                recovery::prompt_error_kind(error),
                                 bounded_json_summary(error),
                             );
-                            self.cleanup_run_io(&mut child, &mut outbound);
                             return;
                         }
                         let Some(result) = message.get("result").cloned() else {
-                            self.finish_failed(
-                                &request.run_id,
-                                &entry,
-                                "invalid_prompt_response",
-                                "missing prompt result".to_string(),
-                            );
-                            self.cleanup_run_io(&mut child, &mut outbound);
+                            self.mark_lost(&request.run_id, &entry, "invalid_prompt_response");
                             return;
                         };
                         let response: PromptResponse = match serde_json::from_value(result) {
                             Ok(response) => response,
                             Err(_) => {
-                                self.finish_failed(
-                                    &request.run_id,
-                                    &entry,
-                                    "unknown_stop_reason",
-                                    "invalid or unknown ACP stopReason".to_string(),
-                                );
-                                self.cleanup_run_io(&mut child, &mut outbound);
+                                self.mark_lost(&request.run_id, &entry, "unknown_stop_reason");
                                 return;
                             }
                         };
@@ -2027,14 +2261,8 @@ impl CodingAgentManager {
                                 CODING_AGENT_STOP_REASON_REFUSAL,
                                 Some("ACP agent refused the turn"),
                             ),
-                            _ => self.finish_failed(
-                                &request.run_id,
-                                &entry,
-                                "unknown_stop_reason",
-                                "unknown ACP stop reason".to_string(),
-                            ),
+                            _ => self.mark_lost(&request.run_id, &entry, "unknown_stop_reason"),
                         }
-                        self.cleanup_run_io(&mut child, &mut outbound);
                         return;
                     }
                 }
@@ -2070,6 +2298,7 @@ impl CodingAgentManager {
     fn recover(&self) -> Result<(), String> {
         let mut map = self.runs.lock().unwrap();
         for mut record in self.store.scan()? {
+            let recovered_execution = record.dispatch_phase != DurableDispatchPhase::Terminal;
             if record.dispatch_phase != DurableDispatchPhase::Terminal {
                 let message = if record.dispatch_phase
                     == DurableDispatchPhase::PromptDispatchMayHaveOccurred
@@ -2109,34 +2338,19 @@ impl CodingAgentManager {
                 });
                 self.store.write(&record)?;
             }
-            map.insert(
-                record.run_id.clone(),
-                Arc::new(RunEntry::new(record.snapshot(0))),
-            );
+            let entry = Arc::new(RunEntry::new(record.snapshot(0)));
+            entry.restore_evidence(&self.store, true);
+            if recovered_execution {
+                let mut state = entry.state.lock().unwrap();
+                state.snapshot.observation_revision =
+                    state.snapshot.observation_revision.saturating_add(2);
+                record.observation_revision = state.snapshot.observation_revision;
+                self.store.write(&record)?;
+            }
+            *entry.workspace_root.lock().unwrap() = record.workspace_root.map(PathBuf::from);
+            map.insert(record.run_id.clone(), entry);
         }
         Ok(())
-    }
-
-    fn cleanup_expired(&self) {
-        let cutoff = now().saturating_sub(STORE_RETENTION_SECS);
-        let expired = {
-            let map = self.runs.lock().unwrap();
-            map.iter()
-                .filter(|(_, entry)| {
-                    let snapshot = entry.snapshot();
-                    snapshot.state.terminal() && snapshot.updated_at < cutoff
-                })
-                .map(|(run_id, _)| run_id.clone())
-                .collect::<Vec<_>>()
-        };
-        if expired.is_empty() {
-            return;
-        }
-        let mut map = self.runs.lock().unwrap();
-        for run_id in expired {
-            map.remove(&run_id);
-            self.store.remove(&run_id);
-        }
     }
 
     fn setup_failure(&self, run_id: &str, entry: &Arc<RunEntry>, code: &str, message: &str) {
@@ -2270,9 +2484,21 @@ impl CodingAgentManager {
         candidate.execution_state = desired_execution_state;
         candidate.updated_at = desired_terminal.completed_at;
         candidate.terminal = Some(desired_terminal);
+        candidate.observation_revision = current.observation_revision.saturating_add(2);
         let durable =
             durable_record_from_snapshot(run_id, &candidate, DurableDispatchPhase::Terminal)
-                .and_then(|record| self.store.write(&record));
+                .and_then(|mut record| {
+                    if entry.evidence_failed.load(Ordering::Acquire) {
+                        return Err("ACP execution evidence could not be persisted".into());
+                    }
+                    record.workspace_root = entry
+                        .workspace_root
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|root| root.to_string_lossy().into_owned());
+                    self.store.write(&record)
+                });
         match durable {
             Ok(()) => entry.publish_terminal(candidate, desired_event),
             Err(error) => {
@@ -2344,7 +2570,13 @@ impl CodingAgentManager {
         phase: DurableDispatchPhase,
     ) -> Result<(), String> {
         let snapshot = entry.snapshot();
-        let record = durable_record_from_snapshot(run_id, &snapshot, phase)?;
+        let mut record = durable_record_from_snapshot(run_id, &snapshot, phase)?;
+        record.workspace_root = entry
+            .workspace_root
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|root| root.to_string_lossy().into_owned());
         self.store.write(&record)
     }
 }
@@ -2359,10 +2591,12 @@ fn durable_record_from_snapshot(
     }
     Ok(DurableRunRecord {
         schema_version: STORE_SCHEMA_VERSION,
+        observation_revision: snapshot.observation_revision,
         run_id: snapshot.run_id.clone(),
         intent_fingerprint: snapshot.intent_fingerprint.clone(),
         authority_fingerprint: snapshot.authority_fingerprint.clone(),
         runtime_project_id: snapshot.runtime_project_id.clone(),
+        workspace_root: None,
         provider_id: snapshot.provider_id.clone(),
         provider_instance_id: snapshot.provider_instance_id.clone(),
         state: snapshot.state.clone(),
@@ -2740,7 +2974,14 @@ fn normalize_update(message: &Value) -> Option<CodingAgentEvent> {
         .and_then(Value::as_str)
         .map(bounded_text);
     match kind {
-        "agent_message_chunk" => Some(event(CodingAgentEventKind::AgentMessage, text, None, None)),
+        "agent_message_chunk" => {
+            let phase = update
+                .pointer("/_meta/codex/phase")
+                .and_then(Value::as_str)
+                .filter(|phase| matches!(*phase, "commentary" | "final_answer"))
+                .map(str::to_string);
+            Some(event(CodingAgentEventKind::AgentMessage, text, phase, None))
+        }
         "agent_thought_chunk" => Some(event(CodingAgentEventKind::Reasoning, text, None, None)),
         "plan" => Some(event(
             CodingAgentEventKind::Plan,
@@ -2749,11 +2990,28 @@ fn normalize_update(message: &Value) -> Option<CodingAgentEvent> {
             Some("updated".to_string()),
         )),
         "tool_call" | "tool_call_update" => {
-            let label = update
+            let title = update
                 .get("title")
                 .and_then(Value::as_str)
                 .map(bounded_text)
                 .or_else(|| update.get("kind").and_then(Value::as_str).map(bounded_text));
+            let label = update
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .filter(|id| id.len() <= 1024)
+                .map(str::to_owned);
+            let mut result_text = title.unwrap_or_default();
+            if let Some(content) = update.get("content").and_then(Value::as_array) {
+                for item in content {
+                    if let Some(text) = item.pointer("/content/text").and_then(Value::as_str) {
+                        result_text.push('\n');
+                        result_text.push_str(&bounded_text(text));
+                        if result_text.len() >= 16 * 1024 {
+                            break;
+                        }
+                    }
+                }
+            }
             let status = update
                 .get("status")
                 .and_then(Value::as_str)
@@ -2763,7 +3021,12 @@ fn normalize_update(message: &Value) -> Option<CodingAgentEvent> {
                 Some("execute") => CodingAgentEventKind::TerminalActivity,
                 _ => CodingAgentEventKind::ToolActivity,
             };
-            Some(event(event_kind, None, label, status))
+            Some(event(
+                event_kind,
+                Some(bounded_text(&result_text)),
+                label,
+                status,
+            ))
         }
         "usage_update" => {
             let usage = CodingAgentUsage {
@@ -3299,6 +3562,8 @@ for line in sys.stdin:
         let record = DurableRunRecord {
             schema_version: STORE_SCHEMA_VERSION,
             run_id: run.to_string(),
+            observation_revision: 0,
+            workspace_root: None,
             intent_fingerprint: "fingerprint".to_string(),
             authority_fingerprint: "auth_test".to_string(),
             runtime_project_id: "agent:test:demo".to_string(),
@@ -3673,6 +3938,8 @@ for line in sys.stdin:
         let record = DurableRunRecord {
             schema_version: STORE_SCHEMA_VERSION,
             run_id: run.to_string(),
+            observation_revision: 0,
+            workspace_root: None,
             intent_fingerprint: "fingerprint".to_string(),
             authority_fingerprint: "auth_test".to_string(),
             runtime_project_id: "agent:test:demo".to_string(),
@@ -4688,6 +4955,66 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn prompt_dispatch_test_gate_times_out_when_provider_never_arrives() {
+        let started = Instant::now();
+        let gate = PromptDispatchTestGate::new(started + Duration::from_millis(20));
+        assert!(!gate.wait_until_reached());
+        gate.release();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn prompt_dispatch_test_gate_times_out_when_test_never_releases_it() {
+        let started = Instant::now();
+        let gate = PromptDispatchTestGate::new(started + Duration::from_millis(20));
+        assert!(!gate.block_dispatch());
+        assert!(gate.wait_until_reached());
+        gate.release();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prompt_dispatch_test_gate_remains_bounded_after_provider_setup_failure() {
+        let temp = TempDir::new().unwrap();
+        let (exe, args) = fake_agent(&temp, "crash_before_prompt");
+        let cfg = fake_config(exe, args);
+        let projects = project_fixture(&temp);
+        let root = temp.path().join("repo");
+        let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+        let run = "wc_agent_run_promptgatefailed01";
+        let gate = Arc::new(PromptDispatchTestGate::new(
+            Instant::now() + Duration::from_millis(20),
+        ));
+        *manager.prompt_dispatch_test_gate.lock().unwrap() = Some(Arc::clone(&gate));
+        let started = manager.handle(
+            start_request(&manager, &root, run, BTreeMap::new()),
+            &projects,
+        );
+        assert!(started.error.is_none(), "{:?}", started.error);
+        let snapshot = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+        let reached = gate.wait_until_reached();
+        gate.release();
+        manager.stop_accepting();
+        let drain = manager.drain_workers_until(Instant::now() + Duration::from_secs(3));
+        assert!(
+            !reached,
+            "failed provider unexpectedly reached the prompt gate"
+        );
+        assert_eq!(snapshot.state, CodingAgentRunState::Failed);
+        assert_eq!(
+            snapshot.execution_state,
+            CodingAgentExecutionState::NotStarted
+        );
+        assert_eq!(drain.timed_out, 0, "{drain:?}");
+        assert_eq!(drain.panicked, 0, "{drain:?}");
+        assert_eq!(manager.worker_count(), 0);
+        assert!(!received_methods(&wire_log(&temp))
+            .iter()
+            .any(|method| method == "session/prompt"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn cancel_and_prompt_gate_race_has_only_linearized_outcomes() {
         let temp = TempDir::new().unwrap();
@@ -4697,29 +5024,34 @@ for line in sys.stdin:
         let root = temp.path().join("repo");
         let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
         let run = "wc_agent_run_promptgaterace01";
-        let race = Arc::new(std::sync::Barrier::new(2));
-        *manager.prompt_dispatch_test_barrier.lock().unwrap() = Some(Arc::clone(&race));
+        let race = Arc::new(PromptDispatchTestGate::new(
+            Instant::now() + Duration::from_secs(5),
+        ));
+        *manager.prompt_dispatch_test_gate.lock().unwrap() = Some(Arc::clone(&race));
         let started = manager.handle(
             start_request(&manager, &root, run, BTreeMap::new()),
             &projects,
         );
         assert!(started.error.is_none(), "{:?}", started.error);
 
-        let cancel_manager = Arc::clone(&manager);
-        let cancel_projects = projects.clone();
-        let cancel_race = Arc::clone(&race);
-        let cancel = thread::spawn(move || {
-            cancel_race.wait();
-            cancel_manager.handle(
-                CodingAgentRequest::Cancel(CodingAgentCancelRequest {
-                    run_id: run.to_string(),
-                }),
-                &cancel_projects,
-            )
-        });
-        let cancelled = cancel.join().unwrap();
+        let reached = race.wait_until_reached();
+        race.release();
+        if !reached {
+            manager.stop_accepting();
+            let drain = manager.drain_workers_until(Instant::now() + Duration::from_secs(3));
+            let snapshot = manager.runs.lock().unwrap().get(run).unwrap().snapshot();
+            panic!("ACP provider never reached the prompt dispatch test gate before its deadline; snapshot={snapshot:?}; drain={drain:?}; wire_log={:?}", wire_log(&temp));
+        }
+        // Releasing the provider and cancelling on this thread still races for
+        // the production prompt lock, without an auxiliary unbounded join.
+        let cancelled = manager.handle(
+            CodingAgentRequest::Cancel(CodingAgentCancelRequest {
+                run_id: run.to_string(),
+            }),
+            &projects,
+        );
         assert!(cancelled.error.is_none(), "{:?}", cancelled.error);
-        *manager.prompt_dispatch_test_barrier.lock().unwrap() = None;
+        *manager.prompt_dispatch_test_gate.lock().unwrap() = None;
         let final_snapshot = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
         let drain = manager.drain_workers_until(Instant::now() + Duration::from_secs(3));
         assert_eq!(drain.timed_out, 0);
@@ -5035,6 +5367,8 @@ for line in sys.stdin:
         let mut record = DurableRunRecord {
             schema_version: STORE_SCHEMA_VERSION,
             run_id: "wc_agent_run_replace_state01".to_string(),
+            observation_revision: 0,
+            workspace_root: None,
             intent_fingerprint: "fingerprint".to_string(),
             authority_fingerprint: "auth_replace".to_string(),
             runtime_project_id: "agent:test:demo".to_string(),
@@ -5061,6 +5395,73 @@ for line in sys.stdin:
         assert_eq!(
             restored.execution_state,
             CodingAgentExecutionState::OutcomeUnknown
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn durable_store_replaces_and_reopens_long_unicode_windows_paths() {
+        let temp = TempDir::new().unwrap();
+        let root = temp
+            .path()
+            .join("目标状态".repeat(24))
+            .join("runner-namespace".repeat(6));
+        let store = DurableRunStore::new(root.clone());
+        let timestamp = now();
+        let mut record = DurableRunRecord {
+            schema_version: STORE_SCHEMA_VERSION,
+            run_id: "wc_agent_run_long_unicode_state01".to_string(),
+            observation_revision: 0,
+            workspace_root: None,
+            intent_fingerprint: "fingerprint".to_string(),
+            authority_fingerprint: "auth_long_path".to_string(),
+            runtime_project_id: "agent:test:demo".to_string(),
+            provider_id: "codex".to_string(),
+            provider_instance_id: "acp_long_path".to_string(),
+            state: CodingAgentRunState::Starting,
+            execution_state: CodingAgentExecutionState::NotStarted,
+            dispatch_phase: DurableDispatchPhase::BeforePromptBarrier,
+            created_at: timestamp,
+            updated_at: timestamp,
+            terminal: None,
+        };
+        let path = store.state_path(&record.run_id);
+        assert!(path.as_os_str().encode_wide().count() > 260);
+        assert!(
+            !path.to_string_lossy().starts_with(r"\\?\"),
+            "The regression fixture must exercise an ordinary, unprefixed path"
+        );
+        store.write(&record).unwrap();
+        assert_eq!(
+            store.read(&record.run_id).unwrap().unwrap().state,
+            CodingAgentRunState::Starting
+        );
+
+        record.state = CodingAgentRunState::Completed;
+        record.execution_state = CodingAgentExecutionState::Completed;
+        record.dispatch_phase = DurableDispatchPhase::Terminal;
+        record.updated_at = timestamp.saturating_add(1);
+        record.terminal = Some(CodingAgentTerminal {
+            stop_reason: Some(CODING_AGENT_STOP_REASON_END_TURN.to_string()),
+            error_code: None,
+            message: Some("长路径结果已完成".to_string()),
+            completed_at: record.updated_at,
+        });
+        store.write(&record).unwrap();
+        drop(store);
+
+        let reopened = DurableRunStore::new(root);
+        let restored = reopened.read(&record.run_id).unwrap().unwrap();
+        assert_eq!(restored.snapshot(0), record.snapshot(0));
+        let scanned = reopened.scan().unwrap();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].snapshot(0), record.snapshot(0));
+        assert_eq!(
+            fs::read_dir(reopened.run_dir(&record.run_id))
+                .unwrap()
+                .count(),
+            1,
+            "Atomic publication must consume its temporary files"
         );
     }
 
@@ -5297,6 +5698,8 @@ for line in sys.stdin:
             .write(&DurableRunRecord {
                 schema_version: STORE_SCHEMA_VERSION,
                 run_id: "wc_agent_run_prebarrier01".to_string(),
+                observation_revision: 0,
+                workspace_root: None,
                 intent_fingerprint: "fingerprint".to_string(),
                 authority_fingerprint: "auth_test".to_string(),
                 runtime_project_id: "agent:test:demo".to_string(),
@@ -5481,6 +5884,70 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn normalize_agent_message_phase_commentary_preserves_text() {
+        let normalized = normalize_update(&json!({
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Inspecting the acceptance evidence."},
+                "_meta": {"codex": {"phase": "commentary"}}
+            }}
+        }))
+        .unwrap();
+        assert_eq!(normalized.kind, CodingAgentEventKind::AgentMessage);
+        assert_eq!(normalized.label.as_deref(), Some("commentary"));
+        assert_eq!(
+            normalized.text.as_deref(),
+            Some("Inspecting the acceptance evidence.")
+        );
+    }
+
+    #[test]
+    fn normalize_agent_message_phase_final_answer_preserves_json() {
+        let answer = r#"{"checks":[{"criterion_id":"review","passed":true,"evidence":"Inspected result.txt"}]}"#;
+        let normalized = normalize_update(&json!({
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": answer},
+                "_meta": {"codex": {"phase": "final_answer"}}
+            }}
+        }))
+        .unwrap();
+        assert_eq!(normalized.kind, CodingAgentEventKind::AgentMessage);
+        assert_eq!(normalized.label.as_deref(), Some("final_answer"));
+        assert_eq!(normalized.text.as_deref(), Some(answer));
+    }
+
+    #[test]
+    fn normalize_agent_message_phase_unknown_plain_and_reasoning_remain_unlabelled() {
+        for meta in [
+            None,
+            Some(json!({"codex": {"phase": "future_phase"}})),
+            Some(json!({"codex": {"phase": 1}})),
+        ] {
+            let mut message = json!({"params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Provider response"}
+            }}});
+            if let Some(meta) = meta {
+                message["params"]["update"]["_meta"] = meta;
+            }
+            let normalized = normalize_update(&message).unwrap();
+            assert_eq!(normalized.kind, CodingAgentEventKind::AgentMessage);
+            assert_eq!(normalized.label, None);
+            assert_eq!(normalized.text.as_deref(), Some("Provider response"));
+        }
+        let thought = normalize_update(&json!({"params": {"update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "Reasoning remains separate"},
+            "_meta": {"codex": {"phase": "final_answer"}}
+        }}}))
+        .unwrap();
+        assert_eq!(thought.kind, CodingAgentEventKind::Reasoning);
+        assert_eq!(thought.label, None);
+        assert_eq!(thought.text.as_deref(), Some("Reasoning remains separate"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn fake_acp_normalizes_activity_and_terminal_matrix() {
         let (manager, run, obs) = run_scenario("end", BTreeMap::new());
@@ -5515,21 +5982,22 @@ for line in sys.stdin:
             let (manager, run, obs) = run_scenario(scenario, BTreeMap::new());
             let expected = if scenario == "cancelled" {
                 CodingAgentRunState::Cancelled
+            } else if scenario == "unknown" {
+                CodingAgentRunState::Lost
             } else {
                 CodingAgentRunState::Failed
             };
-            assert_eq!(obs.run.state, expected);
-            assert_eq!(
-                obs.run.execution_state,
+            let expected_execution = if scenario == "unknown" {
+                CodingAgentExecutionState::OutcomeUnknown
+            } else {
                 CodingAgentExecutionState::Completed
-            );
+            };
+            assert_eq!(obs.run.state, expected);
+            assert_eq!(obs.run.execution_state, expected_execution);
             let durable = manager.store.read(&run).unwrap().unwrap();
             assert_eq!(durable.dispatch_phase, DurableDispatchPhase::Terminal);
             assert_eq!(durable.state, expected);
-            assert_eq!(
-                durable.execution_state,
-                CodingAgentExecutionState::Completed
-            );
+            assert_eq!(durable.execution_state, expected_execution);
             assert_eq!(durable.terminal, obs.run.terminal);
         }
     }

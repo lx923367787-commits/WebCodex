@@ -30,6 +30,7 @@ async fn lease_different_online_instance_takes_over_immediately_and_retires_old_
     // passive last_seen grace: it takes over immediately even while A is fresh.
     let view = registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -509,6 +510,7 @@ async fn lease_register_rejects_empty_instance_id() {
     let registry = RunnerRegistry::default();
     let err = registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -548,6 +550,7 @@ async fn lease_replacement_transfers_exact_detached_inventory_to_new_instance() 
     };
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -652,6 +655,8 @@ async fn lease_replacement_transfers_exact_detached_inventory_to_new_instance() 
             error: record.error.clone(),
             command_execution_state: record.command_execution_state,
             context: crate::runner_protocol::ShellJobContext {
+                agent_execution: None,
+                document: None,
                 runtime_project_id: record.project_id.clone(),
                 workflow_session_id: record.session_id.clone(),
                 ssh_resource: record.ssh_resource.clone(),
@@ -676,6 +681,7 @@ async fn lease_replacement_transfers_exact_detached_inventory_to_new_instance() 
         .await;
     let view = registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,

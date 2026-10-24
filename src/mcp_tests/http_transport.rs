@@ -91,6 +91,7 @@ async fn stateless_observation_runner_registry() -> Arc<crate::runner_http::Runn
     runner_registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -1609,13 +1610,13 @@ async fn http_mcp_2026_collaboration_completion_preserves_explicit_recorder_prov
         .as_str()
         .expect("todo message id")
         .to_string();
-    let assignment_fence = runtime
+    let assignment = runtime
         .sessions
         .get_assignment(&coordinator_id, &todo_id)
-        .unwrap()
-        .assignment_fence;
+        .unwrap();
+    let assignment_fence = assignment.assignment_fence.clone();
 
-    let completion_arguments = with_mcp_recording_session(
+    let mut completion_arguments = with_mcp_recording_session(
         json!({
             "session_id": coordinator_id,
             "message_id": todo_id,
@@ -1626,10 +1627,42 @@ async fn http_mcp_2026_collaboration_completion_preserves_explicit_recorder_prov
         }),
         &worker_id,
     );
-    let (status, completed_body) = stateless_2026_tool_call(
+    let (status, rejected_body) = stateless_2026_tool_call(
         &service,
         "secret",
         234,
+        "complete_session_message",
+        completion_arguments.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected_body}");
+    assert!(rejected_body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("author_session_id"));
+    let unchanged_assignment = runtime
+        .sessions
+        .get_assignment(&coordinator_id, &todo_id)
+        .unwrap();
+    assert_eq!(unchanged_assignment, assignment);
+    assert_eq!(
+        unchanged_assignment.todo.status,
+        crate::tool_runtime::sessions::SessionMessageStatus::Open
+    );
+    assert!(unchanged_assignment.direct_replies.is_empty());
+    assert!(!rejected_body
+        .to_string()
+        .contains("wc_sess_forged_should_not_win"));
+
+    completion_arguments
+        .as_object_mut()
+        .unwrap()
+        .remove("author_session_id");
+    let (status, completed_body) = stateless_2026_tool_call(
+        &service,
+        "secret",
+        241,
         "complete_session_message",
         completion_arguments,
         None,

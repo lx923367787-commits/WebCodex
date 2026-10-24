@@ -144,7 +144,7 @@ async fn http_projects_create_rejects_unknown_client_id() {
 }
 
 #[tokio::test]
-async fn http_projects_create_keeps_unrelated_unknown_field_tolerance() {
+async fn http_projects_create_rejects_unknown_fields_before_dispatch() {
     let config = super::test_config(Some("secret"));
     let (_tmp, db) = super::test_db();
     let tmp_proj = tempfile::tempdir().unwrap();
@@ -165,12 +165,11 @@ async fn http_projects_create_keeps_unrelated_unknown_field_tolerance() {
 
     assert_eq!(super::effective_status(&resp), StatusCode::BAD_REQUEST);
     let body: Value = resp.take_json().await.unwrap();
-    assert_eq!(body["success"], false);
     assert!(
-        body["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("unknown Runner")),
-        "unrelated unknown fields should keep the endpoint's historical tolerance: {:?}",
+        body["error"].as_str().is_some_and(
+            |error| error.contains("unknown field") && error.contains("unrelated_legacy_field")
+        ),
+        "unknown fields must fail before project dispatch: {:?}",
         body["error"]
     );
 }
@@ -197,10 +196,9 @@ async fn http_projects_create_rejects_retired_managed_temporary_field_before_dis
 
     assert_eq!(super::effective_status(&resp), StatusCode::BAD_REQUEST);
     let body: Value = resp.take_json().await.unwrap();
-    assert_eq!(body["success"], false);
     let error = body["error"].as_str().unwrap_or_default();
     assert!(error.contains("managed_temporary_project"), "{error}");
-    assert!(error.contains("no longer supported"), "{error}");
+    assert!(error.contains("unknown field"), "{error}");
     assert!(
         !error.contains("unknown agent"),
         "retired field must fail before project dispatch: {error}"
@@ -229,7 +227,6 @@ async fn http_projects_create_rejects_retired_allow_existing_empty_before_dispat
 
     assert_eq!(super::effective_status(&resp), StatusCode::BAD_REQUEST);
     let body: Value = resp.take_json().await.unwrap();
-    assert_eq!(body["success"], false);
     let error = body["error"].as_str().unwrap_or_default();
     assert!(error.contains("allow_existing_empty"), "{error}");
     assert!(error.contains("adopt_existing_empty"), "{error}");

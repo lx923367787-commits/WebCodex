@@ -533,6 +533,7 @@ fn validate_command_execution_state(
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellJobStartMetadata {
+    pub document: Option<webcodex_core::runner_protocol::DocumentJobMetadata>,
     pub project_id: Option<String>,
     pub session_id: Option<String>,
     pub ssh_resource: Option<String>,
@@ -855,6 +856,8 @@ impl RunnerRegistry {
             .map(|step| step.name.clone())
             .collect::<Vec<_>>();
         let job_context = ShellJobContext {
+            agent_execution: None,
+            document: metadata.document.clone(),
             runtime_project_id: metadata.project_id.clone(),
             workflow_session_id: metadata.session_id.clone(),
             ssh_resource: metadata.ssh_resource.clone(),
@@ -1085,6 +1088,8 @@ impl RunnerRegistry {
             Some(job_id.clone()),
         )?;
         let job = ShellJobRecord {
+            agent_execution: None,
+            document: metadata.document,
             job_id: job_id.clone(),
             request_id: Some(request_id.clone()),
             client_id: client_id.clone(),
@@ -1995,6 +2000,13 @@ impl RunnerRegistry {
             }
             if job.runner_instance_id != body.runner_instance_id {
                 return Err("job_id belongs to a replaced runner instance".to_string());
+            }
+            if job
+                .agent_execution
+                .as_ref()
+                .is_some_and(|state| !state.transport_dispatched)
+            {
+                return Err("agent_execution_not_dispatched".into());
             }
             if body
                 .request_id

@@ -21,6 +21,26 @@ pub(super) const PUBLIC_WEB_ROUTES: &[RouteSpec] = &[route(
 // keep that behavior explicit rather than widening authority in this cleanup.
 pub(super) const ADMIN_ROUTES: &[RouteSpec] = &[
     route(
+        OfficeControl,
+        Post,
+        "/api/office/control",
+        FirstPartyOnly,
+        Admin,
+        Hidden,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
+        AgentIsolationControl,
+        Post,
+        "/api/admin/agent-isolation",
+        BootstrapOnly,
+        Admin,
+        Hidden,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
         AdminDashboard,
         Post,
         "/api/admin/dashboard",

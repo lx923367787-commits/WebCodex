@@ -1,5 +1,75 @@
 use super::*;
 
+#[tokio::test]
+async fn reconnect_is_bounded_and_success_does_not_reset_lifetime_budget() {
+    let mut attempts = 0;
+    let mut calls = 0;
+    let result = reconnect_tunnel(
+        &mut attempts,
+        Instant::now() + Duration::from_secs(1),
+        Duration::ZERO,
+        |_| {
+            calls += 1;
+            std::future::ready(if calls == 2 {
+                Ok(())
+            } else {
+                Err(tunnel_runtime_error("probe failed"))
+            })
+        },
+    )
+    .await;
+    assert!(result.is_ok());
+    assert_eq!(attempts, 2);
+    let result: Result<(), _> = reconnect_tunnel(
+        &mut attempts,
+        Instant::now() + Duration::from_secs(1),
+        Duration::ZERO,
+        |_| {
+            calls += 1;
+            std::future::ready(Err(tunnel_runtime_error("probe failed")))
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(calls, 3);
+    assert_eq!(attempts, TUNNEL_RECONNECT_LIMIT);
+}
+
+#[tokio::test]
+async fn reconnect_deadline_and_cancellation_never_start_another_attempt() {
+    let mut attempts = 0;
+    let result: Result<(), _> =
+        reconnect_tunnel(&mut attempts, Instant::now(), Duration::ZERO, |_| async {
+            panic!("expired recovery must not launch a child");
+        })
+        .await;
+    assert!(result.is_err());
+    assert_eq!(attempts, 0);
+
+    let result: Result<(), _> = reconnect_tunnel(
+        &mut attempts,
+        Instant::now() + Duration::from_millis(10),
+        Duration::ZERO,
+        |_| std::future::pending(),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(attempts, 1);
+
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(10),
+        reconnect_tunnel::<(), _, _>(
+            &mut attempts,
+            Instant::now() + Duration::from_secs(5),
+            Duration::ZERO,
+            |_| std::future::pending(),
+        ),
+    )
+    .await;
+    assert!(cancelled.is_err());
+    assert_eq!(attempts, 2);
+}
+
 #[test]
 fn runtime_command_inherits_only_tunnel_authority_not_server_bootstrap_or_openai_admin_keys() {
     let prerequisites = OpenAiTunnelPrerequisites {
@@ -14,12 +84,36 @@ fn runtime_command_inherits_only_tunnel_authority_not_server_bootstrap_or_openai
         Path::new("authorization"),
     );
 
+    let args = command
+        .as_std()
+        .get_args()
+        .map(|v| v.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(args
+        .windows(2)
+        .any(|a| a == ["--mcp.extra-headers", "Authorization: file:authorization"]));
+    assert!(!args
+        .iter()
+        .any(|a| a.contains("Bearer ") || a.contains("wc_nh_") || a.contains("wc_boot_")));
     let env = command.as_std().get_envs().collect::<Vec<_>>();
     for key in ["WEBCODEX_TOKEN", "OPENAI_ADMIN_KEY", "OPENAI_API_KEY"] {
-        assert!(env
-            .iter()
-            .any(|(name, value)| { name.to_str() == Some(key) && value.is_none() }));
+        assert!(env.iter().all(|(name, _)| name.to_str() != Some(key)));
     }
+    for forbidden in [
+        "TUNNEL_CLIENT_CONFIG",
+        "TUNNEL_CLIENT_PROFILE",
+        "TUNNEL_CLIENT_PROFILE_FILE",
+        "MCP_COMMAND",
+        "MCP_EXTRA_HEADERS",
+        "CA_BUNDLE",
+        "OPEN_WEB_UI",
+    ] {
+        assert!(env.iter().all(|(name, _)| name.to_str() != Some(forbidden)));
+    }
+    assert!(env.iter().any(
+        |(name, value)| name.to_str() == Some("CONTROL_PLANE_BASE_URL")
+            && value.and_then(|v| v.to_str()) == Some("https://api.openai.com")
+    ));
     assert!(env.iter().any(|(name, value)| {
         name.to_str() == Some("CONTROL_PLANE_TUNNEL_ID")
             && value.and_then(|value| value.to_str()) == Some(prerequisites.tunnel_id.as_str())

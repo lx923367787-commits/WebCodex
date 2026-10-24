@@ -61,7 +61,7 @@ impl TokenVerifier for PatVerifier {
         // Auth disabled in development -> bootstrap (full access), identical to
         // AuthMiddleware's `!config.is_auth_enabled()` branch.
         if !config.is_auth_enabled() {
-            return Ok(Some(bootstrap_context()));
+            return Ok(None);
         }
 
         // Bootstrap token check (constant-time comparison).
@@ -365,6 +365,33 @@ pub(crate) async fn authenticate(
     db: Option<&Arc<Database>>,
     token: &str,
 ) -> Result<Option<AuthContext>, AuthError> {
+    // This audience is checked before auth-disabled/bootstrap compatibility.
+    // A run credential can never turn into a user or administration credential.
+    if token.starts_with(webcodex_store::NATIVE_AGENT_HOST_TOKEN_PREFIX) {
+        let host = db
+            .ok_or(AuthError::InvalidToken)?
+            .authenticate_native_agent_host(token)
+            .map_err(|_| AuthError::InvalidToken)?;
+        let mut context = AuthContext::new(AuthKind::NativeHost);
+        context.token_kind = Some("native_host".into());
+        context.native_host = Some(host);
+        return Ok(Some(context));
+    }
+    if token.starts_with("wc_ar_") {
+        let binding = db
+            .ok_or(AuthError::InvalidToken)?
+            .authenticate_agent_run(token)
+            .map_err(|_| AuthError::InvalidToken)?;
+        let mut context = AuthContext::new(AuthKind::ModelAgent);
+        context.token_kind = Some("isolated_agent".into());
+        context.scopes = vec![
+            "runtime:read".into(),
+            "project:read".into(),
+            "project:write".into(),
+        ];
+        context.agent_run = Some(binding);
+        return Ok(Some(context));
+    }
     let verifiers: &[&dyn TokenVerifier] = &[&PatVerifier, &OAuth2Verifier];
 
     for verifier in verifiers {

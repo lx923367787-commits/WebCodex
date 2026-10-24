@@ -5,6 +5,56 @@ use tokio::time::Instant;
 
 const SESSION_TEST_TIMEOUT: Duration = Duration::from_millis(250);
 
+#[tokio::test]
+async fn close_receipt_without_authenticated_store_context_does_not_acknowledge_or_change_lease() {
+    let registry = Arc::new(RunnerRegistry::default());
+    register_streaming(
+        &registry,
+        "close-runner",
+        "close-instance",
+        "close-connection",
+    )
+    .await;
+    let (out_tx, mut out_rx) = mpsc::channel(OUTGOING_CHANNEL_CAPACITY);
+    let envelope: RunnerEnvelope = serde_json::from_value(serde_json::json!({
+        "type":"agent_execution_close_receipt",
+        "request_id":"unregistered-close-request",
+        "receipt":{
+            "version":1,
+            "close_ref":{"close_id":"close-test","source":{"agent_id":"agent-test","agent_run_id":"run-test","generation":1}},
+            "target":{"client_id":"close-runner","runner_instance_id":"close-instance"},
+            "deadline_at_ms":123456789,
+            "members_sha256":"a".repeat(64),
+            "observation_revision":1,
+            "admission_closed":true,
+            "tombstone_persisted":true,
+            "receipts":[]
+        }
+    })).unwrap();
+    dispatch_inbound(
+        envelope,
+        &registry,
+        None,
+        "close-runner",
+        "close-instance",
+        "close-connection",
+        &out_tx,
+        "websocket",
+    )
+    .await;
+    assert!(matches!(
+        out_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert!(
+        registry
+            .get_runner_view_for_connection("close-runner", "close-instance", "close-connection")
+            .await
+            .unwrap()
+            .connected
+    );
+}
+
 struct PendingReader;
 
 impl RunnerReader for PendingReader {
@@ -22,6 +72,7 @@ fn streaming_registration(client_id: &str, runner_instance_id: &str) -> RunnerRe
     capabilities.async_jobs = true;
     capabilities.async_shell_jobs = true;
     crate::test_support::current_runner_registration(RunnerRegisterRequest {
+        agent_execution_resources: Vec::new(),
         process_started_at: None,
         build: None,
         job_concurrency_limit: None,
@@ -100,6 +151,7 @@ async fn writer_failure_terminates_session_and_reconciles_active_job() {
         deadline(),
         run_runner_session(
             SessionContext {
+                close_receipt_db: None,
                 registry: &registry,
                 client_id: "writer-fail",
                 runner_instance_id: "inst-a",
@@ -132,6 +184,7 @@ async fn writer_task_panic_terminates_session() {
         deadline(),
         run_runner_session(
             SessionContext {
+                close_receipt_db: None,
                 registry: &registry,
                 client_id: "writer-panic",
                 runner_instance_id: "inst-a",
@@ -172,6 +225,7 @@ async fn pump_exit_terminates_pending_reader_and_reconciles_exact_connection() {
             deadline(),
             run_runner_session_with_pump(
                 SessionContext {
+                    close_receipt_db: None,
                     registry: &registry,
                     client_id,
                     runner_instance_id: "inst-a",
@@ -208,6 +262,7 @@ async fn pump_task_panic_terminates_session() {
         deadline(),
         run_runner_session_with_pump(
             SessionContext {
+                close_receipt_db: None,
                 registry: &registry,
                 client_id: "pump-panic",
                 runner_instance_id: "inst-a",
@@ -248,6 +303,7 @@ async fn same_instance_replacement_actively_terminates_old_session_without_losin
     let session_task = tokio::spawn(async move {
         run_runner_session(
             SessionContext {
+                close_receipt_db: None,
                 registry: &session_registry,
                 client_id: "replace-active",
                 runner_instance_id: "inst-a",
@@ -320,6 +376,7 @@ async fn stale_writer_failure_cannot_reconcile_replacement_connection() {
         deadline(),
         run_runner_session(
             SessionContext {
+                close_receipt_db: None,
                 registry: &registry,
                 client_id: "writer-stale",
                 runner_instance_id: "inst-a",

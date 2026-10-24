@@ -211,10 +211,10 @@ fn allowed_tool_definition_categories_for_discovery_group(group: &str) -> &'stat
     match group {
         "checkpoint" => &["checkpoint"],
         "cleanup" => &["checkpoint", "cleanup"],
-        "coding_agent" => &["coding_agent"],
+        "coding_agent" => &["coding_agent", "goal"],
         "agent_task" => &["agent_task"],
         "communication" => &["communication"],
-        "edit" => &["artifact", "edit", "patch"],
+        "edit" => &["artifact", "edit", "file", "patch"],
         "file_transfer" => &["artifact"],
         "git" => &["checkpoint", "cleanup", "file", "git"],
         "inspect" => &[

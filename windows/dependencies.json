@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "platform": "windows-x86_64",
+  "verified_on": "2026-10-24",
+  "purpose": "Rebuild the Windows Office, PDF, OCR and drawing payload with the recorded runtime versions.",
+  "artifacts": [
+    {
+      "id": "python-embedded",
+      "version": "3.11.9",
+      "filename": "python-3.11.9-embed-amd64.zip",
+      "url": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
+      "source_page": "https://www.python.org/downloads/release/python-3119/",
+      "sha256": "009d6bf7e3b2ddca3d784fa09f90fe54336d5b60f0e0f305c37f400bf83cfd3b",
+      "bytes": 11249023,
+      "license": "PSF-2.0",
+      "verification": "Downloaded official archive and calculated SHA-256; installed runtime reports Python 3.11.9.",
+      "destination": "python-base/"
+    },
+    {
+      "id": "tesseract",
+      "version": "5.5.3.20260724",
+      "filename": "tesseract-ocr-w64-setup-5.5.3.20260724.exe",
+      "url": "https://github.com/tesseract-ocr/tesseract/releases/download/5.5.3/tesseract-ocr-w64-setup-5.5.3.20260724.exe",
+      "source_page": "https://github.com/UB-Mannheim/tesseract/wiki",
+      "sha256": "bee9e3434bd94fd65387d9be28cd467a41f61b1275383b55b0f59a1331270ae4",
+      "bytes": 26573224,
+      "license": "Apache-2.0; bundled DLLs retain their respective licenses",
+      "verification": "SHA-256 calculated from the preserved downloaded installer; filename and upstream URL verified against the publisher page.",
+      "extracted_executable_sha256": "c66f0f12ed76f6aa455dac97684bbc86756d6a732380bee09122454cfda3f420",
+      "destination": "tesseract-base/",
+      "notes": "Extract the installer without installing it; retain its DLLs, doc directory and tessdata/configs/tsv. Add the two separately pinned language files below."
+    },
+    {
+      "id": "tessdata-eng",
+      "version": "tessdata_fast content pinned by SHA-256",
+      "filename": "eng.traineddata",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/eng.traineddata",
+      "source_page": "https://github.com/tesseract-ocr/tessdata_fast",
+      "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+      "bytes": 4113088,
+      "license": "Apache-2.0",
+      "verification": "Downloaded upstream bytes match the installed payload manifest.",
+      "destination": "tesseract-base/tessdata/eng.traineddata"
+    },
+    {
+      "id": "tessdata-chi-sim",
+      "version": "tessdata_fast content pinned by SHA-256",
+      "filename": "chi_sim.traineddata",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/chi_sim.traineddata",
+      "source_page": "https://github.com/tesseract-ocr/tessdata_fast",
+      "sha256": "a5fcb6f0db1e1d6d8522f39db4e848f05984669172e584e8d76b6b3141e1f730",
+      "bytes": 2469156,
+      "license": "Apache-2.0",
+      "verification": "Downloaded upstream bytes match the installed payload manifest.",
+      "destination": "tesseract-base/tessdata/chi_sim.traineddata"
+    },
+    {
+      "id": "graphviz",
+      "version": "16.1.0",
+      "filename": "windows_10_cmake_Release_Graphviz-16.1.0-win64.zip",
+      "url": "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.1.0/windows_10_cmake_Release_Graphviz-16.1.0-win64.zip",
+      "source_page": "https://graphviz.org/download/",
+      "checksum_url": "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.1.0/windows_10_cmake_Release_Graphviz-16.1.0-win64.zip.sha256",
+      "sha256": "733e49626c492242eb8dca30ea627b6ead20710e207998c7933b4909d92d6abc",
+      "bytes": 9767733,
+      "license": "EPL-1.0; bundled libraries retain their respective licenses",
+      "verification": "Publisher checksum matches the existing drawing builder pin and installed drawing manifest.",
+      "destination": "graphviz/Graphviz-16.1.0-win64/"
+    },
+    {
+      "id": "zcool-xiaowei-font",
+      "version": "upstream unmodified font, content pinned by SHA-256",
+      "filename": "ZCOOLXiaoWei-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/zcoolxiaowei/ZCOOLXiaoWei-Regular.ttf",
+      "source_page": "https://github.com/google/fonts/tree/main/ofl/zcoolxiaowei",
+      "sha256": "a42b620140f493db42f741351dfbf343c0936d58588ee8004b8b2a218d997ff1",
+      "bytes": 6313808,
+      "license": "OFL-1.1",
+      "verification": "Downloaded upstream bytes match the installed font and the repository copy.",
+      "repository_path": "windows/assets/fonts/ZCOOLXiaoWei-Regular.ttf"
+    },
+    {
+      "id": "zcool-xiaowei-license",
+      "version": "OFL-1.1",
+      "filename": "OFL.txt",
+      "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/zcoolxiaowei/OFL.txt",
+      "sha256": "a094514ca57cf8f9c5e8d8d1adab5d8cd3a377297ff016f9df2c05b3ecd77f0a",
+      "bytes": 4400,
+      "license": "OFL-1.1",
+      "verification": "Downloaded upstream bytes match the installed license and the repository copy.",
+      "repository_path": "windows/assets/fonts/OFL.txt"
+    }
+  ],
+  "lockfiles": [
+    { "path": "Cargo.lock", "manager": "cargo", "install": "cargo build --locked" },
+    { "path": "apps/desktop/src-tauri/Cargo.lock", "manager": "cargo", "install": "cargo build --locked --features tauri/custom-protocol" },
+    { "path": "frontend/package-lock.json", "manager": "npm", "install": "npm ci" },
+    { "path": "apps/desktop/package-lock.json", "manager": "npm", "install": "npm ci" },
+    { "path": "windows/chat-handoff/extension-runtime/package-lock.json", "manager": "npm", "install": "npm ci" },
+    { "path": "windows/goal-provider/package-lock.json", "manager": "npm", "install": "npm ci" },
+    { "path": "windows/chat-handoff/requirements.lock", "manager": "pip", "python": "3.11 x64", "install": "pip install -r requirements.lock in a dedicated venv, separate from the Office runtime" },
+    { "path": "plugins/mycodex-tools/requirements.lock", "manager": "pip", "python": "3.11 x64", "install": "pip install --only-binary=:all: --no-deps -r requirements.lock" },
+    { "path": "plugins/mycodex-tools/drawing/requirements.lock", "manager": "pip", "python": "3.11 x64", "install": "pip install --only-binary=:all: --no-deps --target drawing/vendor -r drawing/requirements.lock" }
+  ],
+  "installed_reference": {
+    "python": "3.11.9 amd64",
+    "pypdfium2": "5.13.0",
+    "pdfium": "153.0.7999.0",
+    "tesseract": "5.5.3.20260724",
+    "graphviz": "16.1.0",
+    "ocr_languages": ["chi_sim", "eng"],
+    "tesseract_tsv_sha256": "59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04"
+  },
+  "external_requirements": [
+    "Windows 10/11 x64, PowerShell 7, Git, Rust MSVC toolchain and Visual Studio C++ Build Tools with a Windows SDK",
+    "Node.js 22 or newer compatible version with npm and a development Python 3.11 x64 with pip (the embeddable runtime does not provide pip)",
+    "Microsoft WebView2 Runtime for Desktop",
+    "A separately licensed local Microsoft Office installation exposing Word, Excel and PowerPoint COM APIs for native document workflows",
+    "Separate user authentication and configuration for Codex/other agent CLIs, tunnels and browser handoff; credentials are not source dependencies"
+  ],
+  "limits": [
+    "Version locks preserve selected dependency versions; Python wheel bytes are not hash-pinned in the existing requirements.lock files.",
+    "Upstream main URLs are accepted only when their bytes match the recorded SHA-256; a hash mismatch must stop the build.",
+    "This inventory preserves functionality prerequisites, not pre-existing accounts, personal documents, runtime databases or byte-identical Rust executable output."
+  ]
+}

@@ -1,5 +1,34 @@
 # ACP Coding Agent Run Contract
 
+ACP is optional. Ordinary installed Agent CLIs are invoked with `run_process`
+or `run_detached_process` and observed through Jobs. They do not need an ACP
+Provider entry or the ACP-specific `coding_agent:run` scope; normal process and
+Project authorization still applies. This document covers only the explicit ACP
+path. See [direct CLI execution](../architecture/agent-takeover.md).
+
+## Takeover extension (2026-10-22)
+
+The current implementation extends the historical P1 baseline below. See
+[`../architecture/agent-takeover.md`](../architecture/agent-takeover.md) for the
+configuration, recovery and validation contract. A separate bounded evidence
+file now persists normalized output and tool receipts (never reasoning text or
+private ACP session ids). Tool activity labels carry provider tool-call ids so
+updates can be correlated; text carries bounded titles/results. Model metadata
+is recorded after negotiated overrides. Unknown JSON-RPC extension notifications
+are ignored; unsupported requests and permissions still fail closed.
+
+Correlated terminal outcomes are published only after owned process-tree exit
+is confirmed. Overlapping workspaces with live or uncertain Runs reject new
+admission. Durable history is no longer automatically deleted after 15 minutes:
+the existing 128-Run inventory bound instead stops admission until an operator
+archives reviewed history. This deliberately preserves response-loss and failure
+evidence. Server-side cache eviction does not erase Runner history.
+
+The temporary `json_cli`-inside-ACP adapter has been removed. CLI argv, stdout,
+stderr, cancellation and recovery already belong to the native process/Job path.
+An obsolete `json_cli` provider declaration is rejected rather than silently
+launching a non-ACP CLI as ACP. Existing genuine ACP providers remain supported.
+
 This note defines the P0 architecture baseline for running an Agent Client
 Protocol (ACP) coding agent from WebCodex. It is deliberately narrower than a
 public implementation: the goal is to fix the execution, identity, lifecycle,

@@ -293,6 +293,42 @@ fn decorate(
 }
 
 impl ToolRuntime {
+    pub(super) async fn run_document_worker(
+        &self,
+        project: String,
+        spec: webcodex_core::plugin::DocumentWorkerSpec,
+        stdin: String,
+        metadata: webcodex_core::runner_protocol::DocumentJobMetadata,
+        session_id: Option<String>,
+        auth: Option<&AuthContext>,
+    ) -> ToolResult {
+        let mut args = spec.args;
+        args.extend([
+            "--request".into(),
+            "-".into(),
+            "--result".into(),
+            format!(".webcodex-office/cache/{}/result.json", metadata.request_id),
+        ]);
+        self.run_process_with_contract_mode(
+            project,
+            spec.executable,
+            args,
+            Some(stdin),
+            Some(300),
+            Some(5),
+            Some(spec.cwd),
+            Some(ExecutionPurpose::Operation),
+            None,
+            session_id,
+            auth,
+            None,
+            true,
+            Some(metadata),
+            false,
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_process_with_contract_for_resource(
         &self,
@@ -323,6 +359,8 @@ impl ToolRuntime {
             auth,
             validation_assertion_name,
             true,
+            None,
+            false,
         )
         .await
     }
@@ -345,13 +383,15 @@ impl ToolRuntime {
         session_id: Option<String>,
         auth: Option<&AuthContext>,
     ) -> ToolResult {
-        let budget = match StructuredExecutionBudget::resolve(timeout_secs) {
+        let budget = match StructuredExecutionBudget::resolve(Some(timeout_secs.unwrap_or(
+            webcodex_core::coding_agent::CODING_AGENT_LONG_RESPONSE_TIMEOUT_SECS,
+        ))) {
             Ok(budget) => budget,
             Err(error) => {
                 return process_tool_failure_result(
                     command_rejected_message(
                         format!("run_detached_process {error}"),
-                        "pass timeout_secs between 1 and 3600, or omit it for the default of 60 seconds.",
+                        "pass timeout_secs between 1 and 3600, or omit it for the default of 900 seconds.",
                     ),
                     "invalid_arguments",
                     ShellCommandExecutionState::NotStarted,
@@ -382,7 +422,7 @@ impl ToolRuntime {
         }
         let summary = format!("detached process ({} args)", process.args.len());
         let declared_purpose = purpose.unwrap_or_default();
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(project) => project,
             Err(error) => {
                 return process_tool_failure_result(
@@ -545,6 +585,37 @@ impl ToolRuntime {
         }
     }
 
+    /// Ordinary team CLI calls retain their exact typed Job even when the
+    /// process exits before the first observation. Recovery never invents a Job.
+    pub(crate) async fn run_team_cli_process(
+        &self,
+        project: String,
+        executable: String,
+        args: Vec<String>,
+        stdin: Option<String>,
+        timeout_secs: u64,
+        auth: Option<&AuthContext>,
+    ) -> ToolResult {
+        self.run_process_with_contract_mode(
+            project,
+            executable,
+            args,
+            stdin,
+            Some(timeout_secs),
+            Some(1),
+            Some(".".into()),
+            Some(ExecutionPurpose::Operation),
+            None,
+            None,
+            auth,
+            None,
+            true,
+            None,
+            true,
+        )
+        .await
+    }
+
     /// Execute one server-owned fixed process synchronously without exposing the
     /// model-facing structured-execution Job handoff. Effectful internal tools
     /// must not report success while their fixed mutation is still running.
@@ -569,6 +640,8 @@ impl ToolRuntime {
             None,
             None,
             false,
+            None,
+            false,
         )
         .await
     }
@@ -589,7 +662,11 @@ impl ToolRuntime {
         auth: Option<&AuthContext>,
         validation_assertion_name: Option<&str>,
         allow_async_handoff: bool,
+        document: Option<webcodex_core::runner_protocol::DocumentJobMetadata>,
+        retain_team_job: bool,
     ) -> ToolResult {
+        let document_operation = document.is_some();
+        let preserve_job = document_operation || retain_team_job;
         let budget =
             match StructuredExecutionBudget::resolve_with_sync_wait(timeout_secs, sync_wait_secs) {
             Ok(budget) => budget,
@@ -641,7 +718,7 @@ impl ToolRuntime {
             }
             identity
         });
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(project) => project,
             Err(error) => {
                 return process_tool_failure_result(
@@ -698,7 +775,7 @@ impl ToolRuntime {
             );
             return result;
         }
-        if async_handoff_available && timeout > budget.sync_wait_secs {
+        if async_handoff_available && (timeout > budget.sync_wait_secs || retain_team_job) {
             let job = self
                 .runner_registry
                 .start_job_with_metadata_for_access(
@@ -717,12 +794,21 @@ impl ToolRuntime {
                     },
                     "tool_runtime".to_string(),
                     ShellJobStartMetadata {
+                        document,
                         project_id: Some(project.clone()),
                         session_id,
                         project_cwd: Some(resolved_cwd.clone()),
                         purpose: Some(declared_purpose.as_str().to_string()),
                         shell: Some("direct_argv".to_string()),
-                        visibility: ShellJobVisibility::HiddenUntilHandoff,
+                        // Document results live in a separate immutable
+                        // manifest. Keep the Job even when execution finishes
+                        // before the sync deadline so a failed manifest read
+                        // can recover this identity without rerunning effects.
+                        visibility: if preserve_job {
+                            ShellJobVisibility::Public
+                        } else {
+                            ShellJobVisibility::HiddenUntilHandoff
+                        },
                         structured_execution: Some(StructuredJobExecution::Process(process)),
                         validation_identity: validation_identity
                             .as_ref()
@@ -769,6 +855,7 @@ impl ToolRuntime {
                 }
             };
             let wait = self
+                .config
                 .structured_execution_sync_wait
                 .min(Duration::from_secs(budget.sync_wait_secs));
             let handoff = await_hidden_structured_job(
@@ -784,10 +871,16 @@ impl ToolRuntime {
                     stdout,
                     stderr,
                 }) => {
-                    let result = terminal_structured_job_result(&job, stdout, stderr, timeout);
-                    self.runner_registry
-                        .remove_projected_hidden_structured_job_record(&job.job_id)
-                        .await;
+                    let mut result = terminal_structured_job_result(&job, stdout, stderr, timeout);
+                    if preserve_job {
+                        result.output["job_id"] = json!(job.job_id);
+                        result.output["job_status"] = json!(job.status);
+                        result.output["promoted_to_job"] = json!(true);
+                    } else {
+                        self.runner_registry
+                            .remove_projected_hidden_structured_job_record(&job.job_id)
+                            .await;
+                    }
                     result
                 }
                 Ok(HiddenStructuredJobWait::Continued {
@@ -831,9 +924,18 @@ impl ToolRuntime {
                         "detected_summary": detected_summary,
                     }))
                 }
-                Err(error) => outcome_unknown_result(format!(
-                    "the durable process Job could not be observed during handoff: {error}"
-                )),
+                Err(error) => {
+                    let mut result = outcome_unknown_result(format!(
+                        "the durable process Job could not be observed during handoff: {error}"
+                    ));
+                    if preserve_job {
+                        result.output["job_id"] = json!(job.job_id);
+                        result.output["job_status"] = json!("unknown");
+                        result.output["promoted_to_job"] = json!(true);
+                        result.output["terminal"] = json!(false);
+                    }
+                    result
+                }
             };
             if result.output["promoted_to_job"] != json!(true) {
                 add_structured_continuation_facts(

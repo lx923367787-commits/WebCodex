@@ -11,6 +11,9 @@ use webcodex_core::coding_agent::{CodingAgentExecutionState, CodingAgentRunState
 
 const T0: i64 = 1_000_000;
 
+mod takeover_tests;
+mod team_completion_tests;
+
 fn wall_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

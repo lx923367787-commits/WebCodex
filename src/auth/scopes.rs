@@ -271,6 +271,7 @@ mod tests {
             ("POST", "/api/shell/agent/offline"),
             ("POST", "/api/shell/agent/poll"),
             ("POST", "/api/shell/agent/result"),
+            ("POST", "/api/shell/agent/agent_execution_close_receipt"),
             ("POST", "/api/shell/agent/persistent_shell_result"),
             ("POST", "/api/shell/agent/job_update"),
             ("GET", "/api/agents/ws"),

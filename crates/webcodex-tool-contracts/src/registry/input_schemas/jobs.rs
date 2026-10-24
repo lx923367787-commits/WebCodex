@@ -72,7 +72,7 @@ pub fn run_process_input_schema() -> Value {
         (
             "timeout_secs",
             "integer",
-            "Total process runtime budget in seconds (1..=3600, default 60). Short work returns synchronously; longer work keeps the same execution and returns job_id when durable structured execution is available.",
+            "One process invocation response budget in seconds (1..=3600, default 300). For long AI-agent calls use 900. This does not bound the parent WebCodex workflow. Short work returns synchronously; longer work keeps the same execution and returns job_id when durable structured execution is available.",
             false,
         ),
         (
@@ -103,7 +103,7 @@ pub fn run_process_input_schema() -> Value {
     schema["properties"]["cwd"]["maxLength"] = json!(PROCESS_CWD_MAX_BYTES);
     schema["properties"]["timeout_secs"]["minimum"] = json!(1);
     schema["properties"]["timeout_secs"]["maximum"] = json!(PROCESS_TIMEOUT_MAX_SECS);
-    schema["properties"]["timeout_secs"]["default"] = json!(60);
+    schema["properties"]["timeout_secs"]["default"] = json!(webcodex_core::coding_agent::CODING_AGENT_RESPONSE_TIMEOUT_SECS);
     schema["properties"]["sync_wait_secs"]["minimum"] = json!(1);
     schema["properties"]["sync_wait_secs"]["maximum"] =
         json!(STRUCTURED_EXECUTION_SYNC_WAIT_MAX_SECS);
@@ -152,8 +152,9 @@ pub fn run_detached_process_input_schema() -> Value {
         "Project-relative working directory. Omit, empty string, or '.' for the project root. Named Session SSH resources are unsupported for run_detached_process."
     );
     schema["properties"]["timeout_secs"]["description"] = json!(
-        "Total detached process runtime budget in seconds (1..=3600, default 60). Admission returns the stable Job identity without waiting for terminal completion."
+        "One detached process response budget in seconds (1..=3600, default 900). This does not bound the parent WebCodex workflow. Admission returns the stable Job identity without waiting for terminal completion."
     );
+    schema["properties"]["timeout_secs"]["default"] = json!(webcodex_core::coding_agent::CODING_AGENT_LONG_RESPONSE_TIMEOUT_SECS);
     schema
 }
 
@@ -193,7 +194,7 @@ pub fn run_script_input_schema() -> Value {
         (
             "timeout_secs",
             "integer",
-            "Total script runtime budget in seconds (1..=3600, default 60). Short work returns synchronously; longer work keeps the same execution and returns job_id when durable structured execution is available.",
+            "One script invocation response budget in seconds (1..=3600, default 300). For long AI-agent calls use 900. This does not bound the parent WebCodex workflow. Short work returns synchronously; longer work keeps the same execution and returns job_id when durable structured execution is available.",
             false,
         ),
         (
@@ -228,7 +229,7 @@ pub fn run_script_input_schema() -> Value {
     schema["properties"]["cwd"]["maxLength"] = json!(SCRIPT_CWD_MAX_BYTES);
     schema["properties"]["timeout_secs"]["minimum"] = json!(1);
     schema["properties"]["timeout_secs"]["maximum"] = json!(SCRIPT_TIMEOUT_MAX_SECS);
-    schema["properties"]["timeout_secs"]["default"] = json!(60);
+    schema["properties"]["timeout_secs"]["default"] = json!(webcodex_core::coding_agent::CODING_AGENT_RESPONSE_TIMEOUT_SECS);
     schema["properties"]["sync_wait_secs"]["minimum"] = json!(1);
     schema["properties"]["sync_wait_secs"]["maximum"] =
         json!(STRUCTURED_EXECUTION_SYNC_WAIT_MAX_SECS);

@@ -93,6 +93,7 @@ impl ConnectorExecutionHost for RootConnectorHost {
         Box::pin(async move {
             let result = self
                 .tools
+                .execution()
                 .register_project(
                     request.client_id,
                     request.project_id,

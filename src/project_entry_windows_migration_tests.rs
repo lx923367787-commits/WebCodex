@@ -3,7 +3,8 @@ use super::setup_service::{
     ProjectPaths,
 };
 use super::windows_private_state::{
-    current_user_sid_for_test, dacl_sddl, set_broad_test_directory_dacl, set_broad_test_file_dacl,
+    current_user_sddl_sid_for_test, dacl_sddl, set_broad_test_directory_dacl,
+    set_broad_test_file_dacl,
 };
 use super::ProjectCommandOptions;
 use std::fs;
@@ -107,7 +108,7 @@ fn legacy_runtime_parent_acls_are_hardened_before_future_children() {
 
     prepare_runtime_private_state(&paths).unwrap();
 
-    let current_user_sid = current_user_sid_for_test().unwrap();
+    let current_user_sid = current_user_sddl_sid_for_test().unwrap();
     assert_hardened_directory(&paths.data, &current_user_sid);
     assert_hardened_directory(&paths.logs, &current_user_sid);
     for path in &runtime_children {
@@ -187,7 +188,7 @@ fn legacy_runtime_file_acls_are_migrated_without_changing_contents() {
 
     harden_existing_runtime_private_state(&paths).unwrap();
 
-    let current_user_sid = current_user_sid_for_test().unwrap();
+    let current_user_sid = current_user_sddl_sid_for_test().unwrap();
     for (path, content) in before {
         assert_eq!(
             fs::read(&path).unwrap(),
@@ -216,7 +217,7 @@ fn legacy_runtime_acl_migration_does_not_create_absent_sqlite_sidecars() {
 
     assert!(!wal.exists(), "migration must not create an absent WAL");
     assert!(!shm.exists(), "migration must not create an absent SHM");
-    let current_user_sid = current_user_sid_for_test().unwrap();
+    let current_user_sid = current_user_sddl_sid_for_test().unwrap();
     assert_hardened(&db, &current_user_sid);
     assert_hardened(&server_log, &current_user_sid);
 }

@@ -105,6 +105,9 @@ pub(super) struct RunnerRecord {
     /// Authoritative active/recent-terminal CodingAgentRun inventory from this
     /// Runner. Bodies/events are deliberately absent from this durable projection.
     pub(super) coding_agent_inventory: CodingAgentRunInventory,
+    /// Path-free facts from authenticated registration, not task authorization.
+    pub(super) agent_execution_resources:
+        Vec<webcodex_core::runner_protocol::AgentExecutionResourceDescriptor>,
     /// Same-Server evidence that a hidden structured terminal Job was already
     /// projected into its initiating tool result and deliberately discarded.
     /// This stays process-local and is preserved only across registrations by
@@ -209,6 +212,7 @@ pub(super) struct SkillStoreDispatchFence {
 
 #[derive(Debug)]
 pub(super) struct PendingShellRequest {
+    pub(super) agent_cli: Option<crate::agent_cli::AgentCliFence>,
     pub(super) request: RunnerRequest,
     /// Canonical semantic operation decoded exactly once when the V2 wire DTO is admitted.
     /// Registry fencing/result correlation must use this field rather than reinterpreting
@@ -393,6 +397,8 @@ pub(super) struct DetachedIdempotencyIntent {
 
 #[derive(Debug, Clone)]
 pub(super) struct ShellJobRecord {
+    pub(super) agent_execution: Option<crate::agent_execution::AgentExecutionJobState>,
+    pub(super) document: Option<webcodex_core::runner_protocol::DocumentJobMetadata>,
     pub(super) job_id: String,
     pub(super) request_id: Option<String>,
     pub(super) client_id: String,
@@ -481,6 +487,9 @@ impl Default for ShellJobLogState {
 
 #[derive(Debug, Default)]
 pub(super) struct RunnerRegistryInner {
+    /// Transient typed close correlation only. Durable authority remains in Store.
+    pub(super) agent_execution_closes:
+        HashMap<String, crate::agent_execution::AgentExecutionCloseState>,
     pub(super) runners: HashMap<String, RunnerRecord>,
     pub(super) pending_by_id: HashMap<String, PendingShellRequest>,
     /// Waiters for explicit persistent-shell lifecycle results. Kept separate

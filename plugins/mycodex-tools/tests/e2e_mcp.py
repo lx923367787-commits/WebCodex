@@ -182,6 +182,11 @@ class McpClient:
         headers = {"Authorization": "Bearer " + self.token,
                    "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
                    "MCP-Protocol-Version": self.protocol, "Connection": "close"}
+        if self.protocol == "2026-07-28":
+            headers["Mcp-Method"] = method
+            field = {"tools/call": "name", "resources/read": "uri", "prompts/get": "name"}.get(method)
+            if field:
+                headers["Mcp-Name"] = params[field]
         if self.session:
             headers["Mcp-Session-Id"] = self.session
         connection = http.client.HTTPConnection(HOST, self.port, timeout=timeout)
@@ -303,7 +308,7 @@ class Harness:
                       "WEBCODEX_DATA": str(self.root / "server-data"), "WEBCODEX_TOKEN": self.token("e2e_bootstrap_"),
                       "WEBCODEX_SHARED_KEY_ENABLED": "true",
                       "WEBCODEX_OAUTH2_ENABLED": "true", "WEBCODEX_OAUTH2_ISSUER": f"http://{HOST}:{self.port}",
-                      "WEBCODEX_MCP_MODEL_SURFACE": "full-operator-v1"}
+                      "WEBCODEX_MCP_MODEL_SURFACE": getattr(self.args, "surface", "full-operator-v1")}
         self.server = self.spawn(self.args.server, [], server_env, "server")
 
         def ready():

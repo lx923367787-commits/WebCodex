@@ -1167,7 +1167,13 @@ fn ooxml_mime_from_file(path: &Path) -> Option<&'static str> {
 
 fn extension_mime(path: &str) -> Option<&'static str> {
     let lower = path.to_lowercase();
-    if lower.ends_with(".png") {
+    if lower.ends_with(".doc") {
+        Some(webcodex_core::artifact_policy::DOC_MIME)
+    } else if lower.ends_with(".xls") {
+        Some(webcodex_core::artifact_policy::XLS_MIME)
+    } else if lower.ends_with(".ppt") {
+        Some(webcodex_core::artifact_policy::PPT_MIME)
+    } else if lower.ends_with(".png") {
         Some("image/png")
     } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
         Some("image/jpeg")

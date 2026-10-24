@@ -1,5 +1,5 @@
 use super::project_resolution::ResolvedProject;
-use super::{ToolResult, ToolRuntime};
+use super::ToolResult;
 use crate::auth::AuthContext;
 use crate::db::{
     canonicalize_memory_tags, memory_catalog_revision, valid_memory_catalog_revision,
@@ -8,6 +8,7 @@ use crate::db::{
     ProjectMemoryScopeRecord, MAX_MEMORIES_GLOBAL, MAX_MEMORY_BOOTSTRAP_BYTES,
     MAX_MEMORY_SCOPE_LIST_LIMIT, MAX_MEMORY_SEARCH_LIMIT, MAX_MEMORY_SEARCH_RESULT_BYTES,
 };
+use crate::runner_http::RunnerRegistry;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -260,7 +261,7 @@ fn memory_simple_error(project: &ResolvedProject, kind: &str, extra: Value) -> T
     ToolResult::err_with_output(kind.to_string(), output)
 }
 
-impl ToolRuntime {
+impl super::services::MemoryService {
     fn memory_database(&self) -> Result<&crate::Database, &'static str> {
         self.memory_db.as_deref().ok_or("memory_store_unavailable")
     }
@@ -538,6 +539,7 @@ impl ToolRuntime {
 
     pub(crate) async fn memory_scope_list(
         &self,
+        runner_registry: &RunnerRegistry,
         auth: Option<&AuthContext>,
         offset: Option<usize>,
         limit: Option<usize>,
@@ -554,8 +556,7 @@ impl ToolRuntime {
             Ok(value) => value,
             Err(error) => return memory_lifecycle_store_error(error),
         };
-        let views = self
-            .runner_registry
+        let views = runner_registry
             .list_bounded_runner_semantic_views_for_auth(
                 crate::runner_http::runner_access_from_auth(auth).as_ref(),
                 MAX_MEMORY_SCOPE_INVENTORY_CLIENTS,
@@ -621,6 +622,7 @@ impl ToolRuntime {
 
     pub(crate) async fn memory_scope_purge(
         &self,
+        runner_registry: &RunnerRegistry,
         auth: Option<&AuthContext>,
         memory_scope_id: String,
         expected_catalog_revision: String,
@@ -658,7 +660,7 @@ impl ToolRuntime {
             Err(error) => return memory_lifecycle_store_error(error),
         };
 
-        self.runner_registry
+        runner_registry
             .with_bounded_runner_semantic_views_for_auth_locked(
                 crate::runner_http::runner_access_from_auth(auth).as_ref(),
                 MAX_MEMORY_SCOPE_INVENTORY_CLIENTS,

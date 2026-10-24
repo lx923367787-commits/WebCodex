@@ -123,6 +123,7 @@ impl AdminProjectLifecycleService {
                 require_online_client(&self.runtime, auth, &request.client_id).await?;
                 let result = self
                     .runtime
+                    .execution()
                     .register_project(
                         request.client_id.clone(),
                         request.project_id.clone(),
@@ -168,6 +169,7 @@ impl AdminProjectLifecycleService {
                 }
                 let result = self
                     .runtime
+                    .execution()
                     .create_project(
                         request.client_id.clone(),
                         request.project_id.clone(),
@@ -206,7 +208,7 @@ impl AdminProjectLifecycleService {
                     return Err(api_error(400, "invalid_request"));
                 }
                 Self::mutate_authorized_core(
-                    self.runtime.as_ref(),
+                    &self.runtime.runner_registry,
                     Some(auth),
                     action,
                     &request.project,
@@ -231,7 +233,7 @@ impl AdminProjectLifecycleService {
         expected_revision: &str,
     ) -> ServiceResponse {
         unregister_project_runtime(
-            self.runtime.as_ref(),
+            &self.runtime.runner_registry,
             Some(auth),
             project,
             expected_revision,
@@ -240,7 +242,7 @@ impl AdminProjectLifecycleService {
     }
 
     async fn mutate_authorized_core(
-        runtime: &ToolRuntime,
+        runner_registry: &Arc<RunnerRegistry>,
         auth: Option<&AuthContext>,
         action: &'static str,
         target: &str,
@@ -257,14 +259,12 @@ impl AdminProjectLifecycleService {
         // other ToolRuntime operations, so requiring a user owner would incorrectly
         // reject otherwise reachable unowned Runners.
         if require_owner_access && auth.is_some() {
-            runtime
-                .runner_registry
+            runner_registry
                 .assert_runner_access(access.as_ref(), &client_id)
                 .await
                 .map_err(|_| api_error(503, "agent_unavailable"))?;
         }
-        let client = runtime
-            .runner_registry
+        let client = runner_registry
             .get_runner_semantic_view_for_auth(&client_id, access.as_ref())
             .await
             .ok_or_else(|| api_error(503, "agent_unavailable"))?;
@@ -279,8 +279,7 @@ impl AdminProjectLifecycleService {
             return Err(api_error(404, "project_not_found"));
         }
         let (active_jobs, _unregister_fence) = if action == "unregister" {
-            let active = runtime
-                .runner_registry
+            let active = runner_registry
                 .begin_project_unregister(access.as_ref(), target)
                 .await
                 .map_err(|_| api_error(500, "operation_failed"))?;
@@ -293,14 +292,13 @@ impl AdminProjectLifecycleService {
             (
                 active,
                 Some(ProjectUnregisterFence {
-                    registry: runtime.runner_registry.clone(),
+                    registry: runner_registry.clone(),
                     project: target.to_string(),
                 }),
             )
         } else {
             (
-                runtime
-                    .runner_registry
+                runner_registry
                     .count_active_jobs_for_project(access.as_ref(), target)
                     .await,
                 None,
@@ -312,15 +310,14 @@ impl AdminProjectLifecycleService {
         }))
         .map_err(|_| api_error(500, "operation_failed"))?;
         let kind = format!("project_lifecycle_{action}");
-        let (request_id, receiver) = runtime
-            .runner_registry
+        let (request_id, receiver) = runner_registry
             .enqueue_project_op(client_id.clone(), &kind, payload, requester.to_string())
             .await
             .map_err(|_| api_error(503, "agent_unavailable"))?;
         let response = match tokio::time::timeout(Duration::from_secs(WAIT_SECS), receiver).await {
             Ok(Ok(value)) => value,
             Ok(Err(_)) | Err(_) => {
-                runtime.runner_registry.cancel_request(&request_id).await;
+                runner_registry.cancel_request(&request_id).await;
                 return Err(api_error(503, "operation_indeterminate"));
             }
         };
@@ -345,8 +342,7 @@ impl AdminProjectLifecycleService {
             .unwrap_or(false);
         let revision = output.get("revision").cloned().unwrap_or(Value::Null);
         if action == "unregister" && matches!(outcome, "unregistered" | "already_unregistered") {
-            if runtime
-                .runner_registry
+            if runner_registry
                 .remove_runner_project_for_instance(
                     &client_id,
                     &client.view.runner_instance_id,
@@ -373,8 +369,7 @@ impl AdminProjectLifecycleService {
                     "authoritative_project_summary_missing",
                 ));
             };
-            if runtime
-                .runner_registry
+            if runner_registry
                 .upsert_runner_project_for_instance(
                     &client_id,
                     &client.view.runner_instance_id,
@@ -546,13 +541,13 @@ impl AdminProjectLifecycleService {
 /// revision validation, owner filtering, active-Job fencing, Runner capability
 /// checks, uncertain delivery semantics, and Server inventory removal.
 pub(crate) async fn unregister_project_runtime(
-    runtime: &ToolRuntime,
+    runner_registry: &Arc<RunnerRegistry>,
     auth: Option<&AuthContext>,
     project: &str,
     expected_revision: &str,
 ) -> ServiceResponse {
     match AdminProjectLifecycleService::mutate_authorized_core(
-        runtime,
+        runner_registry,
         auth,
         "unregister",
         project,
@@ -849,6 +844,8 @@ mod tests {
 
     fn user_auth(username: &str) -> AuthContext {
         AuthContext {
+            agent_run: None,
+            native_host: None,
             kind: AuthKind::ApiToken,
             user_id: Some(format!("user-{username}")),
             username: Some(username.to_string()),
@@ -887,6 +884,7 @@ mod tests {
         registry
             .register(crate::test_support::current_runner_registration(
                 RunnerRegisterRequest {
+                    agent_execution_resources: Vec::new(),
                     client_id: "owned-runner".to_string(),
                     runner_instance_id: "instance-owned".to_string(),
                     runner_protocol_generation:

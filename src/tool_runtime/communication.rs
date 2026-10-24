@@ -1,4 +1,7 @@
-use super::{RecoveryKind, ToolResult, ToolRuntime};
+use super::services::CommunicationService;
+#[cfg(test)]
+use super::ToolRuntime;
+use super::{RecoveryKind, ToolResult};
 use crate::auth::{AuthContext, AuthKind};
 use crate::db::{
     AgentEndpointLifecycle, AgentProfilePatch, AgentWakeState, CommunicationPrincipal,
@@ -14,6 +17,11 @@ const DEFAULT_COMMUNICATION_LIST_LIMIT: usize = 50;
 pub(super) fn communication_principal(
     auth: Option<&AuthContext>,
 ) -> Result<CommunicationPrincipal, ToolResult> {
+    if auth.is_some_and(|a| a.is_native_host()) {
+        return Err(communication_principal_unavailable(
+            "Native relay is not a communication principal",
+        ));
+    }
     let (kind, subject) = match auth {
         None => ("local-development", "local-development".to_string()),
         Some(auth) if auth.is_oauth_shared_key_subject() => (
@@ -25,6 +33,11 @@ pub(super) fn communication_principal(
             })?,
         ),
         Some(auth) => match auth.kind {
+            AuthKind::ModelAgent | AuthKind::NativeHost => {
+                return Err(communication_principal_unavailable(
+                    "Agent collaboration requires its authorized meeting room",
+                ))
+            }
             AuthKind::Bootstrap => (
                 "bootstrap",
                 auth.user_id
@@ -179,7 +192,7 @@ fn serialized_success<T: Serialize>(value: T) -> ToolResult {
     }
 }
 
-impl ToolRuntime {
+impl CommunicationService {
     pub(crate) fn create_agent_identity(
         &self,
         auth: Option<&AuthContext>,
@@ -881,7 +894,7 @@ mod tests {
         let alice = managed_user("alice");
         let bob = managed_user("bob");
 
-        let created_agent = runtime.create_agent_identity(
+        let created_agent = runtime.communication.create_agent_identity(
             Some(&bob),
             "bob-agent".to_string(),
             "Bob Agent".to_string(),
@@ -896,7 +909,7 @@ mod tests {
             .to_string();
         let missing_agent = format!("wc_dagent_{}", "9".repeat(32));
 
-        let foreign_agent = runtime.update_agent_identity(
+        let foreign_agent = runtime.communication.update_agent_identity(
             Some(&alice),
             bob_agent_id.clone(),
             1,
@@ -905,7 +918,7 @@ mod tests {
             Some("probe".to_string()),
             None,
         );
-        let missing_agent_result = runtime.update_agent_identity(
+        let missing_agent_result = runtime.communication.update_agent_identity(
             Some(&alice),
             missing_agent,
             1,
@@ -916,7 +929,7 @@ mod tests {
         );
         assert_same_public_failure(foreign_agent, missing_agent_result, "agent_not_found");
 
-        let created_conversation = runtime.create_conversation(
+        let created_conversation = runtime.communication.create_conversation(
             Some(&bob),
             Some("Bob private room".to_string()),
             vec![bob_agent_id],
@@ -933,7 +946,7 @@ mod tests {
             .unwrap()
             .to_string();
         let missing_conversation = format!("wc_conv_{}", "8".repeat(32));
-        let foreign_conversation = runtime.read_conversation(
+        let foreign_conversation = runtime.communication.read_conversation(
             Some(&alice),
             bob_conversation_id,
             None,
@@ -942,7 +955,7 @@ mod tests {
             Some(0),
             Some(10),
         );
-        let missing_conversation_result = runtime.read_conversation(
+        let missing_conversation_result = runtime.communication.read_conversation(
             Some(&alice),
             missing_conversation,
             None,

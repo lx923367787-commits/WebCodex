@@ -5,3 +5,6 @@ pypdf==6.19.0
 reportlab==5.0.1
 Pillow==12.3.0
 defusedxml==0.7.1
+pywin32==312; sys_platform == "win32"
+olefile==0.47
+pypdfium2==5.13.0

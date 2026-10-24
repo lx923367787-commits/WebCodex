@@ -27,7 +27,8 @@ use webcodex_core::coding_agent::{
 const IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 const START_RESPONSE_WAIT_SECS: u64 = 32;
 const CONTROL_RESPONSE_WAIT_SECS: u64 = 65;
-const DEFAULT_RUN_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_RUN_TIMEOUT_SECS: u64 =
+    webcodex_core::coding_agent::CODING_AGENT_RESPONSE_TIMEOUT_SECS;
 const PUBLIC_TOKEN_PREFIX: &str = "wcar2_";
 const PUBLIC_TOKEN_MAX_BYTES: usize = 192;
 const PUBLIC_TOKEN_EPOCH_BYTES: usize = 32;
@@ -68,8 +69,8 @@ pub(crate) struct CodingAgentPreparedStart {
     pub(crate) provider_id: String,
     pub(crate) provider_instance_id: String,
     pub(crate) intent_fingerprint: String,
-    client: crate::runner_protocol::RunnerView,
-    project_root: String,
+    pub(super) client: crate::runner_protocol::RunnerView,
+    pub(super) project_root: String,
     instruction: String,
     config: BTreeMap<String, CodingAgentConfigValue>,
     timeout_secs: u64,
@@ -192,7 +193,7 @@ impl CodingAgentServerState {
         ))
     }
 
-    fn observation_token(&self, run_id: &str, sequence: u64) -> String {
+    pub(super) fn observation_token(&self, run_id: &str, sequence: u64) -> String {
         observation_token(&self.observation_mac_key, &self.epoch, run_id, sequence)
     }
 
@@ -301,7 +302,7 @@ impl ToolRuntime {
         mut self,
         state_dir: impl AsRef<Path>,
     ) -> Result<Self, String> {
-        self.coding_agent_runs = Arc::new(
+        self.execution_state.coding_agent_runs = Arc::new(
             CodingAgentServerState::with_persistent_observation_mac_key(state_dir.as_ref())?,
         );
         Ok(self)
@@ -340,7 +341,9 @@ impl ToolRuntime {
         {
             CodingAgentTypedStartOutcome::Run(run) => ToolResult::ok(start_projection(
                 &run,
-                self.coding_agent_runs.observation_token(&run_id, 0),
+                self.execution_state
+                    .coding_agent_runs
+                    .observation_token(&run_id, 0),
             )),
             CodingAgentTypedStartOutcome::Failure(error) => error.into_tool_result(),
         }
@@ -383,6 +386,7 @@ impl ToolRuntime {
         let authority_fingerprint = authority_fingerprint(&principal);
         let run_id = deterministic_run_id(&principal, &idempotency_key);
         let resolved = self
+            .execution()
             .resolve_project_input_for_auth(&project, auth)
             .await
             .map_err(|error| error.into_tool_result())?;
@@ -496,7 +500,8 @@ impl ToolRuntime {
                     run_id: prepared.run_id,
                 });
             }
-            self.coding_agent_runs
+            self.execution_state
+                .coding_agent_runs
                 .attach_recorder(&prepared.run_id, recording_session_id)
                 .await;
             self.record_coding_agent_lifecycle_if_needed(&prepared.run_id)
@@ -574,6 +579,7 @@ impl ToolRuntime {
                     });
                 }
                 let binding = match self
+                    .execution_state
                     .coding_agent_runs
                     .bind(&prepared.client, run, recording_session_id)
                     .await
@@ -696,6 +702,7 @@ impl ToolRuntime {
             None => (None, false),
             Some(token) => {
                 match self
+                    .execution_state
                     .coding_agent_runs
                     .parse_observation_token(&run_id, token)
                 {
@@ -729,7 +736,7 @@ impl ToolRuntime {
                     has_more: false,
                     history_lost: true,
                 },
-                self.coding_agent_runs.as_ref(),
+                self.execution_state.coding_agent_runs.as_ref(),
                 token_reset,
             ));
         }
@@ -764,7 +771,7 @@ impl ToolRuntime {
                             has_more: false,
                             history_lost: true,
                         },
-                        self.coding_agent_runs.as_ref(),
+                        self.execution_state.coding_agent_runs.as_ref(),
                         true,
                     ));
                 }
@@ -841,6 +848,7 @@ impl ToolRuntime {
                     }
                 };
                 let merged = match self
+                    .execution_state
                     .coding_agent_runs
                     .bind(&client, observation.run.clone(), None)
                     .await
@@ -860,7 +868,7 @@ impl ToolRuntime {
                 self.record_coding_agent_lifecycle_if_needed(&run_id).await;
                 ToolResult::ok(observe_projection(
                     observation,
-                    self.coding_agent_runs.as_ref(),
+                    self.execution_state.coding_agent_runs.as_ref(),
                     token_reset,
                 ))
             }
@@ -986,6 +994,7 @@ impl ToolRuntime {
                     }
                 }
                 let merged = match self
+                    .execution_state
                     .coding_agent_runs
                     .merge_bound_snapshot(&binding, run)
                     .await
@@ -1022,7 +1031,8 @@ impl ToolRuntime {
             .await;
         match self.reconcile_run(run_id, authority, auth).await {
             Ok(Some(binding)) => {
-                self.coding_agent_runs
+                self.execution_state
+                    .coding_agent_runs
                     .attach_recorder(run_id, recording_session_id)
                     .await;
                 self.record_coding_agent_lifecycle_if_needed(run_id).await;
@@ -1058,8 +1068,11 @@ impl ToolRuntime {
     }
 
     async fn record_coding_agent_lifecycle_if_needed(&self, run_id: &str) {
-        let Some((session_id, snapshot, kind)) =
-            self.coding_agent_runs.take_lifecycle_evidence(run_id).await
+        let Some((session_id, snapshot, kind)) = self
+            .execution_state
+            .coding_agent_runs
+            .take_lifecycle_evidence(run_id)
+            .await
         else {
             return;
         };
@@ -1088,7 +1101,7 @@ impl ToolRuntime {
         authority: &str,
         auth: Option<&AuthContext>,
     ) -> Result<Option<ServerRunBinding>, String> {
-        let existing = self.coding_agent_runs.get(run_id).await;
+        let existing = self.execution_state.coding_agent_runs.get(run_id).await;
         if let Some(binding) = existing {
             if binding.authority_fingerprint != authority {
                 return Ok(None);
@@ -1118,9 +1131,14 @@ impl ToolRuntime {
                     } else {
                         "runner_replaced_uncertain"
                     };
-                    return self.coding_agent_runs.mark_lost(run_id, code).await;
+                    return self
+                        .execution_state
+                        .coding_agent_runs
+                        .mark_lost(run_id, code)
+                        .await;
                 }
                 return self
+                    .execution_state
                     .coding_agent_runs
                     .bind(&client, run, None)
                     .await
@@ -1160,10 +1178,14 @@ impl ToolRuntime {
                     } else {
                         "provider_replaced_uncertain"
                     };
-                    return self.coding_agent_runs.mark_lost(run_id, code).await;
+                    return self
+                        .execution_state
+                        .coding_agent_runs
+                        .mark_lost(run_id, code)
+                        .await;
                 }
             }
-            return Ok(self.coding_agent_runs.get(run_id).await);
+            return Ok(self.execution_state.coding_agent_runs.get(run_id).await);
         }
 
         // After a Server restart there is no process-local binding. Recover only
@@ -1182,7 +1204,8 @@ impl ToolRuntime {
         if run.authority_fingerprint != authority {
             return Ok(None);
         }
-        self.coding_agent_runs
+        self.execution_state
+            .coding_agent_runs
             .bind(&client, run, None)
             .await
             .map(Some)
@@ -1262,6 +1285,13 @@ fn validate_start_input(
     Ok(())
 }
 
+pub(super) fn goal_owner_key(auth: Option<&AuthContext>) -> Result<String, String> {
+    if let Some(binding) = auth.and_then(|auth| auth.agent_run.as_ref()) {
+        return Ok(binding.host_goal_owner_key());
+    }
+    stable_principal(auth).map(|principal| authority_fingerprint(&principal))
+}
+
 fn stable_principal(auth: Option<&AuthContext>) -> Result<String, String> {
     let Some(auth) = auth else {
         return Ok("local-dev:local-dev".to_string());
@@ -1313,6 +1343,10 @@ fn authority_fingerprint(principal: &str) -> String {
     hasher.update(b"webcodex-coding-agent-authority-v1\0");
     hasher.update(principal.as_bytes());
     format!("auth_{:x}", hasher.finalize())
+}
+
+pub(super) fn coding_agent_authority_matches(auth: Option<&AuthContext>, expected: &str) -> bool {
+    stable_principal(auth).is_ok_and(|principal| authority_fingerprint(&principal) == expected)
 }
 
 fn deterministic_run_id(principal: &str, key: &str) -> String {

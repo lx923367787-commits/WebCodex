@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
-const TOKEN_FILE_KEY: &str = "WEBCODEX_TUNNEL_MCP_TOKEN_FILE";
+// File-import trust survives independently of the native Tunnel Host identity.
+const TOKEN_FILE_KEY: &str = "WEBCODEX_FILE_BRIDGE_TOKEN_FILE";
 const TRUST_KEY: &str = "WEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS";
 
 pub(crate) struct BundledTools {
@@ -63,39 +64,83 @@ fn rollback_runner_content(
     let before = parse(original)?;
     let written = parse(installed)?;
     let mut now = parse(current)?;
-    let provider = |doc: &DocumentMut| {
+    let provider = |doc: &DocumentMut, id: &str| {
         doc.get("plugins")
             .and_then(|p| p.get("providers"))
             .and_then(Item::as_array_of_tables)
             .and_then(|providers| {
                 providers
                     .iter()
-                    .find(|p| p.get("id").and_then(Item::as_str) == Some("mycodex-tools"))
+                    .find(|p| p.get("id").and_then(Item::as_str) == Some(id))
             })
             .cloned()
     };
-    let expected = provider(&written);
-    if provider(&now).map(|p| p.to_string()) != expected.map(|p| p.to_string()) {
-        return Ok(current.to_string()); // An operator changed this provider: do not clobber it.
-    }
-    if let Some(providers) = now
-        .get_mut("plugins")
-        .and_then(|p| p.get_mut("providers"))
-        .and_then(Item::as_array_of_tables_mut)
-    {
-        let index = providers
-            .iter()
-            .position(|p| p.get("id").and_then(Item::as_str) == Some("mycodex-tools"));
-        if let Some(index) = index {
-            match provider(&before) {
-                Some(previous) => *providers.get_mut(index).expect("located provider") = previous,
-                None => {
-                    providers.remove(index);
+    let ids: Vec<String> = written
+        .get("plugins")
+        .and_then(|p| p.get("providers"))
+        .and_then(Item::as_array_of_tables)
+        .map(|providers| {
+            providers
+                .iter()
+                .filter_map(|p| p.get("id").and_then(Item::as_str))
+                .filter(|id| *id == "mycodex-tools" || id.starts_with("mycodex-tools-"))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in ids {
+        let expected = provider(&written, &id).map(|p| p.to_string());
+        let previous = provider(&before, &id);
+        if previous.as_ref().map(|p| p.to_string()) == expected
+            || provider(&now, &id).map(|p| p.to_string()) != expected
+        {
+            continue; // No edit owned by us, or an operator changed it meanwhile.
+        }
+        if let Some(providers) = now
+            .get_mut("plugins")
+            .and_then(|p| p.get_mut("providers"))
+            .and_then(Item::as_array_of_tables_mut)
+        {
+            let index = providers
+                .iter()
+                .position(|p| p.get("id").and_then(Item::as_str) == Some(id.as_str()));
+            if let Some(index) = index {
+                match previous {
+                    Some(previous) => {
+                        *providers.get_mut(index).expect("located provider") = previous
+                    }
+                    None => {
+                        providers.remove(index);
+                    }
                 }
             }
         }
     }
     Ok(now.to_string())
+}
+
+fn project_key(project: &Path) -> String {
+    let canonical = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let text = canonical
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .replace('\\', "/");
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text
+    }
+}
+
+fn document_provider_id(project: &Path) -> String {
+    // Stable FNV-1a namespace label; authority always comes from the exact root
+    // comparison, never from this hash. Colliding labels fail closed below.
+    let hash = project_key(project)
+        .bytes()
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("mycodex-tools-{hash:016x}")
 }
 
 // Intentionally no Debug: the CLI response contains a one-time local credential.
@@ -106,6 +151,14 @@ pub(crate) struct BridgeToken {
 }
 
 pub(crate) struct BootstrapCredentialFile(PathBuf);
+
+/// Reuse the existing private credential-directory boundary for passive Host
+/// control metadata. This helper reads no credential.
+pub(crate) fn prepare_host_control_directory(path: &Path) -> DesktopResult<()> {
+    std::fs::create_dir_all(path)
+        .map_err(|_| config_error("Could not prepare private Host control storage"))?;
+    protect_secret_directory(path)
+}
 
 impl BootstrapCredentialFile {
     pub fn path(&self) -> &Path {
@@ -234,42 +287,90 @@ impl BundledTools {
         let providers = plugins["providers"]
             .as_array_of_tables_mut()
             .ok_or_else(|| config_error("Runner plugin providers are not a table array"))?;
-        let existing = providers.iter().position(|provider| {
-            provider.get("id").and_then(Item::as_str) == Some("mycodex-tools")
-        });
         let python = self.python.to_string_lossy().to_string();
         let plugin = self.plugin.to_string_lossy().to_string();
+        let provider_id = document_provider_id(project);
+        let root_key = project_key(project);
+        let owned = |provider: &Table| {
+            provider.get("command").and_then(Item::as_str) == Some(python.as_str())
+                && provider
+                    .get("args")
+                    .and_then(Item::as_array)
+                    .and_then(|a| a.get(0))
+                    .and_then(|a| a.as_str())
+                    == Some(plugin.as_str())
+        };
+        let existing = providers.iter().position(|provider| {
+            provider
+                .get("cwd")
+                .and_then(Item::as_str)
+                .map(|cwd| project_key(Path::new(cwd)) == root_key)
+                .unwrap_or(false)
+                && (owned(provider) || provider.get("document_worker").is_some())
+        });
         let mut args = Array::new();
         args.push(plugin.as_str());
         args.push("--font-path");
         args.push(self.font.to_string_lossy().as_ref());
         if let Some(index) = existing {
             let provider = providers.get_mut(index).expect("existing provider index");
-            let own_args = provider
-                .get("args")
-                .and_then(Item::as_array)
-                .and_then(|args| args.get(0))
-                .and_then(|arg| arg.as_str())
-                == Some(plugin.as_str());
-            if provider.get("command").and_then(Item::as_str) != Some(python.as_str()) || !own_args
-            {
+            if !owned(provider) {
                 return Ok(original.to_string());
             }
-            provider["cwd"] = value(project.to_string_lossy().as_ref());
+            self.configure_document_worker(provider);
         } else {
+            if providers
+                .iter()
+                .any(|p| p.get("id").and_then(Item::as_str) == Some(provider_id.as_str()))
+            {
+                return Err(config_error(
+                    "Document provider id is already bound to another project",
+                ));
+            }
+            if providers.len() >= 8 {
+                return Err(config_error("Runner has reached the eight-provider limit; remove an unused provider before adding this project"));
+            }
             let mut provider = Table::new();
-            provider["id"] = value("mycodex-tools");
+            provider["id"] = value(provider_id);
             provider["name"] = value("MyCodex Office and PDF");
             provider["command"] = value(python);
             provider["args"] = value(args);
             provider["cwd"] = value(project.to_string_lossy().as_ref());
             provider["timeout_secs"] = value(60);
+            self.configure_document_worker(&mut provider);
             providers.push(provider);
             if !plugins.contains_key("request_timeout_secs") {
                 plugins["request_timeout_secs"] = value(60);
             }
         }
         Ok(doc.to_string())
+    }
+
+    fn configure_document_worker(&self, provider: &mut Table) {
+        let worker = self.plugin.with_file_name("document_worker.py");
+        if worker.is_file() {
+            provider["document_worker"] = value(worker.to_string_lossy().as_ref());
+            let mut args = Array::new();
+            args.push("--font-path");
+            args.push(self.font.to_string_lossy().as_ref());
+            let ocr = self
+                .plugin
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("tesseract");
+            let executable = ocr.join(if cfg!(windows) {
+                "tesseract.exe"
+            } else {
+                "tesseract"
+            });
+            if executable.is_file() {
+                args.push("--tesseract-path");
+                args.push(executable.to_string_lossy().as_ref());
+                args.push("--tessdata-path");
+                args.push(ocr.join("tessdata").to_string_lossy().as_ref());
+            }
+            provider["document_worker_args"] = value(args);
+        }
     }
 }
 
@@ -291,7 +392,7 @@ c=json.loads(sys.argv[1]); env={}
 for line in Path(c['env']).read_text(encoding='utf-8').splitlines():
     if '=' in line and not line.strip().startswith('#'):
         k,v=line.split('=',1); env[k.strip()]=v.strip().strip('\"').strip("'")
-token=Path(env['WEBCODEX_TUNNEL_MCP_TOKEN_FILE']).read_text().strip()
+token=Path(env['WEBCODEX_FILE_BRIDGE_TOKEN_FILE']).read_text().strip()
 assert token.startswith('wc_pat_') and token != env['WEBCODEX_TOKEN']
 url=urlsplit(c['url']); session=None; seq=0
 def rpc(name,args):
@@ -315,10 +416,10 @@ def output(r):
     assert value.get('success') is not False, 'Runtime failed'
     return value.get('output',value)
 init()
-inventory=output(call('plugin_tool',{'action':'list','runner':c['runner'],'plugin':'mycodex-tools'}))
+inventory=output(call('plugin_tool',{'action':'list','runner':c['runner'],'plugin':c['plugin']}))
 names=sorted(x['name'] for x in inventory['tools'])
 assert names==sorted(['docx_read','docx_create','docx_update','xlsx_read','xlsx_create','xlsx_update','pptx_read','pptx_create','pdf_read','pdf_search','pdf_create'])
-binding=output(call('plugin_tool',{'action':'describe','runner':c['runner'],'plugin':'mycodex-tools','tool':'docx_create'}))['binding']
+binding=output(call('plugin_tool',{'action':'describe','runner':c['runner'],'plugin':c['plugin'],'tool':'docx_create'}))['binding']
 output(call('plugin_tool',{'action':'call','binding':binding,'arguments':{'output_path':'desktop-bundle-proof.docx','blocks':[{'type':'paragraph','text':'Desktop bundled tools acceptance'}]}}))
 assert (Path(c['root'])/'desktop-bundle-proof.docx').is_file(), 'Plugin did not write to selected project'
 args={'project':c['project'],'openaiFileIdRefs':[{'file_id':'test','download_url':'https://127.0.0.1/private','file_name':'guard.png','mime_type':'image/png'}],'output_dir':'artifacts','targets':['guard.png']}
@@ -335,6 +436,7 @@ print(json.dumps({'tools':names,'dedicated_token_accepted':True,'bootstrap_rejec
     let options = serde_json::json!({
         "url": identity.server_url, "runner": runner,
         "project": identity.runtime_project_id, "root": identity.project_path, "env": env_file,
+        "plugin": document_provider_id(Path::new(&identity.project_path)),
     });
     crate::webcodex::run_test_json(
         &tools.python,
@@ -588,13 +690,69 @@ mod tests {
     }
 
     #[test]
-    fn explicit_provider_is_not_replaced() {
+    fn explicit_provider_is_not_replaced_and_new_project_gets_its_own() {
         let root = std::env::temp_dir();
         let original = "[[plugins.providers]]\nid='mycodex-tools'\ncommand='user-python.exe'\nargs=['custom.py']\ncwd='C:/existing'\n";
+        let updated = bundle(&root).runner_content(original, &root).unwrap();
+        let doc = updated.parse::<DocumentMut>().unwrap();
+        let providers = doc["plugins"]["providers"].as_array_of_tables().unwrap();
+        assert_eq!(providers.len(), 2);
         assert_eq!(
-            bundle(&root).runner_content(original, &root).unwrap(),
-            original
+            providers.get(0).unwrap()["command"].as_str(),
+            Some("user-python.exe")
         );
+        assert_eq!(
+            providers.get(0).unwrap()["cwd"].as_str(),
+            Some("C:/existing")
+        );
+    }
+
+    #[test]
+    fn project_switch_adds_binding_without_retargeting_first_project() {
+        let root = std::env::temp_dir().join(format!(
+            "webcodex-document-projects-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(root.join("document_worker.py"), b"# fixture").unwrap();
+        let tools = bundle(&root);
+        let initial = tools.runner_content("", &first).unwrap();
+        let switched = tools.runner_content(&initial, &second).unwrap();
+        let doc = switched.parse::<DocumentMut>().unwrap();
+        let providers = doc["plugins"]["providers"].as_array_of_tables().unwrap();
+        assert_eq!(providers.len(), 2);
+        assert_eq!(
+            providers.get(0).unwrap()["cwd"].as_str(),
+            Some(first.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            providers.get(1).unwrap()["cwd"].as_str(),
+            Some(second.to_string_lossy().as_ref())
+        );
+        assert!(providers.get(0).unwrap().get("document_worker").is_some());
+        assert_eq!(tools.runner_content(&switched, &first).unwrap(), switched);
+        let concurrently_edited = format!("# operator edit\n{switched}");
+        let rolled_back =
+            rollback_runner_content(&initial, &switched, &concurrently_edited).unwrap();
+        assert!(rolled_back.contains("# operator edit"));
+        assert_eq!(
+            rolled_back.parse::<DocumentMut>().unwrap()["plugins"]["providers"]
+                .as_array_of_tables()
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::remove_file(root.join("document_worker.py")).unwrap();
+        std::fs::remove_dir(first).unwrap();
+        std::fs::remove_dir(second).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]
@@ -634,7 +792,7 @@ mod tests {
             "webcodex-bridge-explicit-{}.env",
             std::process::id()
         ));
-        let bytes = "WEBCODEX_TUNNEL_MCP_TOKEN_FILE='Z:/operator/credential.token'\nWEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS=operator-choice\n";
+        let bytes = "WEBCODEX_FILE_BRIDGE_TOKEN_FILE='Z:/operator/credential.token'\nWEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS=operator-choice\n";
         std::fs::write(&path, bytes).unwrap();
         assert!(!needs_file_bridge(&path).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);

@@ -51,6 +51,27 @@ These commands are evidence for the boundary they exercise, not a routine pre-co
 check. Prefer one exact ignored test while iterating, then the relevant group when the
 change is ready for review.
 
+To verify that Runner validation can locate an explicitly configured Rust toolchain,
+set `WEBCODEX_TEST_CARGO_HOME` and `WEBCODEX_TEST_RUSTUP_HOME` to absolute existing
+Cargo and Rustup homes, and set `RUSTUP_TOOLCHAIN` to the recorded installed
+toolchain name or absolute path, then run
+`cargo test --locked -p webcodex-runner runner_toolchain_real_process_validation_uses_explicit_rust_toolchain -- --ignored --test-threads=1`.
+This test creates a temporary dependency-free crate and runs an offline Cargo check
+through a real validation Job with an isolated shell environment. It requires all
+three variables, uses only the configured Cargo bin directory and platform system PATH,
+and verifies the successful terminal Job result and generated Rust metadata.
+
+For a frozen Windows validation snapshot, run its recorded manifest with
+`pwsh -File scripts/verify_windows_source.ps1 -Manifest <snapshot>/manifest.json`.
+The manifest records the exact source file hashes, absolute toolchain paths,
+compiler hashes/version, process environment and existing build identity fields.
+`-Lane preflight` checks those inputs without compiling; `tests` and `build` rerun
+the ordinary workspace plus explicit Runner evidence and the dogfood binaries.
+Build output must live outside the frozen source. A target directory is reusable
+only with its matching source/build provenance stamp; an unmarked nonempty target
+or one belonging to another snapshot is rejected. In particular, do not place a
+source snapshot under another checkout's shared Cargo target directory.
+
 ## CI Mapping
 
 The lanes above define test semantics; workflows decide when to run them.

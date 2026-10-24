@@ -199,6 +199,33 @@ async fn oauth_authorize_login_rejects_oauth2_access_token() {
 }
 
 #[tokio::test]
+async fn oauth_authorize_login_rejects_isolated_agent_run_without_session_cookie() {
+    let config = test_config(oauth2_enabled());
+    let (_tmp, db) = test_db();
+    let user = seed_user(&db, "isolated-owner");
+    let client = seed_client_with_redirects_and_scopes(
+        &db,
+        &user,
+        "https://example.com/callback",
+        "runtime:read",
+    );
+    let run = db
+        .create_isolated_agent(&user.id, "synthetic-project", None)
+        .unwrap();
+    let before = auth_code_count(&db);
+    let service = Service::new(build_router(config, db.clone()));
+    let return_to = return_to_for(&client, "https://example.com/callback");
+    let body = form_body(&[("return_to", &return_to), ("token", &run.token)]);
+    let response = post_form("http://localhost/oauth/authorize/login", body)
+        .send(&service)
+        .await;
+    assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+    assert_no_location(&response);
+    assert!(set_cookie_value(&response, AUTHORIZE_SESSION_COOKIE).is_none());
+    assert_eq!(auth_code_count(&db), before);
+}
+
+#[tokio::test]
 async fn oauth_authorize_login_rejects_bootstrap_without_user_id() {
     let config = test_config(oauth2_enabled());
     let (_tmp, db) = test_db();

@@ -18,17 +18,18 @@ impl ToolRuntime {
                 limit,
                 summary_only,
             } => {
-                self.list_projects_with_options(
-                    auth,
-                    ListProjectsOptions {
-                        client_id,
-                        project,
-                        query,
-                        limit,
-                        summary_only,
-                    },
-                )
-                .await
+                self.execution()
+                    .list_projects_with_options(
+                        auth,
+                        ListProjectsOptions {
+                            client_id,
+                            project,
+                            query,
+                            limit,
+                            summary_only,
+                        },
+                    )
+                    .await
             }
             ToolCall::RegisterProject {
                 client_id,
@@ -39,23 +40,25 @@ impl ToolRuntime {
                 allow_patch,
                 overwrite,
             } => {
-                self.register_project(
-                    client_id,
-                    id,
-                    name,
-                    path,
-                    description,
-                    allow_patch,
-                    overwrite,
-                    auth,
-                )
-                .await
+                self.execution()
+                    .register_project(
+                        client_id,
+                        id,
+                        name,
+                        path,
+                        description,
+                        allow_patch,
+                        overwrite,
+                        auth,
+                    )
+                    .await
             }
             ToolCall::UnregisterProject {
                 project,
                 expected_revision,
             } => {
-                self.unregister_project(project, expected_revision, auth)
+                self.execution()
+                    .unregister_project(project, expected_revision, auth)
                     .await
             }
             ToolCall::CreateProject {
@@ -70,20 +73,21 @@ impl ToolRuntime {
                 adopt_existing_empty,
                 overwrite,
             } => {
-                self.create_project(
-                    client_id,
-                    id,
-                    name,
-                    path,
-                    description,
-                    allow_patch,
-                    template,
-                    git_init,
-                    adopt_existing_empty,
-                    overwrite,
-                    auth,
-                )
-                .await
+                self.execution()
+                    .create_project(
+                        client_id,
+                        id,
+                        name,
+                        path,
+                        description,
+                        allow_patch,
+                        template,
+                        git_init,
+                        adopt_existing_empty,
+                        overwrite,
+                        auth,
+                    )
+                    .await
             }
             _ => unreachable!("non-project tool routed to project dispatcher"),
         }

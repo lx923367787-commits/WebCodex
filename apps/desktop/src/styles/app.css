@@ -283,3 +283,19 @@ button:disabled { opacity: .48; cursor: default; }
 .tunnel-copy { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
 .tunnel-copy > label, .tunnel-copy > [role="status"] { grid-column: 1 / -1; }
 .tunnel-copy > input { min-width: 0; }
+
+.project-page-heading, .project-row-title, .project-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.project-page-heading { justify-content: space-between; margin-bottom: 14px; }
+.project-page-heading h1, .project-row-title h2 { margin: 0; }
+.project-registry { display: grid; gap: 14px; }
+.project-registry-card { min-width: 0; }
+.project-row-title h2 { font-size: 19px; overflow-wrap: anywhere; }
+.project-tag { padding: 4px 9px; border-radius: 6px; background: #e1f2ee; color: #17594b; font-size: 12px; font-weight: 650; }
+.project-status { margin-left: auto; color: #596573; font-size: 13px; }
+.project-path { color: #596573; overflow-wrap: anywhere; line-height: 1.6; }
+.project-help { color: #596573; line-height: 1.65; margin-bottom: 18px; }
+.project-error { padding: 13px 16px; border: 1px solid #e4b9b3; background: #fff4f1; color: #8d3529; border-radius: 10px; }
+.project-remove { color: #9b392b; }
+.project-dialog-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 24px; background: #101e2c88; }
+.project-remove-dialog { width: min(520px, 100%); max-height: calc(100vh - 48px); overflow: auto; box-shadow: 0 22px 65px #101e2c33; }
+.project-remove-dialog .project-row-actions { justify-content: flex-end; margin-top: 24px; }

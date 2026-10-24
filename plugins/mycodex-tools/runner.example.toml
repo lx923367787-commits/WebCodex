@@ -6,7 +6,13 @@ request_timeout_secs = 60
 [[plugins.providers]]
 id = "mycodex-tools"
 name = "MyCodex Office and PDF"
-command = 'E:\wbecodex\.local\venvs\mycodex-tools\Scripts\python.exe'
-args = ['E:\wbecodex\source\plugins\mycodex-tools\plugin.py', '--font-path', 'C:\Windows\Fonts\simhei.ttf']
+command = 'E:\wbecodex\.local\office-v2-build\mycodex-tools\python\python.exe'
+args = ['E:\wbecodex\.local\office-v2-build\mycodex-tools\plugin.py', '--font-path', 'E:\wbecodex\.local\office-v2-build\mycodex-tools\fonts\ZCOOLXiaoWei-Regular.ttf']
 cwd = 'E:\wbecodex\sandbox'
 timeout_secs = 60
+# Operator-owned paths for the four native document tools. These run through
+# Runner Jobs; the legacy plugin RPC timeout above is not an async job timeout.
+# The provider cwd must match the selected registered project's exact root.
+# --request and --result are injected by Runner, never configured here.
+document_worker = 'E:\wbecodex\.local\office-v2-build\mycodex-tools\document_worker.py'
+document_worker_args = ['--font-path', 'E:\wbecodex\.local\office-v2-build\mycodex-tools\fonts\ZCOOLXiaoWei-Regular.ttf', '--tesseract-path', 'E:\wbecodex\.local\office-v2-build\mycodex-tools\tesseract\tesseract.exe', '--tessdata-path', 'E:\wbecodex\.local\office-v2-build\mycodex-tools\tesseract\tessdata']

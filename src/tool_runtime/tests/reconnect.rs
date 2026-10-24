@@ -50,6 +50,7 @@ fn register_request(
     build: Option<RunnerBuildInfo>,
 ) -> RunnerRegisterRequest {
     crate::test_support::current_runner_registration(RunnerRegisterRequest {
+        agent_execution_resources: Vec::new(),
         client_id: client_id.to_string(),
         runner_instance_id: instance.to_string(),
         runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -332,6 +333,7 @@ async fn meaningful_activity_is_scoped_and_not_refreshed_by_status_calls() {
     // Reading forensic trace data is itself observability and must not become
     // meaningful activity even if the operator call succeeds.
     runtime
+        .observation
         .observations
         .record_successful_tool_call(ToolCallObservation {
             principal_kind: "bootstrap".to_string(),

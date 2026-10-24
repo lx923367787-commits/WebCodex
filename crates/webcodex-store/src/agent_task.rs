@@ -14,6 +14,19 @@ use webcodex_core::coding_agent::{
     merge_coding_agent_run_snapshot, validate_coding_agent_run_snapshot, CodingAgentExecutionState,
     CodingAgentObservationMerge, CodingAgentRunSnapshot, CodingAgentRunState, CodingAgentTerminal,
 };
+#[path = "agent_public_task.rs"]
+mod public_execution;
+#[cfg(test)]
+#[path = "agent_public_task_tests.rs"]
+mod public_execution_tests;
+#[cfg(test)]
+#[path = "agent_cli_worker_task_tests.rs"]
+mod cli_worker_task_tests;
+mod takeover;
+pub(crate) use public_execution::{complete_cli_worker_task_on_connection, public_execution_on_connection};
+pub use public_execution::{
+    AgentCliWorkerTaskSnapshot, AgentPublicTaskExecution, AgentPublicTaskMutation,
+};
 
 pub(crate) const AGENT_TASK_ID_PREFIX: &str = "wc_agent_task_";
 pub(crate) const AGENT_TASK_ATTEMPT_ID_PREFIX: &str = "wc_agent_task_attempt_";
@@ -273,6 +286,7 @@ impl AgentTaskCodingRunBindingRecord {
 pub struct AgentTaskCodingRunStartContext {
     pub task: AgentTaskDetail,
     pub attempt: AgentTaskAttemptRecord,
+    pub instruction: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,6 +342,8 @@ pub struct AgentTaskSummary {
     pub execution_bound: bool,
     pub execution_status: Option<AgentTaskExecutionStatus>,
     pub recovery_kind: AgentTaskExecutionRecoveryKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_execution: Option<AgentPublicTaskExecution>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -440,6 +456,7 @@ struct StoredTask {
     terminal_at_unix_ms: Option<i64>,
     latest_attempt: Option<StoredAttempt>,
     latest_coding_run: Option<AgentTaskCodingRunBindingRecord>,
+    public_execution: Option<AgentPublicTaskExecution>,
 }
 
 impl StoredTask {
@@ -475,6 +492,7 @@ impl StoredTask {
                 .latest_attempt
                 .as_ref()
                 .map(|attempt| attempt.record(now)),
+            public_execution: self.public_execution.clone(),
             execution_bound: self.latest_coding_run.is_some(),
             execution_status: self
                 .latest_coding_run
@@ -586,6 +604,8 @@ impl Database {
                 ON wc_agent_task_attempts(assignee_agent_id, state, lease_expires_at_unix_ms);
             ",
         )?;
+        takeover::ensure_schema(conn)?;
+        public_execution::ensure_schema(conn)?;
         Ok(())
     }
 
@@ -603,115 +623,13 @@ impl Database {
         input: NewAgentTask,
         now: i64,
     ) -> Result<AgentTaskMutation, CommunicationStoreError> {
-        validate_communication_principal(principal)?;
-        let title = validate_title(&input.title)?;
-        let instruction = validate_instruction(&input.instruction)?;
-        let assignee_agent_id = validate_optional_id(
-            input.assignee_agent_id.as_deref(),
-            DURABLE_AGENT_ID_PREFIX,
-            "invalid_agent_id",
-        )?;
-        let source_conversation_id = validate_optional_id(
-            input.source_conversation_id.as_deref(),
-            CONVERSATION_ID_PREFIX,
-            "invalid_conversation_id",
-        )?;
-        let source_message_id = validate_optional_id(
-            input.source_message_id.as_deref(),
-            CONVERSATION_MESSAGE_ID_PREFIX,
-            "invalid_message_id",
-        )?;
-        if source_message_id.is_some() && source_conversation_id.is_none() {
-            return Err(CommunicationStoreError::new(
-                "agent_task_source_invalid",
-                "source_message_id requires source_conversation_id",
-            ));
-        }
-        let referenced_project_id =
-            validate_project_reference(input.referenced_project_id.as_deref())?;
-        let idempotency_key = validate_idempotency_key(&input.idempotency_key)?;
-        let request_hash = task_request_hash(&json!({
-            "title": title,
-            "instruction": instruction,
-            "assignee_agent_id": assignee_agent_id,
-            "source_conversation_id": source_conversation_id,
-            "source_message_id": source_message_id,
-            "referenced_project_id": referenced_project_id,
-        }));
-
         let mut conn = self.conn.lock().unwrap();
-        let transaction = conn
+        let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(store_error)?;
-
-        if let Some(task_id) = lookup_idempotent_resource(
-            &transaction,
-            principal,
-            OP_CREATE_AGENT_TASK,
-            &idempotency_key,
-            &request_hash,
-        )? {
-            let task = load_owned_task(&transaction, principal, &task_id, now)?;
-            transaction.commit().map_err(store_error)?;
-            return Ok(AgentTaskMutation {
-                task: task.detail(now),
-                created: false,
-                replayed: true,
-                state_changed: false,
-            });
-        }
-
-        if let Some(agent_id) = assignee_agent_id.as_deref() {
-            require_owned_agent(&transaction, principal, agent_id)?;
-        }
-        validate_source_references(
-            &transaction,
-            principal,
-            source_conversation_id.as_deref(),
-            source_message_id.as_deref(),
-        )?;
-
-        let task_id = new_id(AGENT_TASK_ID_PREFIX);
-        transaction
-            .execute(
-                "INSERT INTO wc_agent_tasks (
-                    task_id, owner_principal_kind, owner_principal_digest,
-                    assignee_agent_id, title, instruction, source_conversation_id,
-                    source_message_id, referenced_project_id, state, latest_attempt_id,
-                    terminal_attempt_id, created_at_unix_ms, updated_at_unix_ms,
-                    terminal_at_unix_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'ready', NULL, NULL, ?10, ?10, NULL)",
-                params![
-                    task_id,
-                    principal.kind,
-                    principal.digest,
-                    assignee_agent_id,
-                    title,
-                    instruction,
-                    source_conversation_id,
-                    source_message_id,
-                    referenced_project_id,
-                    now,
-                ],
-            )
-            .map_err(store_error)?;
-        record_idempotent_resource(
-            &transaction,
-            principal,
-            OP_CREATE_AGENT_TASK,
-            &idempotency_key,
-            &request_hash,
-            &task_id,
-            now,
-        )?;
-        let task = load_owned_task(&transaction, principal, &task_id, now)?;
-        transaction.commit().map_err(store_error)?;
-        Ok(AgentTaskMutation {
-            task: task.detail(now),
-            created: true,
-            replayed: false,
-            state_changed: true,
-        })
+        let result = create_agent_task_on_connection(&tx, principal, input, now)?;
+        tx.commit().map_err(store_error)?;
+        Ok(result)
     }
 
     pub fn list_agent_tasks(
@@ -881,7 +799,16 @@ impl Database {
             .map_err(store_error)?;
         let now = now.unwrap_or_else(now_unix_ms);
         let mut task = load_owned_task(&transaction, principal, task_id, now)?;
-        if task.stored_state.terminal() {
+        public_execution::legacy_gate(&transaction, task_id)?;
+        let resumable_failure = task.stored_state == AgentTaskState::Failed
+            && task.latest_coding_run.as_ref().is_some_and(|binding| {
+                binding.dispatch_state == AgentTaskCodingRunDispatchState::Terminal
+                    && matches!(
+                        binding.last_observed_run_state,
+                        Some(CodingAgentRunState::Failed | CodingAgentRunState::Cancelled)
+                    )
+            });
+        if task.stored_state.terminal() && !resumable_failure {
             return Err(task_terminal_error());
         }
         require_owned_agent(&transaction, principal, assignee_agent_id)?;
@@ -910,7 +837,7 @@ impl Database {
                 "AgentTask has an unexpired active Attempt; reassignment is fenced",
             ));
         }
-        if task.assignee_agent_id.as_deref() == Some(assignee_agent_id) {
+        if task.assignee_agent_id.as_deref() == Some(assignee_agent_id) && !resumable_failure {
             transaction.commit().map_err(store_error)?;
             return Ok(AgentTaskMutation {
                 task: task.detail(now),
@@ -922,7 +849,8 @@ impl Database {
         transaction
             .execute(
                 "UPDATE wc_agent_tasks
-                 SET assignee_agent_id = ?2, state = 'ready', updated_at_unix_ms = ?3
+                 SET assignee_agent_id = ?2, state = 'ready', updated_at_unix_ms = ?3,
+                     terminal_attempt_id = NULL, terminal_at_unix_ms = NULL
                  WHERE task_id = ?1",
                 params![task_id, assignee_agent_id, now.max(task.updated_at_unix_ms)],
             )
@@ -997,6 +925,7 @@ impl Database {
             .map_err(store_error)?;
         let now = now.unwrap_or_else(now_unix_ms);
         let mut task = load_owned_task(&transaction, principal, task_id, now)?;
+        public_execution::legacy_gate(&transaction, task_id)?;
 
         if let Some(attempt_id) = lookup_idempotent_resource(
             &transaction,
@@ -1061,6 +990,16 @@ impl Database {
             .map(|attempt| attempt.attempt_number.saturating_add(1))
             .unwrap_or(1);
         let attempt_id = new_id(AGENT_TASK_ATTEMPT_ID_PREFIX);
+        let continuation_instruction = if attempt_number > 1 {
+            Some(takeover::handoff_brief(
+                &transaction,
+                principal,
+                task_id,
+                attempt_number,
+            )?)
+        } else {
+            None
+        };
         let attempt_fence = new_id(AGENT_TASK_ATTEMPT_FENCE_PREFIX);
         let lease_expires_at = now.saturating_add(DEFAULT_AGENT_TASK_ATTEMPT_LEASE_MS);
         transaction
@@ -1069,8 +1008,8 @@ impl Database {
                     attempt_id, task_id, attempt_number, assignee_agent_id, state,
                     lease_expires_at_unix_ms, attempt_fence, attempt_controller_generation,
                     created_at_unix_ms, started_at_unix_ms, terminal_at_unix_ms,
-                    terminal_result, terminal_reason
-                 ) VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, 1, ?7, ?7, NULL, NULL, NULL)",
+                    terminal_result, terminal_reason, continuation_instruction
+                 ) VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, 1, ?7, ?7, NULL, NULL, NULL, ?8)",
                 params![
                     attempt_id,
                     task_id,
@@ -1079,6 +1018,7 @@ impl Database {
                     lease_expires_at,
                     attempt_fence,
                     now,
+                    continuation_instruction,
                 ],
             )
             .map_err(store_error)?;
@@ -1444,6 +1384,12 @@ impl Database {
             attempt_controller_generation,
             now,
         )?;
+        if let Some(error) = blocking_execution_error(task.latest_coding_run.as_ref()) {
+            return Err(error);
+        }
+        if outcome == AgentTaskState::Succeeded {
+            crate::team_completion::require_team_completion(&transaction, principal, task_id)?;
+        }
         let attempt_state = match outcome {
             AgentTaskState::Succeeded => AgentTaskAttemptState::Succeeded,
             AgentTaskState::Failed => AgentTaskAttemptState::Failed,
@@ -1592,9 +1538,18 @@ impl Database {
             attempt_controller_generation,
             now,
         )?;
+        let instruction = conn
+            .query_row(
+                "SELECT continuation_instruction FROM wc_agent_task_attempts WHERE attempt_id = ?1",
+                [attempt_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(store_error)?
+            .unwrap_or_else(|| task.instruction.clone());
         Ok(AgentTaskCodingRunStartContext {
             task: task.detail(now),
             attempt: attempt.record(now),
+            instruction,
         })
     }
 
@@ -1748,6 +1703,17 @@ impl Database {
                 binding: existing,
                 replayed: true,
             });
+        }
+        let run_count: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM wc_agent_task_coding_runs WHERE task_id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .map_err(store_error)?;
+        if run_count >= takeover::MAX_TASK_CODING_RUNS {
+            return Err(CommunicationStoreError::new("agent_task_run_budget_exhausted",
+                "AgentTask reached its durable eight-Run budget; preserve evidence and await coordinator action"));
         }
         let conflicting_attempt = transaction
             .query_row(
@@ -2086,6 +2052,23 @@ impl Database {
                     "AgentTaskAttempt does not exist",
                 )
             })?;
+        if binding.dispatch_state == AgentTaskCodingRunDispatchState::Terminal
+            && task.stored_state == AgentTaskState::Ready
+            && matches!(
+                attempt.stored_state,
+                AgentTaskAttemptState::Succeeded | AgentTaskAttemptState::Failed
+            )
+        {
+            // Explicit resume already consumed this terminal outcome. A late
+            // observation must not undo reassignment before the next claim.
+            transaction.commit().map_err(store_error)?;
+            return Ok(AgentTaskCodingRunReconcileMutation {
+                task: task.summary(now),
+                attempt: attempt.record(now),
+                binding,
+                state_changed: false,
+            });
+        }
         if task.stored_state.terminal() {
             let terminal_attempt_id = transaction
                 .query_row(
@@ -2109,6 +2092,9 @@ impl Database {
                 binding,
                 state_changed: false,
             });
+        }
+        if desired_task_state == AgentTaskState::Succeeded {
+            crate::team_completion::require_team_completion(&transaction, principal, task_id)?;
         }
         let attempt_state = match desired_task_state {
             AgentTaskState::Succeeded => AgentTaskAttemptState::Succeeded,
@@ -2609,6 +2595,16 @@ fn load_owned_task(
         .ok_or_else(|| {
             CommunicationStoreError::new("agent_task_not_found", "AgentTask does not exist")
         })?;
+    let public_execution = public_execution::public_execution_on_connection(conn, task_id)?;
+    if public_execution
+        .as_ref()
+        .is_some_and(|execution| execution.state != row.7 || row.1.is_some() || row.8.is_some())
+    {
+        return Err(CommunicationStoreError::new(
+            "agent_task_storage_invariant",
+            "Public and legacy task execution state disagree",
+        ));
+    }
     let latest_attempt = match row.8.as_deref() {
         Some(attempt_id) => {
             load_attempt_for_task(conn, task_id, attempt_id, now)?.ok_or_else(|| {
@@ -2633,6 +2629,7 @@ fn load_owned_task(
                 terminal_at_unix_ms: row.11,
                 latest_attempt: None,
                 latest_coding_run: None,
+                public_execution,
             })
         }
     };
@@ -2652,6 +2649,7 @@ fn load_owned_task(
         terminal_at_unix_ms: row.11,
         latest_attempt: Some(latest_attempt),
         latest_coding_run,
+        public_execution,
     })
 }
 
@@ -2928,4 +2926,115 @@ fn task_terminal_error() -> CommunicationStoreError {
         "agent_task_terminal",
         "AgentTask is terminal and cannot start or mutate execution ownership",
     )
+}
+
+pub(crate) fn create_agent_task_on_connection(
+    transaction: &Transaction<'_>,
+    principal: &CommunicationPrincipal,
+    input: NewAgentTask,
+    now: i64,
+) -> Result<AgentTaskMutation, CommunicationStoreError> {
+    validate_communication_principal(principal)?;
+    let title = validate_title(&input.title)?;
+    let instruction = validate_instruction(&input.instruction)?;
+    let assignee_agent_id = validate_optional_id(
+        input.assignee_agent_id.as_deref(),
+        DURABLE_AGENT_ID_PREFIX,
+        "invalid_agent_id",
+    )?;
+    let source_conversation_id = validate_optional_id(
+        input.source_conversation_id.as_deref(),
+        CONVERSATION_ID_PREFIX,
+        "invalid_conversation_id",
+    )?;
+    let source_message_id = validate_optional_id(
+        input.source_message_id.as_deref(),
+        CONVERSATION_MESSAGE_ID_PREFIX,
+        "invalid_message_id",
+    )?;
+    if source_message_id.is_some() && source_conversation_id.is_none() {
+        return Err(CommunicationStoreError::new(
+            "agent_task_source_invalid",
+            "source_message_id requires source_conversation_id",
+        ));
+    }
+    let referenced_project_id = validate_project_reference(input.referenced_project_id.as_deref())?;
+    let idempotency_key = validate_idempotency_key(&input.idempotency_key)?;
+    let request_hash = task_request_hash(&json!({
+        "title": title,
+        "instruction": instruction,
+        "assignee_agent_id": assignee_agent_id,
+        "source_conversation_id": source_conversation_id,
+        "source_message_id": source_message_id,
+        "referenced_project_id": referenced_project_id,
+    }));
+
+    if let Some(task_id) = lookup_idempotent_resource(
+        transaction,
+        principal,
+        OP_CREATE_AGENT_TASK,
+        &idempotency_key,
+        &request_hash,
+    )? {
+        let task = load_owned_task(transaction, principal, &task_id, now)?;
+
+        return Ok(AgentTaskMutation {
+            task: task.detail(now),
+            created: false,
+            replayed: true,
+            state_changed: false,
+        });
+    }
+
+    if let Some(agent_id) = assignee_agent_id.as_deref() {
+        require_owned_agent(transaction, principal, agent_id)?;
+    }
+    validate_source_references(
+        transaction,
+        principal,
+        source_conversation_id.as_deref(),
+        source_message_id.as_deref(),
+    )?;
+
+    let task_id = new_id(AGENT_TASK_ID_PREFIX);
+    transaction
+            .execute(
+                "INSERT INTO wc_agent_tasks (
+                    task_id, owner_principal_kind, owner_principal_digest,
+                    assignee_agent_id, title, instruction, source_conversation_id,
+                    source_message_id, referenced_project_id, state, latest_attempt_id,
+                    terminal_attempt_id, created_at_unix_ms, updated_at_unix_ms,
+                    terminal_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'ready', NULL, NULL, ?10, ?10, NULL)",
+                params![
+                    task_id,
+                    principal.kind,
+                    principal.digest,
+                    assignee_agent_id,
+                    title,
+                    instruction,
+                    source_conversation_id,
+                    source_message_id,
+                    referenced_project_id,
+                    now,
+                ],
+            )
+            .map_err(store_error)?;
+    record_idempotent_resource(
+        transaction,
+        principal,
+        OP_CREATE_AGENT_TASK,
+        &idempotency_key,
+        &request_hash,
+        &task_id,
+        now,
+    )?;
+    let task = load_owned_task(transaction, principal, &task_id, now)?;
+
+    Ok(AgentTaskMutation {
+        task: task.detail(now),
+        created: true,
+        replayed: false,
+        state_changed: true,
+    })
 }

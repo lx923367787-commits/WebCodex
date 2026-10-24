@@ -50,6 +50,7 @@ async fn register_target_agent(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build,
             job_concurrency_limit: Some(4),
@@ -91,6 +92,7 @@ async fn register_target_agent_for_auth(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: Some(4),
@@ -144,6 +146,7 @@ async fn register_managed_target_agent(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: Some(4),
@@ -216,6 +219,7 @@ async fn list_projects_large_single_runner_inventory_preserves_linear_staging_co
         let exact_index = if project_count == 1024 { 999 } else { 255 };
         let exact_id = format!("agent:special:project-{exact_index:04}");
         let exact = runtime
+            .execution()
             .list_projects_with_visible_clients_for_test(
                 None,
                 ListProjectsOptions {
@@ -234,6 +238,7 @@ async fn list_projects_large_single_runner_inventory_preserves_linear_staging_co
         assert_eq!(exact.output["projects"][0]["id"], exact_id);
 
         let broad = runtime
+            .execution()
             .list_projects_with_visible_clients_for_test(
                 None,
                 ListProjectsOptions {
@@ -262,6 +267,7 @@ async fn list_projects_large_single_runner_inventory_preserves_linear_staging_co
         assert_eq!(broad_ids, expected_ids);
 
         let full = runtime
+            .execution()
             .list_projects_with_visible_clients_for_test(
                 None,
                 ListProjectsOptions::default(),
@@ -549,6 +555,7 @@ async fn managed_users_discover_only_their_own_runner_project_metadata() {
     assert_eq!(hidden_status.output["error_kind"], "unknown_client_id");
 
     let ambiguous = runtime
+        .execution()
         .resolve_project_input_for_auth("common", Some(&alice))
         .await
         .unwrap_err();

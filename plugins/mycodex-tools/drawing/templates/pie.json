@@ -1,0 +1,28 @@
+{
+  "kind": "chart",
+  "chart_type": "pie",
+  "title": "各月收入构成",
+  "source": {
+    "path": "drawings/data.xlsx",
+    "sheet": "Sheet1",
+    "range": "A1:C7",
+    "header": true
+  },
+  "x": "月份",
+  "series": [
+    {
+      "column": "收入",
+      "label": "收入"
+    }
+  ],
+  "unit": "元",
+  "missing": "error",
+  "numeric_strings": "error",
+  "style": {
+    "width": 9,
+    "height": 6,
+    "dpi": 160,
+    "font_size": 12,
+    "show_values": true
+  }
+}

@@ -10,7 +10,8 @@ use crate::auth::{
     clean_token_name, generate_agent_token, generate_api_token, hash_token, scopes_to_string,
     token_prefix, validate_allowed_client_id, validate_username, AuthContext,
     SCOPE_AGENT_JOB_UPDATE, SCOPE_AGENT_POLL, SCOPE_AGENT_REGISTER, SCOPE_AGENT_RESULT,
-    SCOPE_JOB_RUN, SCOPE_PROJECT_READ, SCOPE_PROJECT_WRITE, SCOPE_RUNTIME_READ,
+    SCOPE_COMMUNICATION_MANAGE, SCOPE_COMMUNICATION_READ, SCOPE_JOB_RUN, SCOPE_PLUGIN_INSPECT,
+    SCOPE_PLUGIN_INVOKE, SCOPE_PROJECT_READ, SCOPE_PROJECT_WRITE, SCOPE_RUNTIME_READ,
     SCOPE_SESSION_COLLABORATE,
 };
 use crate::db::PairingConsumeResult;
@@ -34,6 +35,10 @@ const ENROLL_USER_SCOPES: &[&str] = &[
     SCOPE_PROJECT_READ,
     SCOPE_PROJECT_WRITE,
     SCOPE_JOB_RUN,
+    SCOPE_COMMUNICATION_READ,
+    SCOPE_COMMUNICATION_MANAGE,
+    SCOPE_PLUGIN_INSPECT,
+    SCOPE_PLUGIN_INVOKE,
 ];
 
 const ENROLL_AGENT_SCOPES: &[&str] = &[
@@ -747,7 +752,11 @@ mod tests {
                 SCOPE_SESSION_COLLABORATE,
                 SCOPE_PROJECT_READ,
                 SCOPE_PROJECT_WRITE,
-                SCOPE_JOB_RUN
+                SCOPE_JOB_RUN,
+                SCOPE_COMMUNICATION_READ,
+                SCOPE_COMMUNICATION_MANAGE,
+                SCOPE_PLUGIN_INSPECT,
+                SCOPE_PLUGIN_INVOKE
             ])
         );
         assert_eq!(

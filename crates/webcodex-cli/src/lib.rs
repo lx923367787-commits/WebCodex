@@ -62,6 +62,10 @@ const SETUP_GPT_SCOPES: &[&str] = &[
     "project:read",
     "project:write",
     "job:run",
+    "communication:read",
+    "communication:manage",
+    "plugin:inspect",
+    "plugin:invoke",
 ];
 const SETUP_RUNNER_SCOPES: &[&str] = &[
     "agent:register",
@@ -106,6 +110,8 @@ enum CliAction {
     Project(Vec<String>),
     ProjectRegister(ProjectRegisterOptions),
     ProjectActivate(ProjectActivateOptions),
+    ProjectManagement(webcodex_cli::project_management::Options),
+    Office(webcodex_cli::office::Options),
     Connect(ConnectOptions),
     Disconnect(DisconnectOptions),
     HostedLogWriter(PathBuf),
@@ -332,6 +338,23 @@ where
         "connect" => parse_connect(&args[1..]),
         "disconnect" => parse_disconnect(&args[1..]),
         "project" => parse_project_subcommand(&args[1..]),
+        "office" => {
+            if args[1..]
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+            {
+                CliAction::Exit {
+                    code: 0,
+                    stdout: webcodex_cli::office::USAGE.into(),
+                    stderr: String::new(),
+                }
+            } else {
+                match webcodex_cli::office::parse(&args[1..]) {
+                    Ok(options) => CliAction::Office(options),
+                    Err(error) => cli_parse_error(error),
+                }
+            }
+        }
         "__hosted-log-writer" => {
             if args.len() == 2 {
                 CliAction::HostedLogWriter(PathBuf::from(&args[1]))
@@ -650,6 +673,15 @@ fn parse_disconnect(args: &[String]) -> CliAction {
 
 fn parse_project_subcommand(args: &[String]) -> CliAction {
     match args.first().map(String::as_str) {
+        Some("list" | "enable" | "disable" | "unregister") => {
+            if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h")) {
+                return CliAction::Exit { code: 0, stdout: webcodex_cli::project_management::USAGE.into(), stderr: String::new() };
+            }
+            match webcodex_cli::project_management::parse(args) {
+                Ok(options) => CliAction::ProjectManagement(options),
+                Err(error) => cli_parse_error(error),
+            }
+        }
         Some("activate") => {
             if args[1..]
                 .iter()
@@ -664,6 +696,7 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
             let mut config = None;
             let mut user_token_file = None;
             let mut project = None;
+            let mut expected_project_path = None;
             let mut json = false;
             let mut index = 1;
             while index < args.len() {
@@ -680,6 +713,13 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
                         match args.get(index) {
                             Some(value) => user_token_file = Some(PathBuf::from(value)),
                             None => return cli_parse_error("--user-token-file requires a value".to_string()),
+                        }
+                    }
+                    "--expected-project-path" => {
+                        index += 1;
+                        match args.get(index) {
+                            Some(value) => expected_project_path = Some(PathBuf::from(value)),
+                            None => return cli_parse_error("--expected-project-path requires a value".to_string()),
                         }
                     }
                     "--json" => json = true,
@@ -708,6 +748,7 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
                 config,
                 user_token_file,
                 project,
+                expected_project_path,
                 json,
             })
         }
@@ -724,6 +765,7 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
             }
             let mut config = None;
             let mut project = None;
+            let mut expected_project_path = None;
             let mut json = false;
             let mut index = 1;
             while index < args.len() {
@@ -735,6 +777,13 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
                             None => {
                                 return cli_parse_error("--config requires a value".to_string())
                             }
+                        }
+                    }
+                    "--expected-project-path" => {
+                        index += 1;
+                        match args.get(index) {
+                            Some(value) => expected_project_path = Some(PathBuf::from(value)),
+                            None => return cli_parse_error("--expected-project-path requires a value".to_string()),
                         }
                     }
                     "--json" => json = true,
@@ -763,12 +812,13 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
             CliAction::ProjectRegister(ProjectRegisterOptions {
                 config,
                 project,
+                expected_project_path,
                 json,
             })
         }
         Some("--help" | "-h") => CliAction::Exit {
             code: 0,
-            stdout: "Usage: webcodex project <COMMAND>\n\nCommands:\n  activate    Activate a project on the current Runner without restarting it\n  register    Add a project for a stopped/legacy Runner\n".to_string(),
+            stdout: "Usage: webcodex project <COMMAND>\n\nCommands:\n  activate    Activate a project on the current Runner without restarting it\n  register    Add a project for a stopped/legacy Runner\n  list        List projects on an exact saved Runner connection\n  enable      Enable a registered project (admin credential required)\n  disable     Disable new project work; existing Jobs may continue\n  unregister  Remove registration only; preserve all source files\n".to_string(),
             stderr: String::new(),
         },
         Some(other) => cli_parse_error(format!("unknown project subcommand: {other}")),
@@ -2624,6 +2674,35 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         },
+        CliAction::ProjectManagement(opts) => {
+            match webcodex_cli::project_management::run(opts).await {
+                Ok(output) => {
+                    println!("{output}");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        CliAction::Office(opts) => {
+            let input = webcodex_cli::office::read_input(std::io::stdin().lock());
+            let result = match input {
+                Ok(input) => webcodex_cli::office::run(opts, input).await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(output) => {
+                    println!("{output}");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         CliAction::Connect(opts) => match run_connect(opts).await {
             Ok(result) => {
                 let stdout = std::io::stdout();

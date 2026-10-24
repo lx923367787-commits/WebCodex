@@ -36,6 +36,24 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                     "Per-file path, byte count, sha256, MIME type, project, and source name.",
                 ),
             ),
+            (
+                "failed",
+                array_schema(
+                    open_object_schema("Failed, unknown or authority-skipped attachment."),
+                    "Unsuccessful items with input index, target path, status, safe error and retry guidance. Unknown outcomes must be observed before any retry.",
+                ),
+            ),
+            (
+                "items",
+                array_schema(
+                    open_object_schema("Ordered per-attachment import outcome."),
+                    "One outcome per input attachment, including successfully committed paths even if another attachment failed. index is zero-based.",
+                ),
+            ),
+            (
+                "status",
+                schema_type("string", "completed, partial, failed or unknown; success=false whenever any attachment is unsuccessful. Never automatically replay an unknown outcome."),
+            ),
         ])),
         "export_project_artifact" => Some(wrapped_output_schema(vec![
             (

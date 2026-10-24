@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use webcodex_admin::build_server_http_client;
 
 use super::super::http::{post_json_authed, ApiCall};
-use super::profile::{atomic_write, validate_existing_regular_file, ConnectOptions, ResolvedKey};
+use super::profile::{
+    atomic_write, validate_existing_regular_file, validate_redirect_uri, ConnectOptions,
+    ResolvedKey,
+};
 use super::ConnectResult;
 
 const BRIDGE_PROFILE_VERSION: u32 = 1;
@@ -74,36 +77,6 @@ struct OAuthMetadata {
     issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
-}
-
-fn validate_redirect_uri(uri: &str) -> Result<String, String> {
-    let trimmed = uri.trim();
-    if trimmed.is_empty() {
-        return Err("OAuth redirect URI cannot be empty".to_string());
-    }
-    let parsed = url::Url::parse(trimmed)
-        .map_err(|_| "OAuth redirect URI is not a valid URL".to_string())?;
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("OAuth redirect URI must not contain userinfo".to_string());
-    }
-    if parsed.fragment().is_some() {
-        return Err("OAuth redirect URI must not contain a fragment".to_string());
-    }
-    let scheme = parsed.scheme().to_ascii_lowercase();
-    if !matches!(scheme.as_str(), "http" | "https") {
-        return Err("OAuth redirect URI must use http or https".to_string());
-    }
-    let host = parsed.host_str().unwrap_or("");
-    if host.is_empty() {
-        return Err("OAuth redirect URI must have a host".to_string());
-    }
-    if scheme == "http" && !matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
-        return Err(
-            "http OAuth redirect URI is only allowed for loopback; use https for other hosts"
-                .to_string(),
-        );
-    }
-    Ok(trimmed.to_string())
 }
 
 fn profile_path(profile_dir: &Path, redirect_uri: &str) -> PathBuf {

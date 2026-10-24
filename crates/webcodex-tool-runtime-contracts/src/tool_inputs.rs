@@ -80,6 +80,7 @@ pub use webcodex_core::apply_edits_shared::{
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckpointValidationInput {
     #[serde(default)]
     pub status: Option<String>,

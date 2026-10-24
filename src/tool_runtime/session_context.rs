@@ -625,6 +625,12 @@ impl ToolRuntime {
             return;
         }
         let current = json!({
+            "session_id": handoff.output.get("session_id"),
+            "project": handoff.output.get("project"),
+            "mode": handoff.output.get("mode"),
+            "guards": handoff.output.get("guards"),
+            "execution_context": handoff.output.get("execution_context"),
+            "lifecycle": handoff.output.get("lifecycle"),
             "workspace": handoff.output.get("workspace"),
             "checkpoints": handoff.output.get("checkpoints"),
             "validation": recovery_validation_summary(handoff.output.get("validation")),
@@ -852,6 +858,12 @@ pub(crate) fn runtime_observation_principal(
     let Some(auth) = auth else {
         return Ok(("dev".to_string(), "dev".to_string()));
     };
+    if auth.is_native_host() {
+        return Err("native_host_has_no_runtime_principal".into());
+    }
+    if let Some(binding) = auth.agent_run.as_ref() {
+        return Ok(("isolated-agent".to_string(), binding.run_id().to_string()));
+    }
     if auth.is_bootstrap {
         return Ok((
             "bootstrap".to_string(),

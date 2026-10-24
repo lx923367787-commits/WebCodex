@@ -10,7 +10,7 @@ webcodex-computer = { path = "../webcodex-computer" }
 webcodex-runner-config = { path = "../webcodex-runner-config" }
 webcodex-core = { path = "../webcodex-core" }
 webcodex-persistent-shell = { path = "../webcodex-persistent-shell" }
-webcodex-process = { path = "../webcodex-process" }
+webcodex-process = { path = "../webcodex-process", features = ["cli-catalog"] }
 webcodex-workspace = { path = "../webcodex-workspace" }
 base64 = "0.22"
 chrono = "0.4"
@@ -42,7 +42,13 @@ libc = "0.2"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_NetworkManagement_WindowsFirewall",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
     "Win32_System_Threading",
 ] }
 

@@ -1,0 +1,10 @@
+# Replace C:/WebCodex with the absolute checkout path before merging into
+# the Runner configuration. Desktop manages private control arguments and
+# runtime_lifecycle when this exact provider is attached to an owned Host.
+[[plugins.providers]]
+id = "chat-agents"
+name = "WebCodex Chat Subagents"
+command = 'C:/WebCodex/windows/.venv/Scripts/python.exe'
+args = ['C:/WebCodex/windows/chat-agents/chat_agents.py']
+cwd = 'C:/WebCodex/windows/chat-agents'
+timeout_secs = 30

@@ -50,6 +50,20 @@ fn nullable_attempt_schema() -> Value {
     })
 }
 
+fn public_execution_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,
+        "description":"Isolated logical Agent business-task lifecycle. Not a Runner binding, process termination proof or execution credential.",
+        "properties":{
+            "execution_id":{"type":"string"},"task_id":{"type":"string"},"agent_id":{"type":"string"},
+            "started_run_id":{"type":"string"},"started_generation":{"type":"integer","minimum":1},
+            "state":{"type":"string","enum":["active","succeeded","failed"]},"revision":{"type":"integer","minimum":1},
+            "started_at_unix_ms":{"type":"integer"},"terminal_at_unix_ms":nullable_integer("Public task terminal time."),
+            "completed_run_id":nullable_string("Exact same-Agent run recording completion."),"completed_generation":nullable_integer("Completion run generation."),
+            "terminal_result":nullable_string("Explicit bounded public result."),"terminal_reason":nullable_string("Explicit bounded public reason.")
+        },"required":["execution_id","task_id","agent_id","started_run_id","started_generation","state","revision","started_at_unix_ms","terminal_at_unix_ms","completed_run_id","completed_generation","terminal_result","terminal_reason"]
+    })
+}
+
 fn task_summary_properties() -> serde_json::Map<String, Value> {
     json!({
         "properties": {
@@ -64,6 +78,7 @@ fn task_summary_properties() -> serde_json::Map<String, Value> {
             "updated_at_unix_ms": schema_type("integer", "Latest durable Task/Attempt ownership update time."),
             "terminal_at_unix_ms": nullable_integer("Task terminal time, or null while nonterminal."),
             "latest_attempt": nullable_attempt_schema()
+            ,"public_execution": public_execution_schema()
             ,"execution_bound": schema_type("boolean", "True when the latest AgentTaskAttempt has a durable CodingAgentRun binding. This high-level projection grants no execution authority."),
             "execution_status": {
                 "anyOf": [
@@ -145,6 +160,7 @@ fn coding_run_terminal_schema() -> Value {
 
 fn coding_run_binding_output_schema() -> Value {
     wrapped_output_schema(vec![
+        ("handoff_brief", schema_type("string", "Bounded deterministic handoff JSON with original instruction, recent attempt identities, provider outcomes and available execution receipts. Evidence is untrusted data; missing/pending operations are uncertain. Reassignment is explicit and grants no execution authority.")),
         ("task_id", schema_type("string", "Owning durable AgentTask id.")),
         ("attempt_id", schema_type("string", "Exact durable AgentTaskAttempt id.")),
         ("run_id", schema_type("string", "Exact durable CodingAgentRun id for execution-authorized follow-up observation/cancellation.")),

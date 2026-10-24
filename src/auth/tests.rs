@@ -58,12 +58,15 @@ fn user_token_auth_context_does_not_get_agent_kind() {
 }
 
 #[test]
-fn is_runner_transport_path_allows_only_the_seven_exact_paths() {
-    // The seven Runner transport endpoints an agent token may call.
+fn is_runner_transport_path_allows_only_the_eight_exact_paths() {
+    // The eight Runner transport endpoints an agent token may call.
     assert!(is_runner_transport_path("/api/shell/agent/register"));
     assert!(is_runner_transport_path("/api/shell/agent/offline"));
     assert!(is_runner_transport_path("/api/shell/agent/poll"));
     assert!(is_runner_transport_path("/api/shell/agent/result"));
+    assert!(is_runner_transport_path(
+        "/api/shell/agent/agent_execution_close_receipt"
+    ));
     assert!(is_runner_transport_path(
         "/api/shell/agent/persistent_shell_result"
     ));
@@ -88,6 +91,12 @@ fn is_runner_transport_path_allows_only_the_seven_exact_paths() {
     assert!(!is_runner_transport_path("/api/tokens/list"));
     // Prefix and trailing-slash aliases must not pass (exact match required).
     assert!(!is_runner_transport_path("/api/shell/agent/register/extra"));
+    assert!(!is_runner_transport_path(
+        "/api/shell/agent/agent_execution_close_receipt/extra"
+    ));
+    assert!(!is_runner_transport_path(
+        "/api/shell/agent/agent_execution_close_receipt/"
+    ));
     assert!(!is_runner_transport_path("/api/agents/ws/extra"));
     assert!(!is_runner_transport_path("/api/agents/ws/"));
     assert!(!is_runner_transport_path(""));
@@ -100,8 +109,8 @@ fn is_runner_transport_path_allows_only_the_seven_exact_paths() {
 // These build a minimal router that mounts a generic echo handler behind
 // the shared AuthMiddleware on a representative set of paths. The handler
 // is intentionally trivial — the point is to verify the Phase 3 central
-// gate in AuthMiddleware rejects agent tokens before any handler runs, and
-// that bootstrap/user tokens still reach the handler.
+// gate separates issued model runs from account/control and Runner credentials
+// before any handler runs.
 
 use crate::test_support::{
     seed_oauth_client_named as gate_seed_oauth_client, seed_user as gate_seed_user,
@@ -173,6 +182,13 @@ fn gate_mint_user_token_with_scopes(
 
 fn gate_mint_user_token(db: &crate::Database, user: &crate::models::UserRecord) -> String {
     gate_mint_user_token_with_scopes(db, user, "runtime:read project:read project:write job:run")
+}
+
+fn gate_mint_model_token(db: &crate::Database, owner_user: &str) -> String {
+    db.init_agent_isolation_tables().unwrap();
+    db.create_isolated_agent(owner_user, "auth-fixture-project", None)
+        .unwrap()
+        .token
 }
 
 fn gate_mint_account_credential(db: &crate::Database, user: &crate::models::UserRecord) -> String {
@@ -352,6 +368,7 @@ async fn gate_token_class_route_matrix_preserves_authority_boundaries() {
     let user = gate_seed_user(&db, "alice");
     let agent_token = gate_mint_agent_token(&db, &user, "alice-laptop");
     let user_token = gate_mint_user_token(&db, &user);
+    let model_token = gate_mint_model_token(&db, &user.id);
     let service = Service::new(gate_router(config, db));
 
     for path in ["/api/shell/agent/register", "/api/agents/ws"] {
@@ -360,50 +377,57 @@ async fn gate_token_class_route_matrix_preserves_authority_boundaries() {
         assert_eq!(body["ok"], true);
     }
 
-    for path in [
-        "/api/runtime/status",
-        "/api/tools/list",
-        "/api/projects/list",
-        "/mcp",
-        "/api/agent-tokens/list",
-        "/api/tokens/list",
-    ] {
+    for path in ["/api/agent-tokens/list", "/api/tokens/list"] {
         let (status, body) = gate_send(&service, path, Some(&agent_token)).await;
         assert_eq!(
             status,
             salvo::http::StatusCode::FORBIDDEN,
             "agent token should be forbidden on {path}: {body:?}"
         );
-        if path == "/api/runtime/status" {
-            assert!(body["error"]
-                .as_str()
-                .unwrap_or("")
-                .contains("agent tokens are only allowed"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("agent tokens are only allowed"));
+    }
+
+    for path in ["/api/tools/list", "/api/tools/call", "/mcp"] {
+        for token in [agent_token.as_str(), user_token.as_str(), "secret"] {
+            let (status, body) = gate_send(&service, path, Some(token)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {body:?}");
+            assert_eq!(body["error"], "agent_identity_required");
         }
     }
 
-    for path in [
-        "/api/runtime/status",
-        "/api/tools/list",
-        "/api/projects/list",
-    ] {
-        let (status, body) = gate_send(&service, path, Some(&user_token)).await;
-        assert_eq!(status, salvo::http::StatusCode::OK, "{path}: {body:?}");
-    }
-
-    for path in [
-        "/api/runtime/status",
-        "/api/tools/list",
-        "/api/projects/list",
-        "/api/shell/agent/register",
-        "/api/agent-tokens/list",
-    ] {
+    for path in ["/api/shell/agent/register", "/api/agent-tokens/list"] {
         let (status, body) = gate_send(&service, path, Some("secret")).await;
         assert_eq!(
             status,
             salvo::http::StatusCode::OK,
             "bootstrap should reach {path}: {body:?}"
         );
+    }
+    for path in ["/api/tools/list", "/api/tools/call", "/mcp"] {
+        let (status, body) = gate_send(&service, path, Some(&model_token)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "issued model run on {path}: {body:?}"
+        );
+        assert_eq!(body["ok"], true);
+    }
+    for path in [
+        "/api/runtime/status",
+        "/api/projects/list",
+        "/api/users/me",
+        "/api/shell/agent/register",
+    ] {
+        let (status, body) = gate_send(&service, path, Some(&model_token)).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "issued model run on {path}: {body:?}"
+        );
+        assert_eq!(body["error"], "agent_credential_audience_denied");
     }
 }
 
@@ -473,11 +497,19 @@ async fn gate_account_credential_cannot_call_runtime_project_tool_or_mcp_paths()
         "/mcp",
     ] {
         let (status, body) = gate_send(&service, path, Some(&credential)).await;
-        assert_eq!(status, salvo::http::StatusCode::FORBIDDEN, "{}", path);
-        assert_eq!(
-            body["error"],
-            "account credentials may only access account control endpoints"
-        );
+        if path == "/api/shell/agent/register" {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(
+                body["error"],
+                "account credentials may only access account control endpoints"
+            );
+        } else if matches!(path, "/api/runtime/status" | "/api/projects/list") {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(body["error"], "human_operator_pat_required");
+        } else {
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+            assert_eq!(body["error"], "agent_identity_required");
+        }
     }
 }
 
@@ -503,7 +535,7 @@ async fn gate_websocket_query_token_is_rejected_and_bearer_remains_authoritative
     let service = Service::new(gate_router(config, db));
 
     for path in [
-        "/api/runtime/status?token=secret",
+        "/api/tools/list?token=secret",
         "/api/agents/ws?token=secret",
     ] {
         let (status, body) = gate_send(&service, path, None).await;
@@ -512,7 +544,14 @@ async fn gate_websocket_query_token_is_rejected_and_bearer_remains_authoritative
             salvo::http::StatusCode::UNAUTHORIZED,
             "{path}: {body:?}"
         );
-        assert_eq!(body["error"], "Unauthorized");
+        assert_eq!(
+            body["error"],
+            if path.starts_with("/api/tools/") {
+                "agent_identity_required"
+            } else {
+                "Unauthorized"
+            }
+        );
     }
 
     // Query text is inert when a valid Bearer credential is present.
@@ -542,9 +581,9 @@ async fn gate_websocket_query_token_is_rejected_and_bearer_remains_authoritative
     let body = resp.take_json::<serde_json::Value>().await.unwrap();
     assert_eq!(body["error"], "Unauthorized");
 
-    let (status, body) = gate_send(&service, "/api/runtime/status", Some("secret")).await;
-    assert_eq!(status, salvo::http::StatusCode::OK, "body: {body:?}");
-    assert_eq!(body["ok"], true);
+    let (status, body) = gate_send(&service, "/api/tools/list", Some("secret")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body:?}");
+    assert_eq!(body["error"], "agent_identity_required");
 }
 
 #[tokio::test]
@@ -554,7 +593,7 @@ async fn gate_forbidden_response_is_json_not_html() {
     let user = gate_seed_user(&db, "alice");
     let agent_token = gate_mint_agent_token(&db, &user, "alice-laptop");
     let service = Service::new(gate_router(config, db));
-    let resp = TestClient::post("http://localhost/api/runtime/status")
+    let resp = TestClient::post("http://localhost/api/users/list")
         .bearer_auth(&agent_token)
         .send(&service)
         .await;
@@ -590,7 +629,7 @@ async fn gate_unauthorized_response_is_json_not_html() {
 // -----------------------------------------------------------------------
 
 #[tokio::test]
-async fn pat_verifier_bootstrap_when_auth_disabled() {
+async fn pat_verifier_does_not_invent_bootstrap_when_auth_disabled() {
     let config = crate::Config {
         addr: "127.0.0.1:0".to_string(),
         data_dir: PathBuf::from("./data"),
@@ -601,9 +640,10 @@ async fn pat_verifier_bootstrap_when_auth_disabled() {
     };
     let verifier = PatVerifier;
     let result = verifier.verify(&config, None, "anything").await.unwrap();
-    let ctx = result.expect("should return bootstrap context");
-    assert!(ctx.is_bootstrap);
-    assert_eq!(ctx.kind, AuthKind::Bootstrap);
+    assert!(
+        result.is_none(),
+        "auth-disabled does not establish a trusted identity"
+    );
 }
 
 #[tokio::test]
@@ -1199,20 +1239,32 @@ fn enforce_token_surface_matrix() {
     account.kind = AuthKind::AccountCredential;
     let mut oauth2 = user_ctx("alice");
     oauth2.kind = AuthKind::OAuth2Token;
+    let (_tmp, db) = gate_test_db();
+    let token = gate_mint_model_token(&db, "surface-fixture-owner");
+    let mut model = AuthContext::new(AuthKind::ModelAgent);
+    model.agent_run = Some(db.authenticate_agent_run(&token).unwrap());
     let runner_transport = [
         "/api/shell/agent/register",
         "/api/shell/agent/offline",
         "/api/shell/agent/poll",
         "/api/shell/agent/result",
+        "/api/shell/agent/agent_execution_close_receipt",
         "/api/shell/agent/persistent_shell_result",
         "/api/shell/agent/job_update",
         "/api/agents/ws",
     ];
     let runtime_paths = [
-        "/api/runtime/status",
         "/api/tools/list",
-        "/api/projects/list",
+        "/api/tools/call",
+        "/api/jobs/list",
         "/mcp",
+    ];
+    let human_operator_paths = [
+        "/api/projects/list",
+        "/api/projects/resolve-or-register",
+        "/api/runners/config/check",
+        "/api/runners/config/reload",
+        "/api/runtime/status",
     ];
     let lightweight_account_rejected: Vec<&str> = crate::route_metadata::iter_routes()
         .filter(|spec| spec.surface == crate::route_metadata::RouteSurface::AccountControl)
@@ -1224,31 +1276,29 @@ fn enforce_token_surface_matrix() {
             .filter(|spec| spec.surface == crate::route_metadata::RouteSurface::RunnerTransport)
             .map(|spec| spec.path),
     );
+    open_rejected.extend(runtime_paths);
 
     // Rows: (label, ctx, allowed paths, rejected paths, rejection message
     // substring; "" skips the message check). Every rejection must be
-    // FORBIDDEN — the surface gate never masquerades as unauthenticated.
+    // FORBIDDEN at this pure context surface gate. The HTTP middleware has an
+    // earlier 401 agent_identity_required check for model routes, tested above.
     let cases: Vec<(&str, AuthContext, Vec<&str>, Vec<&str>, &str)> = vec![
         (
             "bootstrap",
             bootstrap_ctx(),
-            vec![
-                "/api/runtime/status",
-                "/api/shell/agent/register",
-                "/api/users/me",
-            ],
-            vec![],
+            vec!["/api/shell/agent/register", "/api/users/me"],
+            runtime_paths.to_vec(),
             "",
         ),
         (
             "user pat",
             user_ctx("alice"),
-            vec![
-                "/api/runtime/status",
-                "/api/tools/list",
-                "/api/projects/list",
-            ],
-            runner_transport.to_vec(),
+            vec!["/api/users/me"],
+            runner_transport
+                .iter()
+                .chain(runtime_paths.iter())
+                .copied()
+                .collect(),
             "",
         ),
         (
@@ -1267,18 +1317,18 @@ fn enforce_token_surface_matrix() {
         (
             "shared key",
             shared_key_context("k"),
-            runtime_paths
+            runner_transport.to_vec(),
+            lightweight_account_rejected
                 .iter()
-                .chain(runner_transport.iter())
+                .chain(runtime_paths.iter())
                 .copied()
                 .collect(),
-            lightweight_account_rejected,
             "",
         ),
         (
             "open anonymous",
             open_anonymous_context(),
-            runtime_paths.to_vec(),
+            vec![],
             open_rejected,
             "",
         ),
@@ -1304,18 +1354,39 @@ fn enforce_token_surface_matrix() {
         (
             "oauth2 token",
             oauth2,
-            vec![
-                "/api/runtime/status",
-                "/api/projects/list",
-                "/api/tools/list",
-                "/api/jobs/list",
-                "/mcp",
-            ],
-            runner_transport.to_vec(),
+            vec!["/api/users/me"],
+            runner_transport
+                .iter()
+                .chain(runtime_paths.iter())
+                .copied()
+                .collect(),
             "",
+        ),
+        (
+            "issued model run",
+            model,
+            vec!["/mcp", "/api/tools/list", "/api/tools/call"],
+            runner_transport
+                .iter()
+                .copied()
+                .chain([
+                    "/api/runtime/status",
+                    "/api/projects/list",
+                    "/api/jobs/list",
+                    "/api/users/me",
+                ])
+                .collect(),
+            "agent_credential_audience_denied",
         ),
     ];
     for (label, ctx, allowed, rejected, expected_msg) in &cases {
+        for path in human_operator_paths {
+            assert_eq!(
+                enforce_token_surface(ctx, path).is_ok(),
+                *label == "user pat",
+                "{label} on {path}"
+            );
+        }
         for path in allowed {
             assert!(
                 enforce_token_surface(ctx, path).is_ok(),
@@ -1327,6 +1398,13 @@ fn enforce_token_surface_matrix() {
             assert!(result.is_err(), "{label} should be rejected on {path}");
             let (status, msg) = result.unwrap_err();
             assert_eq!(status, StatusCode::FORBIDDEN, "{label} on {path}");
+            let expected_msg = if ctx.agent_run.is_none() && runtime_paths.contains(path) {
+                "agent_identity_required"
+            } else if ctx.agent_run.is_none() && human_operator_paths.contains(path) {
+                "human_operator_pat_required"
+            } else {
+                expected_msg
+            };
             assert!(
                 msg.contains(expected_msg),
                 "{label} rejection on {path} should mention '{expected_msg}', got: {msg}"
@@ -1658,7 +1736,7 @@ async fn authenticate_oauth2_stub_does_not_break_pat_fallback() {
 #[tokio::test]
 async fn authenticate_bearer_bootstrap_and_no_token() {
     let _env = AuthEnvGuard::auth_required();
-    // Auth disabled → bootstrap.
+    // Auth-disabled configuration does not establish a Runner identity.
     let config = crate::Config {
         addr: "127.0.0.1:0".to_string(),
         data_dir: PathBuf::from("./data"),
@@ -1667,10 +1745,10 @@ async fn authenticate_bearer_bootstrap_and_no_token() {
         trusted_mcp_file_api_token_ids: Vec::new(),
         oauth2: crate::OAuth2Config::default(),
     };
-    let ctx = authenticate_bearer(&config, None, Some("anything"))
+    assert!(authenticate_bearer(&config, None, Some("anything"))
         .await
-        .expect("auth disabled should return bootstrap");
-    assert!(ctx.is_bootstrap);
+        .is_none());
+    assert!(authenticate_bearer(&config, None, None).await.is_none());
 
     // Valid bootstrap token → bootstrap.
     let config = crate::Config {
@@ -1842,18 +1920,18 @@ async fn auth_middleware_accepts_valid_oauth2_access_token() {
     let (_tmp, db) = gate_test_db();
     let user = gate_seed_user(&db, "alice");
     let (client, _secret) = gate_seed_oauth_client(&db, &user, "Test App");
-    let (at, plaintext) = gate_seed_oauth_access_token(&db, &client, &user, "runtime:read");
+    let (at, plaintext) = gate_seed_oauth_access_token(&db, &client, &user, "account:manage");
     assert!(at.last_used_at.is_none(), "precondition");
 
     let service = salvo::Service::new(gate_router(config, db.clone()));
-    let resp = salvo::test::TestClient::post("http://localhost/api/runtime/status")
+    let resp = salvo::test::TestClient::post("http://localhost/api/users/me")
         .add_header("authorization", format!("Bearer {}", plaintext), true)
         .send(&service)
         .await;
     assert_eq!(
         resp.status_code,
         Some(StatusCode::OK),
-        "valid OAuth2 access token should be accepted by AuthMiddleware"
+        "valid account-scoped OAuth2 access token should reach its management surface"
     );
     // last_used_at MUST be updated on successful verification.
     let conn = db.conn_for_tests();
@@ -1976,25 +2054,25 @@ fn assert_insufficient_scope(status: StatusCode, body: &serde_json::Value, expec
 
 #[tokio::test]
 async fn oauth2_scope_gate_matrix() {
-    // A granted scope opens exactly its own surface…
+    // Matching legacy scopes do not substitute for an issued model identity.
     for (scopes, path) in [
-        ("runtime:read", "/api/runtime/status"),
+        ("runtime:read", "/api/tools/list"),
         ("project:read", "/api/projects/read_file"),
         ("job:run", "/api/projects/run_job"),
     ] {
         let (_tmp, service, token) = gate_oauth2_token_with_scopes(scopes).await;
         let (status, body) = gate_send(&service, path, Some(&token)).await;
-        assert_eq!(status, StatusCode::OK, "{scopes} on {path}: {body:?}");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{scopes} on {path}: {body:?}"
+        );
+        assert_eq!(body["error"], "agent_identity_required");
     }
-    // …every other surface stays closed with insufficient_scope, including
-    // the OAuth authorize page, the Runner transport, and unknown routes
-    // (fail closed).
+    // Model identity is checked before legacy scopes. Nonmodel routes retain
+    // their OAuth scope errors, including authorize, Runner and unknown routes.
     let insufficient: [(&str, &str, Option<&str>); 6] = [
-        (
-            "project:read",
-            "/api/runtime/status",
-            Some(SCOPE_RUNTIME_READ),
-        ),
+        ("project:read", "/api/tools/list", Some(SCOPE_RUNTIME_READ)),
         (
             "runtime:read",
             "/api/projects/read_file",
@@ -2012,7 +2090,19 @@ async fn oauth2_scope_gate_matrix() {
     for (scopes, path, expected_scope) in insufficient {
         let (_tmp, service, token) = gate_oauth2_token_with_scopes(scopes).await;
         let (status, body) = gate_send(&service, path, Some(&token)).await;
-        assert_insufficient_scope(status, &body, expected_scope);
+        if matches!(
+            path,
+            "/api/tools/list" | "/api/projects/read_file" | "/api/projects/run_job"
+        ) {
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{scopes} on {path}: {body:?}"
+            );
+            assert_eq!(body["error"], "agent_identity_required");
+        } else {
+            assert_insufficient_scope(status, &body, expected_scope);
+        }
     }
     // Shared-key-minted OAuth2 tokens can never reach account control,
     // with or without account:manage.
@@ -2054,12 +2144,13 @@ async fn api_token_obeys_declared_scope_and_unknown_route_policy() {
     let service = Service::new(gate_router(config, db));
 
     for path in [
-        "/api/runtime/status",
+        "/api/tools/list",
         "/api/projects/read_file",
         "/api/projects/run_job",
     ] {
         let (status, body) = gate_send(&service, path, Some(&user_token)).await;
-        assert_eq!(status, StatusCode::OK, "{} body: {:?}", path, body);
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {body:?}");
+        assert_eq!(body["error"], "agent_identity_required");
     }
 
     let (status, body) = gate_send(
@@ -2068,12 +2159,8 @@ async fn api_token_obeys_declared_scope_and_unknown_route_policy() {
         Some(&runtime_only_token),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body:?}");
-    assert_ne!(body["error"], "insufficient_scope");
-    assert!(body["error"]
-        .as_str()
-        .unwrap_or("")
-        .contains(SCOPE_PROJECT_READ));
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body:?}");
+    assert_eq!(body["error"], "agent_identity_required");
 
     let (status, body) = gate_send(&service, "/api/users/me", Some(&runtime_only_token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "body: {body:?}");
@@ -2253,8 +2340,9 @@ async fn auth_middleware_lightweight_empty_and_open_paths() {
     env.enable_direct_shared_key();
     env.disable_open_anonymous();
 
-    let (status, body) = gate_send(&service, "/api/runtime/status", Some("my-key")).await;
-    assert_eq!(status, StatusCode::OK, "body: {:?}", body);
+    let (status, body) = gate_send(&service, "/api/tools/list", Some("my-key")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body:?}");
+    assert_eq!(body["error"], "agent_identity_required");
     for path in crate::route_metadata::iter_routes()
         .filter(|spec| spec.surface == crate::route_metadata::RouteSurface::RunnerTransport)
         .map(|spec| spec.path)
@@ -2267,13 +2355,13 @@ async fn auth_middleware_lightweight_empty_and_open_paths() {
         );
     }
 
-    let resp = salvo::test::TestClient::post("http://localhost/api/runtime/status")
+    let resp = salvo::test::TestClient::post("http://localhost/api/tools/list")
         .add_header("authorization", "Bearer ", true)
         .send(&service)
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
 
-    let (status, body) = gate_send(&service, "/api/runtime/status", Some("wc_pat_invalid")).await;
+    let (status, body) = gate_send(&service, "/api/tools/list", Some("wc_pat_invalid")).await;
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
@@ -2281,30 +2369,38 @@ async fn auth_middleware_lightweight_empty_and_open_paths() {
         body
     );
 
-    let resp = salvo::test::TestClient::post("http://localhost/api/runtime/status")
+    let resp = salvo::test::TestClient::post("http://localhost/api/tools/list")
         .add_header("authorization", "Bearer    ", true)
         .send(&service)
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
 
-    let resp = salvo::test::TestClient::post("http://localhost/api/runtime/status")
+    let resp = salvo::test::TestClient::post("http://localhost/api/tools/list")
         .send(&service)
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
 
     env.enable_open_anonymous();
-    let resp = salvo::test::TestClient::post("http://localhost/api/runtime/status")
-        .send(&service)
-        .await;
-    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let (status, body) = gate_send(&service, "/api/tools/list", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "agent_identity_required");
     let resp = salvo::test::TestClient::post("http://localhost/api/shell/agent/register")
         .send(&service)
         .await;
     assert_eq!(
         resp.status_code,
-        Some(StatusCode::FORBIDDEN),
-        "open-anonymous must not register a Runner"
+        Some(StatusCode::UNAUTHORIZED),
+        "--open does not establish a Runner identity"
     );
+    let (status, body) = gate_send(&service, "/api/users/me", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "Unauthorized");
+    let unconfigured = Service::new(gate_router(gate_test_config(None), db));
+    for path in ["/api/users/me", "/api/shell/agent/register"] {
+        let (status, body) = gate_send(&unconfigured, path, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "auth-disabled on {path}");
+        assert_eq!(body["error"], "explicit_control_authentication_required");
+    }
 }
 
 #[tokio::test]
@@ -2316,7 +2412,7 @@ async fn auth_middleware_direct_shared_key_and_oauth_bridge_flags_are_independen
 
     env.enable_oauth2_shared_key_bridge();
     assert!(crate::OAuth2Config::from_env().shared_key_bridge_enabled);
-    let (status, body) = gate_send(&service, "/api/runtime/status", Some("my-key")).await;
+    let (status, body) = gate_send(&service, "/api/shell/agent/register", Some("my-key")).await;
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
@@ -2327,7 +2423,7 @@ async fn auth_middleware_direct_shared_key_and_oauth_bridge_flags_are_independen
     env.disable_oauth2_shared_key_bridge();
     env.enable_direct_shared_key();
     assert!(!crate::OAuth2Config::from_env().shared_key_bridge_enabled);
-    let (status, body) = gate_send(&service, "/api/runtime/status", Some("my-key")).await;
+    let (status, body) = gate_send(&service, "/api/shell/agent/register", Some("my-key")).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -2389,13 +2485,25 @@ async fn auth_middleware_no_challenge_when_oauth2_disabled() {
     let config = gate_test_config(Some("test-token"));
     let (_tmp, db) = gate_test_db();
     let service = salvo::Service::new(gate_router(config, db));
-    let resp = salvo::test::TestClient::post("http://localhost/api/runtime/status")
+    let resp = salvo::test::TestClient::post("http://localhost/api/users/me")
         .send(&service)
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
-    // When OAuth2 is disabled, no WWW-Authenticate challenge
+    // Control routes retain their no-OAuth-challenge behavior when disabled.
     assert!(
         !resp.headers.contains_key("www-authenticate"),
         "should not include WWW-Authenticate when OAuth2 is disabled"
+    );
+    let mut response = TestClient::post("http://localhost/api/tools/list")
+        .send(&service)
+        .await;
+    assert_eq!(gate_status(&response), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers().get("www-authenticate").unwrap(),
+        "Bearer"
+    );
+    assert_eq!(
+        response.take_json::<serde_json::Value>().await.unwrap()["error"],
+        "agent_identity_required"
     );
 }

@@ -7,6 +7,9 @@ use super::connect::profile::{atomic_write, render_project_file, resolve_project
 use super::{http_post_json_status, read_optional_token, shell_command, validate_user_api_token};
 
 #[cfg(test)]
+#[path = "tests/project_activation_authority.rs"]
+mod activation_authority_tests;
+#[cfg(test)]
 #[path = "tests/project_activation_identity.rs"]
 mod activation_identity_tests;
 
@@ -14,6 +17,7 @@ mod activation_identity_tests;
 pub(crate) struct ProjectRegisterOptions {
     pub(crate) config: PathBuf,
     pub(crate) project: PathBuf,
+    pub(crate) expected_project_path: Option<PathBuf>,
     pub(crate) json: bool,
 }
 
@@ -22,6 +26,7 @@ pub(crate) struct ProjectActivateOptions {
     pub(crate) config: PathBuf,
     pub(crate) user_token_file: PathBuf,
     pub(crate) project: PathBuf,
+    pub(crate) expected_project_path: Option<PathBuf>,
     pub(crate) json: bool,
 }
 
@@ -82,6 +87,26 @@ fn canonical_existing_directory(path: &Path, label: &str) -> Result<PathBuf, Str
         ));
     }
     Ok(canonical)
+}
+
+fn validate_expected_project_path(
+    canonical_project: &Path,
+    expected_project: Option<&Path>,
+) -> Result<(), String> {
+    let Some(expected_project) = expected_project else {
+        return Ok(());
+    };
+    if !expected_project.is_absolute() {
+        return Err("expected_project_path_invalid: --expected-project-path must be an absolute canonical project path".to_string());
+    }
+    webcodex_runner_config::paths::validate_project_path_ingress(expected_project)
+        .map_err(|error| format!("expected_project_path_invalid: {error}"))?;
+    // The expectation is the identity already observed by the caller. Resolving
+    // it again could follow a replacement link and silently accept a new target.
+    if !webcodex_runner_config::paths::paths_equal(canonical_project, expected_project) {
+        return Err("project_path_changed: selected project path no longer matches the inspected project; inspect and select the project again".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -156,7 +181,7 @@ fn prepare_project_authority(
     })
 }
 
-fn prepare_exact_project_authority(
+fn prepare_activation_project_authority(
     project: &Path,
     configured_roots: &[PathBuf],
     allow_cwd_anywhere: bool,
@@ -171,11 +196,11 @@ fn prepare_exact_project_authority(
     let canonical_project = canonical_existing_directory(project, "project path")?;
     let canonical_roots =
         webcodex_runner_config::paths::canonicalize_usable_allowed_roots(configured_roots);
-    let exact_root_present = canonical_roots
+    let covered_by_root = canonical_roots
         .iter()
-        .any(|root| webcodex_runner_config::paths::paths_equal(root, &canonical_project));
+        .any(|root| webcodex_runner_config::paths::path_is_within(&canonical_project, root));
     let mut allowed_roots = configured_roots.to_vec();
-    if !exact_root_present {
+    if !covered_by_root {
         allowed_roots.push(canonical_project.clone());
     }
     let canonical_after =
@@ -185,7 +210,7 @@ fn prepare_exact_project_authority(
         &canonical_after,
         allow_cwd_anywhere,
     )?;
-    if !exact_root_present
+    if !covered_by_root
         && project
             .ancestors()
             .any(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()))
@@ -195,8 +220,24 @@ fn prepare_exact_project_authority(
     Ok(PreparedProjectAuthority {
         canonical_project,
         allowed_roots,
-        authority_changed: !exact_root_present,
+        authority_changed: !covered_by_root,
     })
+}
+
+fn recheck_activation_project_authority(
+    project: &Path,
+    expected_project: &Path,
+    configured_roots: &[PathBuf],
+    allow_cwd_anywhere: bool,
+) -> Result<PreparedProjectAuthority, String> {
+    // Keep the selected path for link-escape checks when policy changes, while
+    // refusing to retarget the project identity established by the first check.
+    let prepared =
+        prepare_activation_project_authority(project, configured_roots, allow_cwd_anywhere)?;
+    if !webcodex_runner_config::paths::paths_equal(&prepared.canonical_project, expected_project) {
+        return Err("project_activation_config_conflict: selected project path changed during activation; select the project again".to_string());
+    }
+    Ok(prepared)
 }
 
 fn register_canonical_project(
@@ -645,10 +686,14 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
     validate_user_api_token(&token)?;
 
     let (mut config, mut config_content) = read_activation_config(&opts.config)?;
-    let mut prepared = prepare_exact_project_authority(
+    let mut prepared = prepare_activation_project_authority(
         &opts.project,
         &config.policy.allowed_roots,
         config.policy.allow_cwd_anywhere,
+    )?;
+    validate_expected_project_path(
+        &prepared.canonical_project,
+        opts.expected_project_path.as_deref(),
     )?;
     let canonical_project = prepared.canonical_project.clone();
     let server_url = config.server_url.clone();
@@ -659,7 +704,7 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
     let mut generation_after = None;
     let mut reload_reconciled = false;
 
-    // Idempotence fast path: if the exact root is already persisted, let the
+    // Idempotence fast path: if a persisted root already covers this path, let the
     // current Runner prove active authority and canonical registration before
     // touching config generation.
     if !prepared.authority_changed {
@@ -797,7 +842,8 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
             let snapshot = reread_activation_config(&opts.config, &server_url, &client_id)?;
             config = snapshot.0;
             config_content = snapshot.1;
-            prepared = prepare_exact_project_authority(
+            prepared = recheck_activation_project_authority(
+                &opts.project,
                 &canonical_project,
                 &config.policy.allowed_roots,
                 config.policy.allow_cwd_anywhere,
@@ -836,7 +882,8 @@ pub(crate) async fn run_project_activate(opts: ProjectActivateOptions) -> Result
                 let snapshot = reread_activation_config(&opts.config, &server_url, &client_id)?;
                 config = snapshot.0;
                 config_content = snapshot.1;
-                prepared = prepare_exact_project_authority(
+                prepared = recheck_activation_project_authority(
+                    &opts.project,
                     &canonical_project,
                     &config.policy.allowed_roots,
                     config.policy.allow_cwd_anywhere,
@@ -967,6 +1014,10 @@ pub(crate) fn run_project_register(opts: ProjectRegisterOptions) -> Result<Strin
         &opts.project,
         &config.policy.allowed_roots,
         config.policy.allow_cwd_anywhere,
+    )?;
+    validate_expected_project_path(
+        &prepared.canonical_project,
+        opts.expected_project_path.as_deref(),
     )?;
     if prepared.authority_changed {
         // Persist the explicit user grant before publishing the project record so a
@@ -1170,27 +1221,38 @@ mod tests {
     }
 
     #[test]
-    fn activation_adds_exact_root_even_when_parent_or_cwd_anywhere_already_authorizes_path() {
+    fn activation_inherits_parent_root_without_adding_descendant_roots() {
         let tmp = canonical_test_tempdir();
-        let parent = tmp.path().join("parent");
-        let project = parent.join("demo");
+        let parent = tmp.path().join("Desktop");
+        let project = parent.join("801所PFA").join("nested");
         std::fs::create_dir_all(&project).unwrap();
         let parent = parent.canonicalize().unwrap();
         let project = project.canonicalize().unwrap();
 
-        let prepared = prepare_exact_project_authority(&project, &[parent.clone()], false).unwrap();
-        assert!(prepared.authority_changed);
-        assert_eq!(
-            prepared.allowed_roots,
-            vec![parent.clone(), project.clone()]
-        );
+        for path in [&parent, project.parent().unwrap(), &project] {
+            let prepared =
+                prepare_activation_project_authority(path, std::slice::from_ref(&parent), false)
+                    .unwrap();
+            assert!(!prepared.authority_changed, "{}", path.display());
+            assert_eq!(prepared.allowed_roots, vec![parent.clone()]);
+        }
 
-        let cwd_anywhere = prepare_exact_project_authority(&project, &[], true).unwrap();
+        let sibling = tmp.path().join("Desktop2");
+        std::fs::create_dir(&sibling).unwrap();
+        let sibling = sibling.canonicalize().unwrap();
+        let prepared =
+            prepare_activation_project_authority(&sibling, std::slice::from_ref(&parent), false)
+                .unwrap();
+        assert!(prepared.authority_changed);
+        assert_eq!(prepared.allowed_roots, vec![parent.clone(), sibling]);
+
+        let cwd_anywhere = prepare_activation_project_authority(&project, &[], true).unwrap();
         assert!(cwd_anywhere.authority_changed);
         assert_eq!(cwd_anywhere.allowed_roots, vec![project.clone()]);
 
         let repeated =
-            prepare_exact_project_authority(&project, &[parent, project.clone()], false).unwrap();
+            prepare_activation_project_authority(&project, &[parent, project.clone()], false)
+                .unwrap();
         assert!(!repeated.authority_changed);
         assert_eq!(
             repeated
@@ -1233,6 +1295,7 @@ mod tests {
         std::fs::write(&token_file, TEST_USER_TOKEN).unwrap();
         let before = std::fs::read(&config_path).unwrap();
         let output = run_project_activate(ProjectActivateOptions {
+            expected_project_path: None,
             config: config_path.clone(),
             user_token_file: token_file,
             project,
@@ -1336,6 +1399,7 @@ mod tests {
         std::fs::write(&token_file, TEST_USER_TOKEN).unwrap();
 
         let output = run_project_activate(ProjectActivateOptions {
+            expected_project_path: None,
             config: config_path.clone(),
             user_token_file: token_file,
             project,
@@ -1393,6 +1457,7 @@ mod tests {
         std::fs::write(&token_file, TEST_USER_TOKEN).unwrap();
 
         let output = run_project_activate(ProjectActivateOptions {
+            expected_project_path: None,
             config: config_path,
             user_token_file: token_file,
             project,
@@ -1446,6 +1511,7 @@ mod tests {
         std::fs::write(&token_file, TEST_USER_TOKEN).unwrap();
 
         let error = run_project_activate(ProjectActivateOptions {
+            expected_project_path: None,
             config: config_path,
             user_token_file: token_file,
             project,
@@ -1503,6 +1569,7 @@ mod tests {
         std::fs::write(&token_file, TEST_USER_TOKEN).unwrap();
 
         let output = run_project_activate(ProjectActivateOptions {
+            expected_project_path: None,
             config: config_path,
             user_token_file: token_file,
             project,
@@ -1536,6 +1603,7 @@ mod tests {
         config(&config_path, &registry, &root);
 
         let first = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path.clone(),
             project: project.clone(),
             json: true,
@@ -1559,6 +1627,7 @@ mod tests {
         assert!(!first.to_string().contains("secret-not-printed"));
 
         let second = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path,
             project,
             json: true,
@@ -1581,6 +1650,7 @@ mod tests {
         config(&config_path, &registry, &root);
 
         let first = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path.clone(),
             project: project.clone(),
             json: false,
@@ -1603,6 +1673,7 @@ mod tests {
         assert!(!first.contains("project record"), "{first}");
 
         let second = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path,
             project,
             json: false,
@@ -1664,6 +1735,7 @@ mod tests {
         let config_path = tmp.path().join("runner.toml");
         config(&config_path, &registry, &root);
         let opts = ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path.clone(),
             project: outside.clone(),
             json: true,
@@ -1691,6 +1763,7 @@ mod tests {
         config_with_policy(&config_path, &registry, &[stale, root.clone()], false);
 
         let output = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path,
             project,
             json: true,
@@ -1718,6 +1791,7 @@ mod tests {
         config_with_policy(&config_path, &registry, &[stale, allowed], false);
 
         let output = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path,
             project,
             json: false,
@@ -1745,6 +1819,7 @@ mod tests {
         );
 
         let output = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path,
             project,
             json: false,
@@ -1769,6 +1844,7 @@ mod tests {
         config(&config_path, &registry, &root);
 
         let error = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path,
             project: escape,
             json: false,
@@ -1935,6 +2011,7 @@ mod tests {
         config_with_policy(&config_path, &registry, &[], true);
 
         let output = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path.clone(),
             project: PathBuf::from("/etc").canonicalize().unwrap(),
             json: true,
@@ -1961,6 +2038,7 @@ mod tests {
         config_with_policy(&config_path, &registry, &[authority], true);
 
         let output = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path,
             project,
             json: true,
@@ -1980,6 +2058,7 @@ mod tests {
         config_with_policy(&config_path, &registry, &[PathBuf::from("/etc")], true);
 
         let output = run_project_register(ProjectRegisterOptions {
+            expected_project_path: None,
             config: config_path,
             project: PathBuf::from("/etc"),
             json: true,

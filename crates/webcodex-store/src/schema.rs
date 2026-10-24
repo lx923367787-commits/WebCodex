@@ -25,6 +25,19 @@ impl Database {
             window_projects: Mutex::new(std::collections::HashMap::new()),
         };
         db.init_tables()?;
+        db.init_agent_isolation_tables()?;
+        db.init_native_agent_host_tables()?;
+        {
+            let conn = db
+                .conn
+                .lock()
+                .map_err(|_| anyhow::anyhow!("agent state unavailable"))?;
+            crate::agent_meeting::init_agent_meeting_tables(&conn)?;
+            crate::team_task::init_team_task_tables(&conn)?;
+            crate::agent_cli_delivery::init_agent_cli_delivery_tables(&conn)?;
+            crate::team_agent::init_team_agent_tables(&conn)?;
+            crate::cli_fallback::init_cli_fallback_tables(&conn)?;
+        }
         // Personal-use instance: reclaim dead auth rows on every open rather
         // than running a background reaper.
         let now = chrono::Utc::now().timestamp();
@@ -641,6 +654,9 @@ impl Database {
         // domain. They reference durable Agents/Conversations for correlation only
         // and deliberately do not bind any execution backend in A3.
         Self::ensure_agent_task_schema(&mut conn)?;
+        Self::ensure_goal_schema(&mut conn)?;
+        Self::ensure_host_goal_schema(&mut conn)?;
+        Self::ensure_host_goal_context_schema(&conn)?;
 
         // Project Memory was introduced after v0.3.9. Only the current schema is
         // supported; development-only intermediate shapes are rejected.

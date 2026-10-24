@@ -37,6 +37,26 @@ fn required_runner_capability_matches_metadata_risk_table() {
             RunnerCapabilityRequirement::Shell,
         ),
         (
+            "present_document",
+            ToolRisk::RunControl,
+            RunnerCapabilityRequirement::Shell,
+        ),
+        (
+            "document_edit",
+            ToolRisk::RunControl,
+            RunnerCapabilityRequirement::Shell,
+        ),
+        (
+            "document_convert",
+            ToolRisk::RunControl,
+            RunnerCapabilityRequirement::Shell,
+        ),
+        (
+            "document_restore",
+            ToolRisk::RunControl,
+            RunnerCapabilityRequirement::Shell,
+        ),
+        (
             "open_session_shell",
             ToolRisk::JobRun,
             RunnerCapabilityRequirement::PersistentShell,

@@ -563,7 +563,7 @@ async fn delete_project_files_timeout_before_dispatch_reports_not_started() {
     )
     .await;
     let project = agent_test_project_id("cleanup-delete-timeout-early");
-    let proj = runtime.resolve_project(&project).await.unwrap();
+    let proj = runtime.execution().resolve_project(&project).await.unwrap();
     let client_id = proj.client_id.clone();
 
     // Short wait bound: the request is never polled, so the wait timeout fires
@@ -605,7 +605,7 @@ async fn delete_project_files_timeout_after_dispatch_reports_outcome_unknown() {
     )
     .await;
     let project = agent_test_project_id("cleanup-delete-timeout-late");
-    let proj = runtime.resolve_project(&project).await.unwrap();
+    let proj = runtime.execution().resolve_project(&project).await.unwrap();
     let client_id = proj.client_id.clone();
     let task = tokio::spawn({
         let runtime = runtime.clone();
@@ -661,7 +661,7 @@ async fn delete_project_files_waiter_dropped_without_undispatch_proof_reports_ou
     )
     .await;
     let project = agent_test_project_id("cleanup-delete-waiter");
-    let proj = runtime.resolve_project(&project).await.unwrap();
+    let proj = runtime.execution().resolve_project(&project).await.unwrap();
     let client_id = proj.client_id.clone();
     let task = tokio::spawn({
         let runtime = runtime.clone();
@@ -4315,6 +4315,17 @@ async fn office_artifact_mime_policy_accepts_matching_save_and_upload_paths() {
     let runtime = test_runtime();
     let missing_project = "agent:missing:missing".to_string();
     let cases = [
+        ("docs/report.doc", "application/msword", "docs/report.docx"),
+        (
+            "slides/deck.ppt",
+            "application/vnd.ms-powerpoint",
+            "slides/deck.pptx",
+        ),
+        (
+            "data/book.xls",
+            "application/vnd.ms-excel",
+            "data/book.xlsx",
+        ),
         (
             "docs/report.docx",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -4426,7 +4437,7 @@ async fn office_artifact_mime_policy_accepts_matching_save_and_upload_paths() {
         );
     }
 
-    let unsupported = runtime
+    let mismatched_legacy = runtime
         .save_project_artifact(
             missing_project,
             "docs/report.docx".to_string(),
@@ -4435,15 +4446,15 @@ async fn office_artifact_mime_policy_accepts_matching_save_and_upload_paths() {
             Some(false),
         )
         .await;
-    assert!(!unsupported.success);
+    assert!(!mismatched_legacy.success);
     assert!(
-        unsupported
+        mismatched_legacy
             .error
             .as_deref()
             .unwrap()
-            .contains("unsupported mime_type"),
+            .contains("requires a matching .doc artifact path"),
         "{:?}",
-        unsupported.error
+        mismatched_legacy.error
     );
 }
 

@@ -86,9 +86,10 @@ impl TrayProjection {
         } else {
             RuntimeStatus::NeedsAttention
         };
-        let tunnel_error = snapshot.regular_tunnel.as_ref().is_some_and(|tunnel| {
-            tunnel.status == crate::models::RegularTunnelStatus::Error
-        });
+        let tunnel_error = snapshot
+            .regular_tunnel
+            .as_ref()
+            .is_some_and(|tunnel| tunnel.status == crate::models::RegularTunnelStatus::Error);
         let observed_use = snapshot.readiness.runtime_ready
             && snapshot
                 .chatgpt_activity
@@ -514,6 +515,7 @@ mod tests {
         snapshot.readiness.runner = RunnerReadiness::Ready;
         snapshot.readiness.runtime_ready = true;
         snapshot.regular_tunnel = Some(RegularTunnelState {
+            host_id: None,
             provider: "openai".to_string(),
             status: RegularTunnelStatus::Ready,
             clipboard_state: "copied".to_string(),
@@ -526,7 +528,10 @@ mod tests {
         });
         let projection = TrayProjection::from_snapshot(&snapshot, Some(false));
         assert_eq!(projection.connection_status, ConnectionStatus::ObservedUse);
-        assert_eq!(projection.connection_action, Some(ConnectionAction::Disconnect));
+        assert_eq!(
+            projection.connection_action,
+            Some(ConnectionAction::Disconnect)
+        );
     }
 
     #[test]
@@ -554,6 +559,7 @@ mod tests {
     fn locally_ready_tunnel_waits_for_chatgpt_and_offers_stop_action() {
         let mut snapshot = local_snapshot();
         snapshot.regular_tunnel = Some(RegularTunnelState {
+            host_id: None,
             provider: "openai".into(),
             status: RegularTunnelStatus::Ready,
             clipboard_state: "copied".into(),

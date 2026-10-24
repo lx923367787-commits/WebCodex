@@ -1,5 +1,10 @@
 //! Bounded independent text searches built from the canonical single-search core.
 
+#[cfg(test)]
+use super::batch_output::serialized_batch_len;
+use super::batch_output::{
+    batch_output, mark_final_hard_cap_truncation, projected_batch_len, serialized_value_len,
+};
 use super::files::{SearchOptions, SearchRequest};
 use super::project_resolution::ResolvedProject;
 use super::{SearchProjectTextsQuery, ToolResult, ToolRuntime};
@@ -61,48 +66,6 @@ fn normalized_result_budget(max_result_bytes: Option<usize>) -> usize {
         )
 }
 
-fn batch_output(
-    project: &str,
-    requested_count: usize,
-    items: Vec<Value>,
-    output_truncated: bool,
-    next_index: Option<usize>,
-    truncation_reason: Option<&str>,
-) -> Value {
-    let succeeded_count = items
-        .iter()
-        .filter(|item| item["success"].as_bool() == Some(true))
-        .count();
-    let returned_count = items.len();
-    let mut output = json!({
-        "project": project,
-        "requested_count": requested_count,
-        "returned_count": returned_count,
-        "succeeded_count": succeeded_count,
-        "failed_count": returned_count - succeeded_count,
-        "items": items,
-        "output_truncated": output_truncated,
-        "next_index": next_index,
-    });
-    if let Some(reason) = truncation_reason {
-        output["truncation_reason"] = json!(reason);
-    }
-    output
-}
-
-#[cfg(test)]
-fn serialized_batch_len(output: &Value) -> usize {
-    serde_json::to_vec(&ToolResult::ok(output.clone()))
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
-}
-
-fn serialized_value_len(value: &Value) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
-}
-
 fn projected_batch_serialized_len(output: &Value, default_timeouts: &[bool]) -> usize {
     let mut projected = ToolResult::ok(output.clone());
     super::dispatch::sparsify_search_batch_success_for_model(default_timeouts, &mut projected);
@@ -119,12 +82,6 @@ fn projected_search_item_len(item: &Value, default_timeout: bool) -> usize {
         }
     }
     serialized_value_len(&projected)
-}
-
-fn projected_batch_len(base_len: usize, item_bytes: usize, item_count: usize) -> usize {
-    base_len
-        .saturating_add(item_bytes)
-        .saturating_add(item_count.saturating_sub(1))
 }
 
 fn retryable_runner_request_failure(result: &ToolResult) -> bool {
@@ -449,34 +406,6 @@ fn final_model_result_len(output: &Value, default_timeouts: &[bool]) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-fn mark_final_hard_cap_truncation(output: &mut Value, next_index: usize) {
-    let Some(root) = output.as_object_mut() else {
-        return;
-    };
-    let (returned_count, succeeded_count) = root
-        .get("items")
-        .and_then(Value::as_array)
-        .map(|items| {
-            (
-                items.len(),
-                items
-                    .iter()
-                    .filter(|item| item["success"].as_bool() == Some(true))
-                    .count(),
-            )
-        })
-        .unwrap_or_default();
-    root.insert("returned_count".to_string(), json!(returned_count));
-    root.insert("succeeded_count".to_string(), json!(succeeded_count));
-    root.insert(
-        "failed_count".to_string(),
-        json!(returned_count.saturating_sub(succeeded_count)),
-    );
-    root.insert("output_truncated".to_string(), json!(true));
-    root.insert("next_index".to_string(), json!(next_index));
-    root.insert("truncation_reason".to_string(), json!("hard_result_cap"));
-}
-
 /// Enforce the repository-wide 256 KiB ceiling against the actual final
 /// serialized ToolResult, including Session/continuity overlays. Search
 /// continuation remains query-granular: whole query items are removed from the
@@ -527,7 +456,7 @@ impl ToolRuntime {
         project: String,
         queries: Vec<SearchProjectTextsQuery>,
     ) -> ToolResult {
-        let resolved = match self.resolve_project_input(&project).await {
+        let resolved = match self.execution().resolve_project_input(&project).await {
             Ok(project) => project,
             Err(error) => return error.into_tool_result(),
         };
@@ -545,7 +474,7 @@ impl ToolRuntime {
 
         let runtime_project_id = resolved.resolved_id.clone();
         let requested_count = queries.len();
-        let deadline = Instant::now() + self.search_project_texts_deadline;
+        let deadline = Instant::now() + self.config.search_project_texts_deadline;
         // Validation, Runner enqueue, and response waiting all happen inside
         // the concurrency slot. A third query cannot enter the Runner queue
         // while two earlier queries still hold their slots.

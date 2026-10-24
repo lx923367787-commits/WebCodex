@@ -350,12 +350,16 @@ impl ToolRuntime {
             );
         };
 
-        let deadline = Instant::now() + self.semantic_navigation_probe_timeout;
+        let deadline = Instant::now() + self.config.semantic_navigation_probe_timeout;
         let payload = RunnerLspPayload {
             project_id: agent_project_id.to_string(),
             request: RunnerLspRequest::Status,
         };
-        let timeout_secs = self.semantic_navigation_probe_timeout.as_secs().max(1);
+        let timeout_secs = self
+            .config
+            .semantic_navigation_probe_timeout
+            .as_secs()
+            .max(1);
         let enqueued = tokio::time::timeout_at(
             deadline,
             self.runner_registry.enqueue_lsp(

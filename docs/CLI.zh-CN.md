@@ -59,6 +59,20 @@ structured unregister，再删除本地 registration；Runner 已停止时，只
 接入 MCP coding client 后，可阅读 [Coding 工作流](CODING_WORKFLOW.zh-CN.md)，了解 canonical
 `work_on_project` model bootstrap、behavioral guidance、validation 与 closeout evidence。
 
+### Desktop 项目列表与管理
+
+Desktop 的“项目”页显示当前 Runner 注册的文件夹、当前选择、启用状态、连接状态和活跃任务。
+“添加项目”只注册文件夹；“设为当前”才切换工作目录。需要重启内置工具 Runner 的切换会先检查所有项目的活跃任务。
+“停用”保留注册记录，不终止已有 Job；“移除”要求确认，仅取消注册，保留文件夹、源码与 Git 分支。
+停用或移除当前项目会清空并保存当前选择；重启保留同一连接，不重新注册该文件夹或创建替代项目。列表为空时仍可添加项目。
+完整管理操作适用于本机 Full Runtime；远端服务通过其授权管理入口操作。
+
+桌面适配器复用 `webcodex project list|enable|disable|unregister`。这些命令要求
+`--config`、`--server-url`、`--client-id`、`--token-file` 精确绑定同一连接；变更还需
+`--project`、`--expected-revision` 和 `--idempotency-key`，并由已有 admin API 执行权限、版本和任务校验。
+列表使用用户凭据；变更使用管理员凭据，凭据不进入网页界面。结果未知时先刷新核对，不自动重放。
+取消注册不修改 Runner 的 `allowed_roots`；后续显式注册仍受既有路径权限规则约束。
+
 ### 设备接入
 
 | 命令 | 用途 | 说明 |

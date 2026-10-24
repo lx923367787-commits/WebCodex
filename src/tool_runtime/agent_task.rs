@@ -43,6 +43,7 @@ fn agent_task_recovery_kind(
 ) -> RecoveryKind {
     match error_kind {
         "communication_store_unavailable" => store_failure_recovery,
+        "agent_task_run_budget_exhausted" => RecoveryKind::UserAction,
         "agent_task_attempt_stale"
         | "agent_task_execution_active"
         | "agent_task_execution_outcome_unknown"
@@ -156,6 +157,63 @@ fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     value[..end].to_string()
+}
+
+fn bounded_handoff_evidence(output: &Value) -> Value {
+    let mut events = output["events"].as_array().cloned().unwrap_or_default();
+    events.retain(|event| event["kind"] != "reasoning");
+    for event in &mut events {
+        for (field, bound) in [("text", 2048), ("label", 256), ("status", 256)] {
+            if let Some(value) = event[field].as_str() {
+                event[field] = json!(truncate_utf8_bytes(value, bound));
+            }
+        }
+    }
+    let mut evidence = json!({
+        "source": "coding_agent_observe", "run_id": output["run_id"],
+        "events": events, "history_lost": output["history_lost"],
+        "has_more": output["has_more"], "truncated": false,
+        "interpretation": "Provider-reported receipts. Completed tool status is a successful receipt, not independent task acceptance. Pending or missing tool results remain uncertain; inspect existing artifacts before any retry."
+    });
+    loop {
+        let mut operations = BTreeMap::new();
+        for receipt in evidence["events"].as_array().unwrap() {
+            if matches!(
+                receipt["kind"].as_str(),
+                Some("tool_activity" | "file_change" | "terminal_activity")
+            ) {
+                if let Some(id) = receipt["label"].as_str() {
+                    let status = match receipt["status"].as_str() {
+                        Some("completed") => "completed",
+                        Some("failed") => "failed",
+                        _ => "uncertain",
+                    };
+                    operations.insert(
+                        id.to_string(),
+                        json!({"operation_id": id, "status": status,
+                        "receipt_sequence": receipt["sequence"]}),
+                    );
+                }
+            }
+        }
+        evidence["last_successful_receipt_sequence"] = operations
+            .values()
+            .filter(|operation| operation["status"] == "completed")
+            .filter_map(|operation| operation["receipt_sequence"].as_u64())
+            .max()
+            .map_or(Value::Null, |n| json!(n));
+        evidence["operations"] = json!(operations.into_values().collect::<Vec<_>>());
+        if evidence.to_string().len() <= 16 * 1024 {
+            break;
+        }
+        let events = evidence["events"].as_array_mut().unwrap();
+        if events.is_empty() {
+            break;
+        }
+        events.remove(0);
+        evidence["truncated"] = json!(true);
+    }
+    evidence
 }
 
 fn bounded_optional_terminal(value: Option<&str>) -> Option<String> {
@@ -345,7 +403,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.create_agent_task(
@@ -376,7 +434,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         let offset = offset.unwrap_or(0);
@@ -406,7 +464,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.read_agent_task(&principal, &task_id) {
@@ -425,7 +483,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.assign_agent_task(&principal, &task_id, &assignee_agent_id) {
@@ -445,7 +503,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.start_agent_task_attempt(
@@ -477,7 +535,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         let context = match db.agent_task_coding_run_start_context(
@@ -498,9 +556,9 @@ impl ToolRuntime {
                 project.clone(),
                 provider_id,
                 replay_key,
-                context.task.instruction.clone(),
+                context.instruction.clone(),
                 config,
-                timeout_secs,
+                Some(timeout_secs.unwrap_or(webcodex_core::coding_agent::CODING_AGENT_LONG_RESPONSE_TIMEOUT_SECS)),
                 auth,
             )
             .await
@@ -611,7 +669,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         let binding = match db.read_agent_task_coding_run_binding(&principal, &task_id, &attempt_id)
@@ -619,6 +677,16 @@ impl ToolRuntime {
             Ok(binding) => binding,
             Err(error) => return agent_task_error(error, RecoveryKind::Reconcile),
         };
+        if !super::coding_agent::coding_agent_authority_matches(
+            auth,
+            &binding.authority_fingerprint,
+        ) {
+            return ToolResult::err_with_output(
+                "Execution binding is not visible to this caller",
+                json!({"error_kind":"agent_task_coding_run_not_found","state_changed":false}),
+            )
+            .with_recovery(RecoveryKind::Reobserve, None);
+        }
         let snapshot = match self
             .reconcile_coding_agent_run_snapshot(&binding.run_id, auth)
             .await
@@ -643,7 +711,12 @@ impl ToolRuntime {
             } else {
                 binding
             };
-            return ToolResult::ok(coding_run_binding_projection(&binding, false, false));
+            let mut output = coding_run_binding_projection(&binding, false, false);
+            match db.agent_task_handoff_brief(&principal, &task_id) {
+                Ok(brief) => output["handoff_brief"] = json!(brief),
+                Err(error) => return agent_task_error(error, RecoveryKind::Reconcile),
+            }
+            return ToolResult::ok(output);
         };
 
         let observation = match coding_run_observation(&run) {
@@ -659,6 +732,55 @@ impl ToolRuntime {
             Ok(binding) => binding,
             Err(error) => return agent_task_error(error, RecoveryKind::Reconcile),
         };
+        let mut evidence = self
+            .coding_agent_observe(binding.run_id.clone(), None, Some(0), auth)
+            .await;
+        if evidence.success {
+            // Drain at most the bounded Runner event ring; never poll an
+            // unbounded conversation or spend new model calls for a summary.
+            for _ in 0..3 {
+                if evidence.output["has_more"] != true {
+                    break;
+                }
+                let token = evidence.output["observation_token"]
+                    .as_str()
+                    .map(str::to_owned);
+                let page = self
+                    .coding_agent_observe(binding.run_id.clone(), token, Some(0), auth)
+                    .await;
+                if !page.success {
+                    break;
+                }
+                let events = page.output["events"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(all) = evidence.output["events"].as_array_mut() {
+                    all.extend(events);
+                }
+                evidence.output["has_more"] = page.output["has_more"].clone();
+                evidence.output["observation_token"] = page.output["observation_token"].clone();
+                evidence.output["history_lost"] = json!(
+                    evidence.output["history_lost"] == true || page.output["history_lost"] == true
+                );
+            }
+            let evidence = bounded_handoff_evidence(&evidence.output);
+            if evidence["events"]
+                .as_array()
+                .is_some_and(|events| !events.is_empty())
+            {
+                if let Err(error) = db.record_agent_task_evidence(
+                    &principal,
+                    &task_id,
+                    &attempt_id,
+                    &binding.run_id,
+                    observation.observation_revision,
+                    &evidence.to_string(),
+                ) {
+                    return agent_task_error(error, RecoveryKind::Reconcile);
+                }
+            }
+        }
         if observed_binding.last_observation_revision != Some(observation.observation_revision)
             || !matches!(
                 observed_binding.last_observed_run_state.as_ref(),
@@ -669,11 +791,12 @@ impl ToolRuntime {
                 )
             )
         {
-            return ToolResult::ok(coding_run_binding_projection(
-                &observed_binding,
-                false,
-                false,
-            ));
+            let mut output = coding_run_binding_projection(&observed_binding, false, false);
+            match db.agent_task_handoff_brief(&principal, &task_id) {
+                Ok(brief) => output["handoff_brief"] = json!(brief),
+                Err(error) => return agent_task_error(error, RecoveryKind::Reconcile),
+            }
+            return ToolResult::ok(output);
         }
 
         let terminal_result = coding_run_terminal_result(&run);
@@ -690,6 +813,12 @@ impl ToolRuntime {
                 let mut output =
                     coding_run_binding_projection(&mutation.binding, mutation.state_changed, false);
                 if let Some(object) = output.as_object_mut() {
+                    match db.agent_task_handoff_brief(&principal, &task_id) {
+                        Ok(brief) => {
+                            object.insert("handoff_brief".into(), json!(brief));
+                        }
+                        Err(error) => return agent_task_error(error, RecoveryKind::Reconcile),
+                    }
                     object.insert(
                         "task_state".to_string(),
                         json!(mutation.task.state.as_str()),
@@ -719,7 +848,7 @@ impl ToolRuntime {
             Ok(principal) => principal,
             Err(result) => return result,
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.heartbeat_agent_task_attempt(
@@ -767,7 +896,7 @@ impl ToolRuntime {
                 .with_recovery(RecoveryKind::FixInput, None)
             }
         };
-        let Some(db) = self.communication_db.as_ref() else {
+        let Some(db) = self.communication.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
         match db.complete_agent_task_attempt(

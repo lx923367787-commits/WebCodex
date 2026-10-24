@@ -92,7 +92,7 @@ fn create_agent(
     label: &str,
     key: &str,
 ) -> String {
-    let result = runtime.create_agent_identity(
+    let result = runtime.communication.create_agent_identity(
         None,
         handle.to_string(),
         display_name.to_string(),
@@ -108,7 +108,7 @@ fn create_agent(
 }
 
 fn attach(runtime: &ToolRuntime, agent_id: &str, key: &str) -> (String, i64) {
-    let result = runtime.attach_agent_endpoint(
+    let result = runtime.communication.attach_agent_endpoint(
         None,
         agent_id.to_string(),
         "Deterministic Host".to_string(),
@@ -129,7 +129,7 @@ fn attach(runtime: &ToolRuntime, agent_id: &str, key: &str) -> (String, i64) {
 }
 
 fn create_conversation(runtime: &ToolRuntime, agent_a: &str, agent_b: &str, key: &str) -> String {
-    let result = runtime.create_conversation(
+    let result = runtime.communication.create_conversation(
         None,
         Some("Natural durable conversation".to_string()),
         vec![agent_a.to_string(), agent_b.to_string()],
@@ -155,7 +155,7 @@ fn post_as_agent(
     wake_reply_id: Option<&str>,
     reply_operation_index: Option<i64>,
 ) -> Value {
-    let result = runtime.post_conversation_message(
+    let result = runtime.communication.post_conversation_message(
         None,
         conversation_id.to_string(),
         body.to_string(),
@@ -221,7 +221,7 @@ fn natural_agent_message_dispatches_once_and_burst_remains_bounded_and_private()
     let (endpoint_b, generation_b) = attach(&runtime, &agent_b, "natural-endpoint-b");
     let conversation_id = create_conversation(&runtime, &agent_a, &agent_b, "natural-conversation");
     let adapter = Arc::new(FakeHostAdapter::delivered());
-    let registration = runtime.register_agent_continuation_adapter(
+    let registration = runtime.communication.register_agent_continuation_adapter(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -293,7 +293,7 @@ fn natural_agent_message_dispatches_once_and_burst_remains_bounded_and_private()
         "an unresolved delivered Wake blocks 49 duplicate model-turn dispatches"
     );
 
-    let bootstrap = runtime.bootstrap_agent_conversation(
+    let bootstrap = runtime.communication.bootstrap_agent_conversation(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -322,7 +322,7 @@ fn natural_agent_message_dispatches_once_and_burst_remains_bounded_and_private()
     assert!(bootstrap.output.get("messages").is_none());
     assert!(!bootstrap.output.to_string().contains(private_body));
 
-    let unregistered = runtime.unregister_agent_continuation_adapter(
+    let unregistered = runtime.communication.unregister_agent_continuation_adapter(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -330,7 +330,7 @@ fn natural_agent_message_dispatches_once_and_burst_remains_bounded_and_private()
     );
     assert!(unregistered.success, "{:?}", unregistered.output);
     assert_eq!(unregistered.output["endpoint"]["wake_capable"], false);
-    let bootstrap = runtime.bootstrap_agent_conversation(
+    let bootstrap = runtime.communication.bootstrap_agent_conversation(
         None,
         agent_b,
         endpoint_b,
@@ -394,7 +394,7 @@ fn offline_restart_and_replacement_dispatch_the_same_logical_wake() {
     );
 
     let unavailable = Arc::new(FakeHostAdapter::unavailable());
-    let registration = runtime.register_agent_continuation_adapter(
+    let registration = runtime.communication.register_agent_continuation_adapter(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -419,7 +419,7 @@ fn offline_restart_and_replacement_dispatch_the_same_logical_wake() {
         .recover_agent_wakes_for_server_takeover(&ownership, chrono::Utc::now().timestamp_millis())
         .unwrap();
     let runtime = runtime_with_db(reopened.clone());
-    let bootstrap = runtime.bootstrap_agent_conversation(
+    let bootstrap = runtime.communication.bootstrap_agent_conversation(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -440,7 +440,7 @@ fn offline_restart_and_replacement_dispatch_the_same_logical_wake() {
     );
     assert_eq!(bootstrap.output["wake"]["wake_id"], logical_wake_id);
 
-    let old_process_registration = runtime.register_agent_continuation_adapter(
+    let old_process_registration = runtime.communication.register_agent_continuation_adapter(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -457,7 +457,7 @@ fn offline_restart_and_replacement_dispatch_the_same_logical_wake() {
         attach(&runtime, &agent_b, "restart-endpoint-b2");
     assert_eq!(replacement_generation, generation_b + 1);
     let replacement_adapter = Arc::new(FakeHostAdapter::delivered());
-    let registration = runtime.register_agent_continuation_adapter(
+    let registration = runtime.communication.register_agent_continuation_adapter(
         None,
         agent_b.clone(),
         replacement_endpoint.clone(),
@@ -476,7 +476,7 @@ fn offline_restart_and_replacement_dispatch_the_same_logical_wake() {
         attach(&runtime, &agent_b, "restart-endpoint-b");
     assert_eq!(replayed_old_endpoint, endpoint_b);
     assert_eq!(replayed_old_generation, generation_b);
-    let stale_registration = runtime.register_agent_continuation_adapter(
+    let stale_registration = runtime.communication.register_agent_continuation_adapter(
         None,
         agent_b.clone(),
         endpoint_b,
@@ -488,7 +488,7 @@ fn offline_restart_and_replacement_dispatch_the_same_logical_wake() {
         stale_registration.output["error_kind"], "endpoint_expired",
         "the stale generation cannot register itself again"
     );
-    let bootstrap = runtime.bootstrap_agent_conversation(
+    let bootstrap = runtime.communication.bootstrap_agent_conversation(
         None,
         agent_b,
         replacement_endpoint,
@@ -542,7 +542,7 @@ fn wake_derived_reply_identity_closes_response_loss_without_merging_consumption(
     );
     let wake_id = wake_id_for(&db, &agent_b);
 
-    let pending_bootstrap = runtime.bootstrap_agent_conversation(
+    let pending_bootstrap = runtime.communication.bootstrap_agent_conversation(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -553,7 +553,7 @@ fn wake_derived_reply_identity_closes_response_loss_without_merging_consumption(
     );
     assert!(pending_bootstrap.success, "{:?}", pending_bootstrap.output);
     assert!(pending_bootstrap.output["reply_replay"].is_null());
-    let pending_reply = runtime.post_conversation_message(
+    let pending_reply = runtime.communication.post_conversation_message(
         None,
         conversation_id.clone(),
         "must activate before using Wake reply identity".to_string(),
@@ -569,7 +569,7 @@ fn wake_derived_reply_identity_closes_response_loss_without_merging_consumption(
     assert!(!pending_reply.success);
     assert_eq!(pending_reply.output["error_kind"], "wake_not_dispatched");
 
-    let activation = runtime.bootstrap_agent_conversation(
+    let activation = runtime.communication.bootstrap_agent_conversation(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -628,7 +628,7 @@ fn wake_derived_reply_identity_closes_response_loss_without_merging_consumption(
     );
     assert_eq!(count(&db, "wc_conversation_messages"), 3);
 
-    let changed = runtime.post_conversation_message(
+    let changed = runtime.communication.post_conversation_message(
         None,
         conversation_id.clone(),
         "changed replay must conflict".to_string(),
@@ -658,7 +658,7 @@ fn wake_derived_reply_identity_closes_response_loss_without_merging_consumption(
             |row| row.get(0),
         )
         .unwrap();
-    let consumed = runtime.consume_agent_deliveries(
+    let consumed = runtime.communication.consume_agent_deliveries(
         None,
         agent_b.clone(),
         replacement_endpoint_b,
@@ -710,7 +710,7 @@ fn explicit_activation_bootstrap_is_replayable_and_consumes_wake_separately() {
         None,
     );
     let wake_id = wake_id_for(&db, &agent_b);
-    let first = runtime.bootstrap_agent_conversation(
+    let first = runtime.communication.bootstrap_agent_conversation(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -728,7 +728,7 @@ fn explicit_activation_bootstrap_is_replayable_and_consumes_wake_separately() {
         .to_string();
     let attempt_id = first.output["wake_activation"]["attempt_id"].clone();
 
-    let replay = runtime.bootstrap_agent_conversation(
+    let replay = runtime.communication.bootstrap_agent_conversation(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -746,7 +746,7 @@ fn explicit_activation_bootstrap_is_replayable_and_consumes_wake_separately() {
         consume_token
     );
 
-    let consumed = runtime.consume_agent_wake(
+    let consumed = runtime.communication.consume_agent_wake(
         None,
         agent_b.clone(),
         endpoint_b.clone(),
@@ -755,7 +755,7 @@ fn explicit_activation_bootstrap_is_replayable_and_consumes_wake_separately() {
         consume_token,
     );
     assert!(consumed.success, "{:?}", consumed.output);
-    let inbox = runtime.list_agent_inbox(
+    let inbox = runtime.communication.list_agent_inbox(
         None,
         agent_b.clone(),
         endpoint_b,

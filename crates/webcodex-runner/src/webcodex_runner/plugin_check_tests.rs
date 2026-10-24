@@ -67,6 +67,8 @@ impl CheckFixture {
         let startup_plugins = PluginConfig {
             request_timeout_secs: timeout_secs,
             providers: vec![PluginProviderConfig {
+                document_worker: None,
+                document_worker_args: Vec::new(),
                 id: "fake".to_string(),
                 name: "Fake Plugin".to_string(),
                 command: fake.path.to_string_lossy().into_owned(),
@@ -74,6 +76,7 @@ impl CheckFixture {
                 cwd: Some(temp.path().to_string_lossy().into_owned()),
                 profile: None,
                 timeout_secs: Some(timeout_secs),
+                runtime_lifecycle: None,
             }],
         };
         let config_path = temp.path().join("runner.toml");
@@ -575,6 +578,7 @@ fn runner_config(
         SshConfig, ToolProvidersConfig,
     };
     RunnerConfig {
+        agent_execution_resources: Default::default(),
         server_url: "http://127.0.0.1:8000".to_string(),
         token: "test-token".to_string(),
         client_id: "plugin-check-test".to_string(),

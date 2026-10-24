@@ -301,13 +301,19 @@ fn document_diagnostics_tool_call_parser_produces_only_typed_fields() {
             && path == "src/main.rs"
             && session_id == "wc_sess_demo"
     ));
-    let call_with_ignored_internal_extra = ToolCall::from_tool_name(
+    let invalid = ToolCall::from_tool_name(
         "document_diagnostics",
         json!({"project": "agent:oe:demo", "path": "src/main.rs", "timeout": 30}),
     )
+    .unwrap_err();
+    assert!(invalid.contains("timeout"));
+    let call_without_optional_fields = ToolCall::from_tool_name(
+        "document_diagnostics",
+        json!({"project": "agent:oe:demo", "path": "src/main.rs"}),
+    )
     .unwrap();
     assert!(matches!(
-        call_with_ignored_internal_extra,
+        call_without_optional_fields,
         ToolCall::DocumentDiagnostics {
             limit: None,
             session_id: None,
@@ -347,6 +353,7 @@ async fn register_lsp_agent_capabilities(
         .runner_registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,

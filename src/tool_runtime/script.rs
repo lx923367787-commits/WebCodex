@@ -114,7 +114,7 @@ impl ToolRuntime {
             }
             identity
         });
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(project) => project,
             Err(error) => {
                 return process_tool_failure_result(
@@ -218,6 +218,7 @@ impl ToolRuntime {
                 }
             };
             let wait = self
+                .config
                 .structured_execution_sync_wait
                 .min(Duration::from_secs(budget.sync_wait_secs));
             let handoff = await_hidden_structured_job(

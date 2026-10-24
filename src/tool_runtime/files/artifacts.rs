@@ -145,7 +145,9 @@ fn validate_artifact_mime(mime_type: Option<&str>) -> Result<Option<String>, Str
     let Some(mime) = mime_type.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    if ooxml_extension_for_mime(mime).is_some() {
+    if ooxml_extension_for_mime(mime).is_some()
+        || webcodex_core::artifact_policy::legacy_office_extension_for_mime(mime).is_some()
+    {
         return Ok(Some(mime.to_string()));
     }
     match mime {
@@ -175,10 +177,17 @@ pub(crate) fn validate_artifact_mime_for_path(
         return Err(octet_stream_safe_extension_error());
     }
     if let Some(mime) = mime_type.as_deref() {
-        if let Some(required_extension) = ooxml_extension_for_mime(mime) {
+        if let Some(required_extension) = ooxml_extension_for_mime(mime)
+            .or_else(|| webcodex_core::artifact_policy::legacy_office_extension_for_mime(mime))
+        {
             if !path.to_ascii_lowercase().ends_with(required_extension) {
                 return Err(format!(
-                    "OOXML MIME type '{mime}' requires a matching {required_extension} artifact path"
+                    "{} MIME type '{mime}' requires a matching {required_extension} artifact path",
+                    if ooxml_extension_for_mime(mime).is_some() {
+                        "OOXML"
+                    } else {
+                        "Office"
+                    }
                 ));
             }
         }
@@ -374,6 +383,7 @@ impl ToolRuntime {
             .checked_add(length)
             .ok_or_else(|| "artifact export offset + length overflow".to_string())?;
         let resolved = self
+            .execution()
             .resolve_project_for_auth(project, auth)
             .await
             .map_err(|error| error.to_message())?;
@@ -477,7 +487,7 @@ impl ToolRuntime {
                 MAX_PROJECT_ARTIFACT_BYTES
             ));
         }
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
@@ -527,7 +537,7 @@ impl ToolRuntime {
         if let Err(e) = validate_artifact_file_path(&path) {
             return artifact_policy_rejected_result(&path, e);
         }
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
@@ -636,7 +646,11 @@ impl ToolRuntime {
         if let Err(error) = validate_artifact_file_path(path) {
             return artifact_policy_rejected_result(path, error);
         }
-        let resolved = match self.resolve_project_input_for_auth(project, auth).await {
+        let resolved = match self
+            .execution()
+            .resolve_project_input_for_auth(project, auth)
+            .await
+        {
             Ok(resolved) => resolved,
             Err(error) => return error.into_tool_result(),
         };
@@ -681,7 +695,7 @@ impl ToolRuntime {
                 MAX_READ_PROJECT_ARTIFACT_LENGTH
             ));
         }
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
@@ -746,7 +760,7 @@ impl ToolRuntime {
         op: &str,
         tool_name: &str,
     ) -> ToolResult {
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };

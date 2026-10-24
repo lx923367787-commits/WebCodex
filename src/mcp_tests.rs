@@ -7,6 +7,28 @@ use base64::engine::general_purpose;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn mcp_tool_call_envelope_rejects_misplaced_execution_fields() {
+    for field in [
+        "expected_sha256",
+        "target",
+        "project",
+        "result_expectation",
+        "params",
+    ] {
+        let mut input = json!({
+            "name": "write_project_file",
+            "arguments": {"project":"demo","path":"a.txt","content":"text"},
+            "_meta": {"progressToken":"request-1"},
+        });
+        input[field] = json!("must-not-be-ignored");
+        assert!(
+            serde_json::from_value::<McpToolCallParams>(input).is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
 fn mcp_gateway_tool_call_params_do_not_retain_outer_meta() {
     for meta in [
         json!({"progressToken": "legacy-progress", "custom": {"private": true}}),
@@ -23,7 +45,9 @@ fn mcp_gateway_tool_call_params_do_not_retain_outer_meta() {
             "_meta": meta
         }))
         .unwrap();
-        let McpToolCallParams { name, arguments } = parsed;
+        let McpToolCallParams {
+            name, arguments, ..
+        } = parsed;
         assert_eq!(name, crate::mcp_gateway::MCP_TOOL_NAME);
         assert_eq!(arguments, json!({"action": "list"}));
     }
@@ -197,8 +221,12 @@ fn mcp_export_api_auth(api_key_id: &str, username: &str) -> crate::auth::AuthCon
 mod artifact_export;
 #[path = "mcp_tests/computer_app.rs"]
 mod computer_app;
+#[path = "mcp_tests/documents.rs"]
+mod documents;
 #[path = "mcp_tests/file_import.rs"]
 mod file_import;
+#[path = "mcp_tests/host_goal_transport.rs"]
+mod host_goal_transport;
 #[path = "mcp_tests/http_transport.rs"]
 mod http_transport;
 #[path = "mcp_tests/model_ergonomics.rs"]
@@ -217,6 +245,8 @@ mod project_connector;
 mod protocol;
 #[path = "mcp_tests/runtime_tools.rs"]
 mod runtime_tools;
+#[path = "mcp_tests/schema_projection.rs"]
+mod schema_projection;
 #[path = "mcp_tests/ssh_resource.rs"]
 mod ssh_resource;
 #[path = "mcp_tests/tools.rs"]

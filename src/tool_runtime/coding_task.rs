@@ -317,7 +317,8 @@ impl ToolRuntime {
         else {
             return Ok(None);
         };
-        self.resolve_project_input_for_auth(&project, auth)
+        self.execution()
+            .resolve_project_input_for_auth(&project, auth)
             .await
             .map(Some)
             .map_err(|error| error.into_tool_result())
@@ -449,7 +450,11 @@ impl ToolRuntime {
             trusted_recording_session_project,
         ) {
             (Some(_), Some(project)) => {
-                match self.resolve_project_input_for_auth(project, auth).await {
+                match self
+                    .execution()
+                    .resolve_project_input_for_auth(project, auth)
+                    .await
+                {
                     Ok(resolved) => Some(resolved),
                     Err(error) => return error.into_tool_result(),
                 }
@@ -519,7 +524,7 @@ impl ToolRuntime {
                     return result;
                 }
                 let permission = super::permissions::evaluate_permission_for_tool(
-                    &self.permission_evaluator,
+                    &self.config.permission_evaluator,
                     "register_project",
                     None,
                 );
@@ -556,17 +561,19 @@ impl ToolRuntime {
                     debug_assert!(worktree.resume_project_id.is_some());
                 }
                 let resolved = if let Some(worktree) = managed_worktree.as_ref() {
-                    self.prepare_managed_worktree(
-                        client_id,
-                        path,
-                        worktree.base_ref.clone(),
-                        worktree.operation_id.clone(),
-                        worktree.resume_project_id.clone(),
-                        auth,
-                    )
-                    .await
+                    self.execution()
+                        .prepare_managed_worktree(
+                            client_id,
+                            path,
+                            worktree.base_ref.clone(),
+                            worktree.operation_id.clone(),
+                            worktree.resume_project_id.clone(),
+                            auth,
+                        )
+                        .await
                 } else {
-                    self.resolve_or_register_project(client_id, path, auth)
+                    self.execution()
+                        .resolve_or_register_project(client_id, path, auth)
                         .await
                 };
                 if !resolved.success {
@@ -710,7 +717,11 @@ impl ToolRuntime {
             None
         };
 
-        let resolved = match self.resolve_project_input_for_auth(&project, auth).await {
+        let resolved = match self
+            .execution()
+            .resolve_project_input_for_auth(&project, auth)
+            .await
+        {
             Ok(resolved) => resolved,
             Err(err) => {
                 return attach_project_resolution(err.into_tool_result(), &project_resolution)
@@ -1375,7 +1386,11 @@ impl ToolRuntime {
         {
             return result;
         }
-        let resolved = match self.resolve_project_input_for_auth(&project, auth).await {
+        let resolved = match self
+            .execution()
+            .resolve_project_input_for_auth(&project, auth)
+            .await
+        {
             Ok(resolved) => resolved,
             Err(err) => return err.into_tool_result(),
         };
@@ -1853,7 +1868,11 @@ impl ToolRuntime {
         }
         // Short startup probe budget, much tighter than the standalone
         // `project_overview` tool's 30s wait.
-        let probe_wait_timeout = self.repository_overview_probe_timeout.as_secs().max(1);
+        let probe_wait_timeout = self
+            .config
+            .repository_overview_probe_timeout
+            .as_secs()
+            .max(1);
         let (request_id, receiver) = match self
             .runner_registry
             .enqueue_file_op(

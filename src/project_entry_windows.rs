@@ -208,8 +208,50 @@ fn protect_handle(
 }
 
 #[cfg(test)]
-pub(super) fn current_user_sid_for_test() -> Result<String, String> {
-    current_user_sid()
+pub(super) fn current_user_sddl_sid_for_test() -> Result<String, String> {
+    use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+
+    // SDDL renders well-known account SIDs using aliases (for example LA for
+    // the local Administrator). Compare the same representation on every host.
+    let sddl: Vec<u16> = format!("D:(A;;FA;;;{})", current_user_sid()?)
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor = std::ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err("could not construct the test user DACL".to_string());
+    }
+    let mut text = std::ptr::null_mut();
+    let mut len = 0;
+    let rendered = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut text,
+            &mut len,
+        )
+    };
+    unsafe { LocalFree(descriptor as _) };
+    if rendered == 0 {
+        return Err("could not render the test user DACL".to_string());
+    }
+    let value = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(text, len as usize)) };
+    unsafe { LocalFree(text as _) };
+    value
+        .split(";;;")
+        .nth(1)
+        .and_then(|ace| ace.split(')').next())
+        .map(str::to_string)
+        .ok_or_else(|| "test user DACL has no trustee".to_string())
 }
 
 #[cfg(test)]

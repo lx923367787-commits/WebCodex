@@ -263,6 +263,7 @@ async fn mcp_import_runtime_with_surface(
     registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -845,30 +846,51 @@ async fn oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gat
     let project_tmp = tempfile::tempdir().unwrap();
     let (runtime, registry) = mcp_import_runtime(project_tmp.path(), Some("alice")).await;
     let service = Service::new(build_test_router(config, db, runtime));
-    let agent = tokio::spawn(complete_mcp_import_save(registry, pptx.clone()));
     let temporary_url = "https://download.example/temporary-secret-token/stateless-import.pptx";
-    let (status, body, _) = oauth_mcp_request(
-        &service,
-        &token,
-        "tools/call",
-        mcp_2026_params(json!({
-            "name": "import_conversation_files_to_project",
-            "arguments": {
-                "project": "agent:importer:demo",
-                "openaiFileIdRefs": [{
-                    "download_url": temporary_url,
-                    "file_id": "file_stateless_host_rewritten",
-                    "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    "file_name": "source.pptx"
-                }],
-                "output_dir": "paper/export",
-                "targets": ["stateless-import.pptx"],
-                "overwrite": false,
-                "trusted_mcp_host_file_import": false
-            }
-        })),
-    )
-    .await;
+    let mut params = mcp_2026_params(json!({
+        "name": "import_conversation_files_to_project",
+        "arguments": {
+            "project": "agent:importer:demo",
+            "openaiFileIdRefs": [{
+                "download_url": temporary_url,
+                "file_id": "file_stateless_host_rewritten",
+                "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "file_name": "source.pptx"
+            }],
+            "output_dir": "paper/export",
+            "targets": ["stateless-import.pptx"],
+            "overwrite": false,
+            "trusted_mcp_host_file_import": false
+        }
+    }));
+    let (status, rejected, _) =
+        oauth_mcp_request(&service, &token, "tools/call", params.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert!(rejected["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("trusted_mcp_host_file_import"));
+    assert_eq!(
+        crate::tool_runtime::conversation_import::import_test_dns_resolution_count(),
+        0,
+        "caller-supplied internal provenance must fail before network access"
+    );
+    assert!(registry
+        .poll(crate::runner_protocol::RunnerPollRequest {
+            client_id: "importer".into(),
+            runner_instance_id: "inst-import".into(),
+        })
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!rejected.to_string().contains(temporary_url));
+
+    params["arguments"]
+        .as_object_mut()
+        .unwrap()
+        .remove("trusted_mcp_host_file_import");
+    let agent = tokio::spawn(complete_mcp_import_save(registry, pptx.clone()));
+    let (status, body, _) = oauth_mcp_request(&service, &token, "tools/call", params).await;
     // Stage C: observe the exact mcp_post trust decision after AuthMiddleware.
     let mcp_decision = take_last_mcp_host_file_import_trust_decision()
         .expect("mcp_post must evaluate host-file trust for the import tool");
@@ -1352,7 +1374,7 @@ async fn api_token_mcp_file_import_works_without_oauth_and_preserves_guards_impl
     let (runtime, registry) = mcp_import_runtime(project.path(), Some("alice")).await;
     let mut config = (*test_config(Some("secret"))).clone();
     assert!(!config.oauth2.enabled);
-    let params = mcp_2026_params(json!({
+    let mut params = mcp_2026_params(json!({
         "name": "import_conversation_files_to_project",
         "arguments": {
             "project": "agent:importer:demo",
@@ -1370,12 +1392,38 @@ async fn api_token_mcp_file_import_works_without_oauth_and_preserves_guards_impl
     ));
     let (status, body, _) =
         oauth_mcp_request(&untrusted_service, &token, "tools/call", params.clone()).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"]["isError"], true);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("trusted_mcp_host_file_import"));
     assert_eq!(
         crate::tool_runtime::conversation_import::import_test_dns_resolution_count(),
         0,
         "JSON cannot assert host trust for an unlisted API token"
+    );
+    assert!(registry
+        .poll(crate::runner_protocol::RunnerPollRequest {
+            client_id: "importer".into(),
+            runner_instance_id: "inst-import".into(),
+        })
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!body.to_string().contains("private-reference"));
+
+    params["arguments"]
+        .as_object_mut()
+        .unwrap()
+        .remove("trusted_mcp_host_file_import");
+    let (status, body, _) =
+        oauth_mcp_request(&untrusted_service, &token, "tools/call", params.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["isError"], true);
+    assert_eq!(
+        crate::tool_runtime::conversation_import::import_test_dns_resolution_count(),
+        0,
+        "removing the forged field does not grant trust to an unlisted API token"
     );
 
     config.trusted_mcp_file_api_token_ids = vec![record.id.clone()];

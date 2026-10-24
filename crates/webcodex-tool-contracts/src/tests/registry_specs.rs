@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn conversation_import_schema_preserves_per_item_partial_results() {
+    let specs = registered_tool_specs();
+    let spec = spec_named(&specs, "import_conversation_files_to_project");
+    let properties = &spec.output_schema["properties"]["output"]["properties"];
+    for key in ["count", "imported", "failed", "items", "status"] {
+        assert!(
+            properties.get(key).is_some(),
+            "missing batch import field {key}"
+        );
+    }
+    assert!(properties["status"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("unknown"));
+}
+
+#[test]
 fn tool_specs_describe_default_coding_loop_preferences() {
     let specs = registered_tool_specs();
 
@@ -104,7 +121,8 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     for phrase in [
         "preferred host-native attachment-to-project transfer path",
         "do not base64-transfer files",
-        "trusted mcp host/oauth client",
+        "explicitly trusted active oauth client",
+        "allowlisted managed user api token",
     ] {
         assert!(
             import_artifact_desc.contains(phrase),
@@ -356,14 +374,15 @@ fn tool_specs_describe_default_coding_loop_preferences() {
 
     let run_process_desc = desc("run_process");
     for phrase in [
-        "one-shot executable with structured argv",
-        "preferred route for one native executable with literal argv",
+        "one executable with structured argv",
+        "normal project/process permissions still apply",
         "windows batch shims",
-        "bounded runner-owned quoting contract",
-        "run_shell only when shell semantics or a short tightly related command chain",
+        "bounded quoting contract",
+        "use run_shell for shell semantics",
+        "short tightly related command chain",
         "do not open a persistent shell merely to run several commands",
         "same-process cwd/env/exports/functions/umask state",
-        "one named ssh resource",
+        "named ssh-resource commands",
         "ssh_resource onboarding",
         "one-shot/no-persistence ssh",
         "runner-owned",
@@ -411,8 +430,7 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     let detached_desc = desc("run_detached_process");
     for phrase in [
         "supervisor-owned",
-        "outlive the initiating runner process",
-        "runner exit",
+        "outlive runner exit",
         "restart",
         "upgrade",
         "replacement",

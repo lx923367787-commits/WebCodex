@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 fn shared_key_auth(hash: &str) -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::SharedKey,
         user_id: None,
         username: None,
@@ -44,6 +46,8 @@ fn shared_key_auth(hash: &str) -> crate::auth::AuthContext {
 
 fn open_auth() -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::OpenAnonymous,
         user_id: None,
         username: None,
@@ -66,6 +70,8 @@ fn open_auth() -> crate::auth::AuthContext {
 
 fn bootstrap_auth() -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::Bootstrap,
         user_id: None,
         username: None,
@@ -109,6 +115,7 @@ fn list_runners_call() -> ToolCall {
 
 fn metadata_agent_registration(client_id: &str) -> RunnerRegisterRequest {
     crate::test_support::current_runner_registration(RunnerRegisterRequest {
+        agent_execution_resources: Vec::new(),
         process_started_at: None,
         build: None,
         job_concurrency_limit: None,
@@ -140,6 +147,7 @@ async fn register_computer_target_for_auth(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -181,6 +189,7 @@ async fn register_application_target_for_auth(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -219,6 +228,7 @@ async fn register_display_target_for_auth(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -256,6 +266,7 @@ async fn register_pointer_target_for_auth(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -294,6 +305,7 @@ async fn register_clipboard_target_for_auth(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -332,6 +344,7 @@ async fn register_agent_projects_for_auth(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -376,6 +389,7 @@ async fn register_agent_projects_for_auth(
                         structured_script_payload: false,
                         internal_posix_script: false,
                         structured_execution_jobs: false,
+                        agent_isolated_execution_v1: false,
                         detached_process_jobs: false,
                         lsp_read_only_navigation: false,
                         lsp_call_hierarchy: false,
@@ -950,6 +964,7 @@ async fn replacement_runner_pending_inventory_has_zero_project_routing_authority
     )
     .await;
     let initial = runtime
+        .execution()
         .resolve_project_input_for_auth(&project_id, Some(&auth))
         .await
         .unwrap();
@@ -962,6 +977,7 @@ async fn replacement_runner_pending_inventory_has_zero_project_routing_authority
     let replacement = runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -1059,6 +1075,7 @@ async fn replacement_runner_pending_inventory_has_zero_project_routing_authority
         .unwrap();
     assert_eq!(completed.sync_state, "complete");
     let resolved = runtime
+        .execution()
         .resolve_project_input_for_auth(&project_id, Some(&auth))
         .await
         .unwrap();
@@ -1132,6 +1149,7 @@ async fn replacement_runner_removed_project_never_inherits_old_authority() {
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -1344,6 +1362,7 @@ async fn runtime_status_shell_profiles_summary_is_sanitized() {
     let _ = (secret_env_value, secret_script);
     registry
         .register(crate::runner_protocol::RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -2018,7 +2037,13 @@ async fn tool_manifest_model_fields_and_hidden_start_compatibility_stay_separate
     }
 
     for field in properties.keys() {
-        if TOOL_CALL_WRAPPER_FIELDS.contains(&field.as_str()) {
+        if TOOL_CALL_WRAPPER_FIELDS.contains(&field.as_str())
+            || matches!(
+                field.as_str(),
+                webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD
+                    | webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD
+            )
+        {
             continue;
         }
         assert!(
@@ -2026,6 +2051,14 @@ async fn tool_manifest_model_fields_and_hidden_start_compatibility_stay_separate
             "ToolCallRequest.properties declares flattened field {field}, but no model-visible manifest entry accepts it"
         );
     }
+    assert_eq!(
+        properties[webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD],
+        webcodex_tool_contracts::goal_context_input_schema()
+    );
+    assert_eq!(
+        properties[webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD],
+        webcodex_tool_contracts::context_epoch_input_schema()
+    );
 }
 
 #[tokio::test]

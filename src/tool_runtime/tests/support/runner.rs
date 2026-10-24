@@ -23,6 +23,7 @@ pub(in crate::tool_runtime::tests) async fn register_runner_project_at_path(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -76,6 +77,7 @@ pub(in crate::tool_runtime::tests) async fn register_runner_project_at_path_with
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -604,6 +606,7 @@ pub(in crate::tool_runtime::tests) async fn register_agent(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -648,6 +651,7 @@ pub(in crate::tool_runtime::tests) async fn register_agent_with_instance(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -750,6 +754,7 @@ pub(in crate::tool_runtime::tests) async fn register_agent_projects(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -789,6 +794,7 @@ pub(in crate::tool_runtime::tests) async fn register_agent_projects_for_auth(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -1173,6 +1179,7 @@ pub(in crate::tool_runtime::tests) async fn register_agent_with_projects(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -1212,6 +1219,7 @@ pub(in crate::tool_runtime::tests) async fn register_agent_with_shell_profiles(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,

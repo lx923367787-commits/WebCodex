@@ -49,7 +49,18 @@ impl ActionAudit {
                 .unwrap_or((None, None));
         let now = chrono::Utc::now();
         Self {
-            db: get_db(depot),
+            // Agent-private operations write their bounded security audit in
+            // the owning transaction. Do not also retain caller-controlled
+            // names/project labels on the legacy account-wide ledger.
+            db: if auth.is_some_and(|a| {
+                a.agent_run.is_some()
+                    || a.is_native_host()
+                    || (endpoint == "/mcp" && a.is_oauth_token())
+            }) {
+                None
+            } else {
+                get_db(depot)
+            },
             explicit_session_id: request_action_session_id(req),
             principal_kind,
             principal_user_id,
@@ -190,6 +201,9 @@ fn action_principal_attribution(
     let Some(auth) = auth else {
         return (None, None, None);
     };
+    if auth.is_native_host() {
+        return (Some("native-host".into()), None, None);
+    }
     let oauth_client_id = auth
         .is_oauth_token()
         .then(|| auth.allowed_client_id.clone())

@@ -19,6 +19,7 @@ use webcodex_core::coding_agent::{
     CodingAgentResponsePayload, CodingAgentRunInventory, CodingAgentRunSnapshot,
     CodingAgentRunState, CodingAgentTerminal,
 };
+mod takeover;
 
 fn runtime_with_db() -> (tempfile::TempDir, Arc<crate::db::Database>, ToolRuntime) {
     let temp = tempfile::tempdir().unwrap();
@@ -28,7 +29,7 @@ fn runtime_with_db() -> (tempfile::TempDir, Arc<crate::db::Database>, ToolRuntim
 }
 
 fn create_agent(runtime: &ToolRuntime, handle: &str) -> String {
-    let result = runtime.create_agent_identity(
+    let result = runtime.communication.create_agent_identity(
         None,
         handle.to_string(),
         format!("{handle} display"),
@@ -55,6 +56,7 @@ async fn register_coding_agent_task_runner(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: Some(1_700_000_000),
             build: None,
             job_concurrency_limit: None,
@@ -561,7 +563,7 @@ async fn coding_run_executes_then_reconciles_from_reopened_db_and_fresh_runtime(
         CodingAgentRunInventory::default(),
     )
     .await;
-    let agent_result = runtime.create_agent_identity(
+    let agent_result = runtime.communication.create_agent_identity(
         Some(&auth),
         "a4a-runtime-agent".to_string(),
         "A4a Runtime Agent".to_string(),
@@ -752,9 +754,55 @@ async fn coding_run_executes_then_reconciles_from_reopened_db_and_fresh_runtime(
         .expect("fresh runtime must see the exact durable CodingAgentRun inventory entry");
     assert_eq!(inventory_run, completed);
 
-    let reconciled = fresh_runtime
-        .reconcile_agent_task_coding_run(Some(&auth), task_id.clone(), attempt_id.clone())
-        .await;
+    let reconciliation = tokio::spawn({
+        let runtime = fresh_runtime.clone();
+        let auth = auth.clone();
+        let task_id = task_id.clone();
+        let attempt_id = attempt_id.clone();
+        async move {
+            runtime
+                .reconcile_agent_task_coding_run(Some(&auth), task_id, attempt_id)
+                .await
+        }
+    });
+    let observation_request =
+        wait_for_runner_request_for_instance(&fresh_runtime, client_id, instance_id).await;
+    assert!(matches!(
+        observation_request.coding_agent,
+        Some(CodingAgentRequest::Observe(_))
+    ));
+    fresh_runtime
+        .runner_registry
+        .complete(RunnerResultPayload {
+            result: RunnerResultRequest {
+                client_id: client_id.into(),
+                runner_instance_id: instance_id.into(),
+                request_id: observation_request.request_id,
+                exit_code: None,
+                stdout: None,
+                stderr: None,
+                duration_ms: None,
+                error: None,
+            },
+            command_execution_state: None,
+            mcp_gateway: None,
+            plugin_gateway: None,
+            coding_agent: Some(CodingAgentResponse::success(
+                CodingAgentResponsePayload::Observe {
+                    observation: webcodex_core::coding_agent::CodingAgentObserveResult {
+                        run: completed.clone(),
+                        events: vec![],
+                        first_retained_sequence: 1,
+                        next_sequence: 0,
+                        has_more: false,
+                        history_lost: false,
+                    },
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    let reconciled = reconciliation.await.unwrap();
     assert!(reconciled.success, "{:?}", reconciled.output);
     assert_eq!(reconciled.output["run_id"], completed.run_id);
     assert_eq!(
@@ -764,6 +812,10 @@ async fn coding_run_executes_then_reconciles_from_reopened_db_and_fresh_runtime(
     );
     assert_eq!(reconciled.output["attempt_state"], "succeeded");
     assert_eq!(reconciled.output["state_changed"], true);
+    assert!(reconciled.output["handoff_brief"]
+        .as_str()
+        .unwrap()
+        .contains("original_instruction"));
 
     let task = fresh_runtime.read_agent_task(Some(&auth), task_id);
     assert!(task.success, "{:?}", task.output);
@@ -871,7 +923,7 @@ fn foreign_runtime_task_ids_are_existence_hidden_and_project_reference_grants_no
     let (_temp, _db, runtime) = runtime_with_db();
     let bob = auth_context(Some("bob"), false);
     let alice = auth_context(Some("alice"), false);
-    let bob_agent = runtime.create_agent_identity(
+    let bob_agent = runtime.communication.create_agent_identity(
         Some(&bob),
         "bob-task-agent".to_string(),
         "Bob Task Agent".to_string(),

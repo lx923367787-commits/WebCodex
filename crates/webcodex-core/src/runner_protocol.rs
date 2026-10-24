@@ -244,6 +244,9 @@ pub const RUNNER_CAPABILITY_INTERNAL_POSIX_SCRIPT: &str = "internal_posix_script
 /// execution and legacy async-shell capabilities: older B1/B2 Runners may
 /// advertise those capabilities without understanding typed Job starts.
 pub const RUNNER_CAPABILITY_STRUCTURED_EXECUTION_JOBS: &str = "structured_execution_jobs";
+/// Reserved D1 protocol contract. It is never a generation baseline and cannot
+/// be advertised until isolated dispatch, execution and durable close exist.
+pub const RUNNER_CAPABILITY_AGENT_ISOLATED_EXECUTION_V1: &str = "agent_isolated_execution_v1";
 /// Explicit authority for durable detached native-process Jobs whose payload tree is
 /// handed off to the detached supervisor. Missing on older Runners is false and
 /// is never inferred from structured process argv or ordinary durable Job support.
@@ -431,6 +434,7 @@ pub const RUNNER_CAPABILITY_NAMES: &[&str] = &[
     RUNNER_CAPABILITY_STRUCTURED_SCRIPT_PAYLOAD,
     RUNNER_CAPABILITY_INTERNAL_POSIX_SCRIPT,
     RUNNER_CAPABILITY_STRUCTURED_EXECUTION_JOBS,
+    RUNNER_CAPABILITY_AGENT_ISOLATED_EXECUTION_V1,
     RUNNER_CAPABILITY_DETACHED_PROCESS_JOBS,
     RUNNER_CAPABILITY_LSP_READ_ONLY_NAVIGATION,
     RUNNER_CAPABILITY_LSP_CALL_HIERARCHY,
@@ -613,6 +617,9 @@ pub struct RunnerCapabilities {
     /// any synchronous structured-execution or async-shell capability.
     #[serde(default)]
     pub structured_execution_jobs: bool,
+    /// Exact isolated execution/close contract; never inferred from other bits.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_isolated_execution_v1: bool,
     /// Durable detached native-process ownership handoff. This is an additive
     /// authority fence and is never implied by structured_process_argv or
     /// structured_execution_jobs.
@@ -899,6 +906,14 @@ impl RunnerConfigOperationResponse {
     }
 }
 
+impl RunnerCapabilities {
+    /// Registration must additionally verify the actual backend and resource
+    /// profiles. Merely requesting this bit in local config cannot enable it.
+    pub const fn agent_isolated_execution_v1(&self) -> bool {
+        self.agent_isolated_execution_v1
+    }
+}
+
 impl Default for RunnerCapabilities {
     fn default() -> Self {
         Self {
@@ -931,6 +946,7 @@ impl Default for RunnerCapabilities {
             structured_script_payload: false,
             internal_posix_script: false,
             structured_execution_jobs: false,
+            agent_isolated_execution_v1: false,
             detached_process_jobs: false,
             lsp_read_only_navigation: false,
             lsp_call_hierarchy: false,
@@ -1242,6 +1258,10 @@ pub struct RunnerRegisterRequest {
     /// inherits the pre-0.4 missing-field=true behavior.
     #[serde(deserialize_with = "deserialize_registration_capabilities")]
     pub capabilities: RunnerCapabilities,
+    /// Startup-validated resource facts for this exact Runner instance. These
+    /// contain no host paths or credentials and grant no task-input authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_execution_resources: Vec<AgentExecutionResourceDescriptor>,
     /// Optional bounded planning context declared by the Runner configuration.
     /// This is descriptive metadata only: it never grants authority or proves
     /// current host/service/network state.
@@ -1572,7 +1592,8 @@ pub const PROCESS_CWD_MAX_BYTES: usize = 1_024;
 pub const DETACHED_IDEMPOTENCY_KEY_MAX_BYTES: usize = 128;
 pub const STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS: u64 = 1;
 pub const STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS: u64 = 3_600;
-pub const STRUCTURED_EXECUTION_TIMEOUT_DEFAULT_SECS: u64 = 60;
+pub const STRUCTURED_EXECUTION_TIMEOUT_DEFAULT_SECS: u64 =
+    crate::coding_agent::CODING_AGENT_RESPONSE_TIMEOUT_SECS;
 /// Ceiling for direct synchronous structured Runner requests.
 /// Durable typed Jobs use `STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS` instead.
 pub const STRUCTURED_EXECUTION_DIRECT_SYNC_TIMEOUT_MAX_SECS: u64 = 120;
@@ -2766,6 +2787,14 @@ impl ShellJobStructuredExecutionMetadata {
             return false;
         }
         match self.execution_source.as_str() {
+            "agent_isolated_execution_v1" => {
+                self.language.is_none()
+                    && self.script_bytes.is_none()
+                    && self.arg_count <= PROCESS_ARG_MAX_COUNT
+                    && self.validation_identity.is_none()
+                    && self.validation_tool.is_none()
+                    && self.assertion_name.is_none()
+            }
             "run_process" | "run_detached_process" => {
                 self.language.is_none()
                     && self.script_bytes.is_none()
@@ -2788,6 +2817,12 @@ impl ShellJobStructuredExecutionMetadata {
 /// `run_job` input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellJobContext {
+    /// Server-derived exact logical execution binding; no tokens or private
+    /// paths. Only the explicit isolated Job operation may carry this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_execution: Option<AgentExecutionBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<DocumentJobMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2920,6 +2955,8 @@ pub struct RunnerJobResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellJobInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<DocumentJobMetadata>,
     pub job_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
@@ -2990,6 +3027,54 @@ pub struct ShellJobInfo {
     pub stdout_log_truncated: bool,
     #[serde(default)]
     pub stderr_log_truncated: bool,
+}
+
+/// Small server-owned continuation binding, persisted with the existing Job.
+/// It contains no document content, raw command, credential, or model options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentJobMetadata {
+    pub request_id: String,
+    pub operation: String,
+    pub project_root: String,
+    pub source_path: String,
+    pub provider_id: String,
+    pub provider_instance_id: String,
+    pub export_file: bool,
+}
+
+impl DocumentJobMetadata {
+    pub fn is_valid(&self) -> bool {
+        self.request_id.len() == 32
+            && self
+                .request_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && matches!(
+                self.operation.as_str(),
+                "present_document" | "document_edit" | "document_convert" | "document_restore"
+            )
+            && (!self.export_file || self.operation == "present_document")
+            && self.project_root.len() <= 4096
+            && !self.project_root.chars().any(char::is_control)
+            && crate::runtime_contract::validate_project_op_path(&self.project_root).is_ok()
+            && !self.source_path.is_empty()
+            && self.source_path.len() <= 4096
+            && !self.source_path.contains(':')
+            && !self.source_path.chars().any(char::is_control)
+            && self
+                .source_path
+                .split(['/', '\\'])
+                .all(|part| !matches!(part, "" | "." | ".."))
+            && !self
+                .source_path
+                .replace('\\', "/")
+                .to_ascii_lowercase()
+                .starts_with(".webcodex-office/")
+            && !crate::sensitive_paths::is_secret_path(&self.source_path)
+            && crate::plugin::validate_provider_id(&self.provider_id).is_ok()
+            && crate::plugin::validate_provider_instance_id(&self.provider_instance_id).is_ok()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3141,6 +3226,12 @@ pub enum RunnerEnvelope {
         #[serde(flatten)]
         payload: RunnerJobUpdateRequest,
     },
+    /// Runner -> Server physical-close claim awaiting durable Store consumption.
+    /// Receiving or queuing this envelope is not a completion acknowledgement.
+    AgentExecutionCloseReceipt {
+        request_id: String,
+        receipt: AgentExecutionCloseReceipt,
+    },
     /// Runner -> server result for a persistent-shell lifecycle request.
     PersistentShellResult {
         #[serde(flatten)]
@@ -3181,6 +3272,7 @@ impl RunnerEnvelope {
             RunnerEnvelope::Request { .. } => "request",
             RunnerEnvelope::Result { .. } => "result",
             RunnerEnvelope::JobUpdate { .. } => "job_update",
+            RunnerEnvelope::AgentExecutionCloseReceipt { .. } => "agent_execution_close_receipt",
             RunnerEnvelope::PersistentShellResult { .. } => "persistent_shell_result",
             RunnerEnvelope::Ping { .. } => "ping",
             RunnerEnvelope::RuntimeMetadata { .. } => "runtime_metadata",
@@ -3403,6 +3495,644 @@ where
     serde_json::from_slice(&buf).map_err(QuicFrameError::Json)
 }
 
+/// Reserved V2 kinds. DTO validation is shape validation, never execution admission.
+pub const AGENT_EXECUTION_START_KIND: &str = "start_agent_isolated_process_job";
+pub const AGENT_EXECUTION_CLOSE_KIND: &str = "close_agent_execution";
+pub const RUNNER_AGENT_EXECUTION_CLOSE_RECEIPT_PATH: &str =
+    "/api/shell/agent/agent_execution_close_receipt";
+pub const AGENT_EXECUTION_ID_MAX_BYTES: usize = 512;
+pub const AGENT_EXECUTION_RESOURCE_MAX_ENTRIES: usize = 32;
+
+/// Authenticated Runner resource facts, not a model-supplied execution grant.
+/// The executable identity is opaque: the Runner resolves it to its private
+/// validated profile and copies the verified executable into the isolated root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionResourceDescriptor {
+    pub resource_set_id: String,
+    pub manifest_hash: String,
+    pub executable_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::agent_cli::AgentCliProvider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_controls: Option<crate::agent_cli_controls::ReviewedAgentCliControls>,
+}
+
+impl AgentExecutionResourceDescriptor {
+    pub fn validate(&self) -> Result<(), String> {
+        agent_execution_id(&self.resource_set_id)?;
+        agent_execution_digest(&self.manifest_hash)?;
+        agent_execution_digest(
+            self.executable_identity
+                .strip_prefix("sha256:")
+                .ok_or("agent_execution_invalid_executable_identity")?,
+        )?;
+        if let Some(controls) = &self.reviewed_controls {
+            controls.validate_resource(
+                &self.resource_set_id,
+                self.provider,
+                &self.executable_identity,
+                &self.manifest_hash,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn agent_execution_id(value: &str) -> Result<(), String> {
+    if value.trim().is_empty()
+        || value.len() > AGENT_EXECUTION_ID_MAX_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err("agent_execution_invalid_identifier".into());
+    }
+    Ok(())
+}
+
+fn agent_execution_digest(value: &str) -> Result<(), String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("agent_execution_invalid_sha256".into());
+    }
+    Ok(())
+}
+
+fn agent_execution_version(version: u32) -> Result<(), String> {
+    if version != 1 {
+        return Err("agent_execution_unsupported_version".into());
+    }
+    Ok(())
+}
+
+fn agent_execution_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, String> {
+    let bytes = serde_json::to_vec(value).map_err(|_| "agent_execution_encoding_failed")?;
+    if bytes.len() > JOB_INVENTORY_MAX_SERIALIZED_BYTES {
+        return Err("agent_execution_payload_too_large".into());
+    }
+    Ok(bytes)
+}
+
+fn agent_execution_hash<T: Serialize + ?Sized>(domain: &str, value: &T) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(domain.as_bytes());
+    digest.update([0u8]);
+    digest.update(agent_execution_bytes(value)?);
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRunRef {
+    pub agent_id: String,
+    pub agent_run_id: String,
+    pub generation: i64,
+}
+
+impl AgentRunRef {
+    pub fn validate(&self) -> Result<(), String> {
+        agent_execution_id(&self.agent_id)?;
+        agent_execution_id(&self.agent_run_id)?;
+        if self.generation <= 0 {
+            return Err("agent_execution_invalid_generation".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionRequester {
+    pub enrollment_id: String,
+    pub run: AgentRunRef,
+    pub root_task_id: String,
+    pub source_task_id: String,
+    pub call_index: u32,
+    pub cli_attempt_id: String,
+}
+
+/// V1 is an independent CliWorker with zero delegation/model-call allowance.
+/// There are deliberately no caller-fillable role or quota policy fields.
+/// cli_session_scope_id is private CLI state, not a caller Workflow Session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionExecutor {
+    pub enrollment_id: String,
+    pub run: AgentRunRef,
+    pub task_id: String,
+    pub cli_session_scope_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionTarget {
+    pub client_id: String,
+    pub runner_instance_id: String,
+}
+
+impl AgentExecutionTarget {
+    pub fn validate(&self) -> Result<(), String> {
+        agent_execution_id(&self.client_id)?;
+        agent_execution_id(&self.runner_instance_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentExecutionCarrier {
+    Job {
+        job_id: String,
+        start_request_id: String,
+    },
+    CodingAgent {
+        coding_agent_run_id: String,
+        provider_id: String,
+        provider_instance_id: String,
+        intent_fingerprint: String,
+        authority_fingerprint: String,
+    },
+}
+
+impl AgentExecutionCarrier {
+    fn validate_identity(&self) -> Result<(), String> {
+        match self {
+            Self::Job {
+                job_id,
+                start_request_id,
+            } => {
+                agent_execution_id(job_id)?;
+                agent_execution_id(start_request_id)
+            }
+            Self::CodingAgent {
+                coding_agent_run_id,
+                provider_id,
+                provider_instance_id,
+                ..
+            } => {
+                crate::coding_agent::validate_run_id(coding_agent_run_id)?;
+                crate::coding_agent::validate_provider_id(provider_id)?;
+                crate::coding_agent::validate_provider_instance_id(provider_instance_id)
+            }
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        self.validate_identity()?;
+        if let Self::CodingAgent {
+            intent_fingerprint,
+            authority_fingerprint,
+            ..
+        } = self
+        {
+            crate::coding_agent::validate_intent_fingerprint(intent_fingerprint)?;
+            crate::coding_agent::validate_authority_fingerprint(authority_fingerprint)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionBinding {
+    pub version: u32,
+    pub project: String,
+    pub requester: AgentExecutionRequester,
+    pub executor: AgentExecutionExecutor,
+    pub target: AgentExecutionTarget,
+    pub carrier: AgentExecutionCarrier,
+    pub launch_intent_hash: String,
+    pub resource_manifest_hash: String,
+}
+
+impl AgentExecutionBinding {
+    fn validate_identity(&self) -> Result<(), String> {
+        agent_execution_version(self.version)?;
+        agent_execution_id(&self.project)?;
+        self.requester.run.validate()?;
+        self.executor.run.validate()?;
+        self.target.validate()?;
+        self.carrier.validate_identity()?;
+        for id in [
+            &self.requester.enrollment_id,
+            &self.requester.root_task_id,
+            &self.requester.source_task_id,
+            &self.requester.cli_attempt_id,
+            &self.executor.enrollment_id,
+            &self.executor.task_id,
+            &self.executor.cli_session_scope_id,
+        ] {
+            agent_execution_id(id)?;
+        }
+        if self.requester.call_index >= 32 {
+            return Err("agent_execution_invalid_call_index".into());
+        }
+        if self.requester.run.agent_id == self.executor.run.agent_id
+            || self.requester.run.agent_run_id == self.executor.run.agent_run_id
+            || self.requester.enrollment_id == self.executor.enrollment_id
+            || self.requester.source_task_id == self.executor.task_id
+            || self.requester.root_task_id == self.executor.task_id
+        {
+            return Err("agent_execution_worker_identity_not_independent".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_identity()?;
+        self.carrier.validate()?;
+        agent_execution_digest(&self.launch_intent_hash)?;
+        agent_execution_digest(&self.resource_manifest_hash)?;
+        agent_execution_bytes(self).map(|_| ())
+    }
+
+    /// Hash only immutable identity fields, before launch/resource/provider
+    /// fingerprints exist. This intentionally does not validate excluded hashes.
+    pub fn identity_hash(&self) -> Result<String, String> {
+        #[derive(Serialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum Carrier<'a> {
+            Job {
+                job_id: &'a str,
+                start_request_id: &'a str,
+            },
+            CodingAgent {
+                coding_agent_run_id: &'a str,
+                provider_id: &'a str,
+                provider_instance_id: &'a str,
+            },
+        }
+        #[derive(Serialize)]
+        struct Identity<'a> {
+            version: u32,
+            project: &'a str,
+            requester: &'a AgentExecutionRequester,
+            executor: &'a AgentExecutionExecutor,
+            target: &'a AgentExecutionTarget,
+            carrier: Carrier<'a>,
+        }
+        self.validate_identity()?;
+        let carrier = match &self.carrier {
+            AgentExecutionCarrier::Job {
+                job_id,
+                start_request_id,
+            } => Carrier::Job {
+                job_id,
+                start_request_id,
+            },
+            AgentExecutionCarrier::CodingAgent {
+                coding_agent_run_id,
+                provider_id,
+                provider_instance_id,
+                ..
+            } => Carrier::CodingAgent {
+                coding_agent_run_id,
+                provider_id,
+                provider_instance_id,
+            },
+        };
+        agent_execution_hash(
+            "webcodex.agent_execution.identity.v1",
+            &Identity {
+                version: self.version,
+                project: &self.project,
+                requester: &self.requester,
+                executor: &self.executor,
+                target: &self.target,
+                carrier,
+            },
+        )
+    }
+
+    pub fn binding_hash(&self) -> Result<String, String> {
+        self.validate()?;
+        agent_execution_hash("webcodex.agent_execution.binding.v1", self)
+    }
+}
+
+/// Strict isolated-process shape; the older ShellProcessArgv intentionally
+/// retains its own compatibility contract and is not changed here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionProcess {
+    pub executable: String,
+    pub args: Vec<String>,
+}
+
+fn validate_agent_execution_launch(
+    process: &AgentExecutionProcess,
+    stdin: Option<&str>,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    validate_process_argv(&ShellProcessArgv {
+        executable: process.executable.clone(),
+        args: process.args.clone(),
+    })?;
+    if stdin.is_some_and(|s| s.len() > PROCESS_STDIN_MAX_BYTES || s.contains('\0')) {
+        return Err("agent_execution_invalid_stdin".into());
+    }
+    if !(STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS..=STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS)
+        .contains(&timeout_secs)
+    {
+        return Err("agent_execution_invalid_timeout".into());
+    }
+    Ok(())
+}
+
+pub fn compute_launch_intent_hash(
+    process: &AgentExecutionProcess,
+    stdin: Option<&str>,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct Launch<'a> {
+        process: &'a AgentExecutionProcess,
+        stdin: Option<&'a str>,
+        timeout_secs: u64,
+    }
+    validate_agent_execution_launch(process, stdin, timeout_secs)?;
+    agent_execution_hash(
+        "webcodex.agent_execution.launch.v1",
+        &Launch {
+            process,
+            stdin,
+            timeout_secs,
+        },
+    )
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionStart {
+    pub binding: AgentExecutionBinding,
+    pub resource_set_id: String,
+    pub process: AgentExecutionProcess,
+    pub stdin: Option<String>,
+    pub timeout_secs: u64,
+}
+
+/// Exact safe recovery metadata. Logical project authority stays in the
+/// binding; caller sessions and private Runner paths are never inferred.
+pub fn isolated_job_context(start: &AgentExecutionStart) -> ShellJobContext {
+    ShellJobContext {
+        agent_execution: Some(start.binding.clone()),
+        document: None,
+        runtime_project_id: None,
+        workflow_session_id: None,
+        ssh_resource: None,
+        project_cwd: None,
+        cwd: None,
+        purpose: Some("operation".into()),
+        shell: Some("direct_argv".into()),
+        command_preview: "isolated agent process".into(),
+        validation_steps: Vec::new(),
+        validation: None,
+        structured_execution: Some(ShellJobStructuredExecutionMetadata {
+            execution_source: "agent_isolated_execution_v1".into(),
+            language: None,
+            script_bytes: None,
+            arg_count: start.process.args.len(),
+            stdin_present: start.stdin.is_some(),
+            validation_identity: None,
+            validation_tool: None,
+            assertion_name: None,
+        }),
+    }
+}
+
+impl std::fmt::Debug for AgentExecutionStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentExecutionStart")
+            .field("binding", &self.binding)
+            .field("resource_set_id", &self.resource_set_id)
+            .field("process", &"[REDACTED]")
+            .field("stdin_present", &self.stdin.is_some())
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+impl AgentExecutionStart {
+    pub fn validate(&self) -> Result<(), String> {
+        self.binding.validate()?;
+        agent_execution_id(&self.resource_set_id)?;
+        if !matches!(self.binding.carrier, AgentExecutionCarrier::Job { .. }) {
+            return Err("agent_execution_start_requires_job_carrier".into());
+        }
+        if self.binding.launch_intent_hash
+            != compute_launch_intent_hash(&self.process, self.stdin.as_deref(), self.timeout_secs)?
+        {
+            return Err("agent_execution_launch_hash_mismatch".into());
+        }
+        agent_execution_bytes(self).map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionCloseRef {
+    pub close_id: String,
+    pub source: AgentRunRef,
+}
+
+/// The Store authorizes source ancestry and the complete delegated set. Core
+/// cannot infer Manager -> Member -> worker ancestry from these shape fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionClose {
+    pub version: u32,
+    pub close_ref: AgentExecutionCloseRef,
+    pub target: AgentExecutionTarget,
+    pub deadline_at_ms: i64,
+    pub members: Vec<AgentExecutionBinding>,
+    pub members_sha256: String,
+}
+
+fn validate_agent_execution_members(members: &[AgentExecutionBinding]) -> Result<(), String> {
+    if members.len() > JOB_INVENTORY_MAX_JOBS {
+        return Err("agent_execution_too_many_members".into());
+    }
+    let mut jobs = HashSet::new();
+    let mut requests = HashSet::new();
+    let mut coding_runs = HashSet::new();
+    let mut previous: Option<&AgentExecutionBinding> = None;
+    for member in members {
+        member.validate()?;
+        if previous
+            .is_some_and(|old| old.requester.cli_attempt_id >= member.requester.cli_attempt_id)
+        {
+            return Err("agent_execution_members_not_strictly_ordered".into());
+        }
+        if members
+            .first()
+            .is_some_and(|first| first.project != member.project || first.target != member.target)
+        {
+            return Err("agent_execution_members_scope_mismatch".into());
+        }
+        let unique = match &member.carrier {
+            AgentExecutionCarrier::Job {
+                job_id,
+                start_request_id,
+            } => jobs.insert(job_id) && requests.insert(start_request_id),
+            AgentExecutionCarrier::CodingAgent {
+                coding_agent_run_id,
+                ..
+            } => coding_runs.insert(coding_agent_run_id),
+        };
+        if !unique {
+            return Err("agent_execution_duplicate_carrier".into());
+        }
+        previous = Some(member);
+    }
+    agent_execution_bytes(members).map(|_| ())
+}
+
+pub fn compute_members_sha256(members: &[AgentExecutionBinding]) -> Result<String, String> {
+    validate_agent_execution_members(members)?;
+    agent_execution_hash("webcodex.agent_execution.members.v1", members)
+}
+
+impl AgentExecutionClose {
+    pub fn validate(&self) -> Result<(), String> {
+        agent_execution_version(self.version)?;
+        agent_execution_id(&self.close_ref.close_id)?;
+        self.close_ref.source.validate()?;
+        self.target.validate()?;
+        if self.deadline_at_ms <= 0 {
+            return Err("agent_execution_invalid_close_deadline".into());
+        }
+        agent_execution_digest(&self.members_sha256)?;
+        if self
+            .members
+            .iter()
+            .any(|member| member.target != self.target)
+            || self.members_sha256 != compute_members_sha256(&self.members)?
+        {
+            return Err("agent_execution_close_members_mismatch".into());
+        }
+        // Empty is a valid shape only; it is not a zero-execution authorization.
+        agent_execution_bytes(self).map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentExecutionStopOutcome {
+    NeverCreated {
+        request_cancelled: bool,
+        worker_finished: bool,
+    },
+    TreeExited {
+        leader_exit_code: Option<u32>,
+        leader_handle_signaled: bool,
+        membership_complete: bool,
+        member_handles_signaled: bool,
+        worker_finished: bool,
+    },
+}
+
+impl AgentExecutionStopOutcome {
+    fn validate(&self) -> Result<(), String> {
+        let complete = match self {
+            Self::NeverCreated {
+                request_cancelled,
+                worker_finished,
+            } => *request_cancelled && *worker_finished,
+            Self::TreeExited {
+                leader_handle_signaled,
+                membership_complete,
+                member_handles_signaled,
+                worker_finished,
+                ..
+            } => {
+                *leader_handle_signaled
+                    && *membership_complete
+                    && *member_handles_signaled
+                    && *worker_finished
+            }
+        };
+        if !complete {
+            return Err("agent_execution_stop_proof_incomplete".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionStopReceipt {
+    pub binding_sha256: String,
+    pub carrier: AgentExecutionCarrier,
+    pub observation_revision: u64,
+    pub outcome: AgentExecutionStopOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionCloseReceipt {
+    pub version: u32,
+    pub close_ref: AgentExecutionCloseRef,
+    pub target: AgentExecutionTarget,
+    pub deadline_at_ms: i64,
+    pub members_sha256: String,
+    pub observation_revision: u64,
+    pub admission_closed: bool,
+    pub tombstone_persisted: bool,
+    pub receipts: Vec<AgentExecutionStopReceipt>,
+}
+
+/// Dedicated Runner transport data, never business stdout or a generic result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerAgentExecutionCloseReceiptRequest {
+    pub request_id: String,
+    pub receipt: AgentExecutionCloseReceipt,
+}
+
+/// Only the trusted Store bridge may return stored=true after its commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerAgentExecutionCloseReceiptResponse {
+    pub stored: bool,
+    pub error: Option<String>,
+}
+
+impl AgentExecutionCloseReceipt {
+    /// Exact whole-set shape matching only. Trusted transport, original lineage,
+    /// actual process observations and durable acceptance remain outside Core.
+    pub fn validate_for(&self, close: &AgentExecutionClose) -> Result<(), String> {
+        close.validate()?;
+        agent_execution_version(self.version)?;
+        if self.close_ref != close.close_ref
+            || self.target != close.target
+            || self.deadline_at_ms != close.deadline_at_ms
+            || self.members_sha256 != close.members_sha256
+            || self.observation_revision == 0
+            || !self.admission_closed
+            || !self.tombstone_persisted
+            || self.receipts.len() != close.members.len()
+        {
+            return Err("agent_execution_close_receipt_mismatch".into());
+        }
+        for (receipt, member) in self.receipts.iter().zip(&close.members) {
+            if receipt.observation_revision == 0
+                || receipt.carrier != member.carrier
+                || receipt.binding_sha256 != member.binding_hash()?
+            {
+                return Err("agent_execution_stop_receipt_mismatch".into());
+            }
+            receipt.outcome.validate()?;
+        }
+        agent_execution_bytes(self).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+#[path = "agent_execution_tests.rs"]
+pub(crate) mod agent_execution_tests;
+
 #[cfg(test)]
 mod envelope_tests {
     use super::*;
@@ -3517,6 +4247,8 @@ mod envelope_tests {
         request.kind = "start_process_job".to_string();
         request.job_id = Some("job-process-1".to_string());
         request.job_context = Some(ShellJobContext {
+            agent_execution: None,
+            document: None,
             runtime_project_id: None,
             workflow_session_id: None,
             ssh_resource: None,
@@ -3582,6 +4314,8 @@ mod envelope_tests {
         request.kind = "start_script_job".to_string();
         request.job_id = Some("job-script-1".to_string());
         request.job_context = Some(ShellJobContext {
+            agent_execution: None,
+            document: None,
             runtime_project_id: None,
             workflow_session_id: None,
             ssh_resource: None,
@@ -3650,6 +4384,7 @@ mod envelope_tests {
 
     fn sample_register() -> RunnerRegisterRequest {
         RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             client_id: "ws-1".to_string(),
@@ -3689,6 +4424,7 @@ mod envelope_tests {
                 structured_script_payload: true,
                 internal_posix_script: true,
                 structured_execution_jobs: true,
+                agent_isolated_execution_v1: false,
                 detached_process_jobs: true,
                 lsp_read_only_navigation: false,
                 lsp_call_hierarchy: false,
@@ -4046,6 +4782,8 @@ mod envelope_tests {
                 error: None,
                 command_execution_state: None,
                 context: ShellJobContext {
+                    agent_execution: None,
+                    document: None,
                     runtime_project_id: Some("agent:oe:demo".to_string()),
                     workflow_session_id: Some("wc_sess_reconcile".to_string()),
                     ssh_resource: None,
@@ -4867,6 +5605,7 @@ mod envelope_tests {
                 "structured_script_payload",
                 "internal_posix_script",
                 "structured_execution_jobs",
+                "agent_isolated_execution_v1",
                 "detached_process_jobs",
                 "lsp_read_only_navigation",
                 "lsp_call_hierarchy",
@@ -5084,6 +5823,7 @@ mod envelope_tests {
     #[tokio::test]
     async fn quic_register_codec_round_trips_current_wire_shape() {
         let payload = RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             client_id: "q-1".to_string(),

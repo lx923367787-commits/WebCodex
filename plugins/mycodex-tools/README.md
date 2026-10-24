@@ -2,13 +2,50 @@
 
 [简体中文](README.zh-CN.md)
 
-Eleven headless Office/PDF tools for the existing WebCodex Runner. This optional
-plugin uses the [native plugin gateway](../../docs/PLUGINS.md); it does not add an
-Agent framework, another MCP server, or tools to outer MCP `tools/list`.
+The current workflow adds four native MCP entry points to WebCodex:
+`present_document`, `document_edit`, `document_convert`, and `document_restore`.
+They reuse Runner Jobs, project permissions and native page-image delivery.
+See the [office workflow guide](../../docs/OFFICE_WORKFLOW.zh-CN.md), also included
+as `docs/OFFICE_WORKFLOW.zh-CN.md` inside the portable candidate.
 
-The optional **WebCodex Desktop tools-enhanced Windows installer** includes its
+Presentation returns bounded text/tables and at most two real page images.
+Edits default to replacing the original after source SHA verification, saved-file
+validation and an automatic backup. Copy mode is explicit; conversions retain
+the source. Restore checks the current SHA and creates a backup before restoring.
+Continue the existing Job after handoff; never replay an uncertain mutation.
+
+On Windows, the workflow uses local Office 2021 APIs without GUI automation and
+does not take over a user's Office instance. PDF/PNG/JPEG/WEBP use PDFium and local
+Tesseract with Simplified Chinese/English models. PDF replacement supports one
+uniquely located, complete top-level text object; overflow, complex transforms,
+clipping, transparency and alternate text are rejected. A covering bundled font
+can supply missing glyphs. Unicode form appearance generation supports plain,
+unrotated single-line text fields. PDF-to-DOCX always uses text extraction or OCR
+followed by editable text reflow. It does not invoke Word PDF import or promise
+reconstruction of complex tables and layout.
+
+Limits are 64 MiB per source, 256 MiB actual OOXML expansion and 1 MiB per native
+page image. Crop large previews instead of making them unreadable. Office itself
+is not redistributed. A candidate payload does not alter installed services.
+
+`build_local_bundle.py --help` describes a reproducible Windows build. Prepare a
+fresh runtime with `--runtime-only`, then use `--prepared-runtime` with another
+fresh output directory when source is ready. Existing targets and linked paths
+are rejected. Exact locked dependencies, embedded pywin32 DLLs, PDFium and OCR
+languages are verified. `MANIFEST.json` records source HEAD/dirty, dependency
+versions and each payload file's SHA-256, excluding the manifest itself.
+
+Configure the operator-owned `document_worker` and `document_worker_args` paths
+in `runner.example.toml`, with provider cwd matching the selected registered
+project. The following sections describe the eleven older plugin tools, which
+remain available through the [native plugin gateway](../../docs/PLUGINS.md).
+
+## Legacy eleven-tool interface
+
+The earlier **WebCodex Desktop tools-enhanced Windows installer** includes its
 own Python, pinned dependencies, and an openly licensed Chinese font. Selecting a
-local project in Desktop enables the bundled tools. Users enter their Tunnel ID
+local project in Desktop enables those legacy bundled tools; an existing install
+does not automatically contain the new four-entry workflow. Users enter their Tunnel ID
 and API Key themselves in Desktop. The manual installation instructions below
 apply to source deployments and existing Runners, not that installer.
 
@@ -48,8 +85,9 @@ not modify Runner configuration, credentials, services, or the global Python.
 dependencies, resolved on Windows x64/Python 3.11.
 
 Libraries: python-docx (MIT), openpyxl (MIT), python-pptx (MIT), pypdf (BSD-3),
-ReportLab (BSD), Pillow (MIT-CMU), defusedxml (PSF). No Office installation,
-COM, LibreOffice, OCR, OpenCV, paid API, or MCP SDK is required. System fonts
+ReportLab (BSD), Pillow (MIT-CMU), defusedxml (PSF). The legacy eleven tools do not
+require Office or OCR; the new workflow additionally uses local Office, pywin32,
+PDFium and Tesseract. Neither workflow needs a paid model API. System fonts
 are not distributed. PDF creation requires a local Chinese-capable TTF font;
 the supplied configuration points to Windows `simhei.ttf`.
 
@@ -130,8 +168,8 @@ is 1 MiB. Merely returning a path is not proof that the image reached the model.
 
 ## Bounds, failures and fidelity
 
-- Input and generated files: 32 MiB maximum; Office ZIP declared expansion:
-  128 MiB and 10,000 entries maximum. Provider timeout: 60 seconds.
+- Input and generated files: 64 MiB maximum; actual Office ZIP expansion:
+  256 MiB and 10,000 entries maximum. Legacy plugin RPC timeout: 60 seconds.
 - Arguments: 64 KiB; structured result: 128 KiB; JSON depth: 16; nodes: 4,096;
   individual strings: 64 KiB UTF-8. Oversized output is an explicit error, never
   an undocumented truncation. Select fewer cells/pages/paragraphs and use
@@ -178,5 +216,15 @@ credentials and a disposable project. It exercises MCP, the native gateway,
 document round trips and built-in execution/artifact paths. See `TEST_REPORT.md`
 for the actual results, commands, version identity and limitations.
 
-Future OCR, richer templates, rendering or additional project providers should
-be separate explicit extensions. No new generic execution interface is needed.
+OCR, page rendering and guarded in-place edits now use the four document entry
+points above. The legacy interfaces retain their original compatibility behavior.
+
+## Office diagrams and data charts
+
+The standalone `draw.py` uses the existing `run_process` and native artifact-image
+return path. It renders flowcharts, grouped architecture diagrams and XLSX/CSV
+bar, line, pie and scatter charts to PNG/SVG/PDF, preserving editable JSON and
+data snapshots in a ZIP. See the [drawing workflow](../../docs/DRAWING_WORKFLOW.zh-CN.md).
+`build_drawing_addon.py --help` builds an additive payload in a new directory;
+its private `drawing/vendor` dependencies do not replace Office packages. This
+adds no MCP tools and never saves the source workbook.

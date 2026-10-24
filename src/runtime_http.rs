@@ -231,6 +231,13 @@ pub async fn tools_list(req: &mut Request, depot: &mut Depot, res: &mut Response
         }
     };
     let mut payload = runtime.list_tools_payload(options);
+    if depot
+        .obtain::<crate::auth::AuthContext>()
+        .ok()
+        .is_some_and(|auth| auth.agent_run.is_some())
+    {
+        payload = crate::agent_isolation::tool_specs();
+    }
     payload["success"] = json!(true);
     res.render(Json(payload));
 }
@@ -239,6 +246,13 @@ pub async fn tools_list(req: &mut Request, depot: &mut Depot, res: &mut Response
 pub async fn tools_call(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let mut guard =
         ToolRequestLifecycle::new("api", new_trace_id(), "-", "POST /api/tools/call", None);
+    if depot
+        .obtain::<crate::auth::AuthContext>()
+        .ok()
+        .is_some_and(|a| a.agent_run.is_some())
+    {
+        guard.suppress_private_payloads();
+    }
     guard.received();
 
     let audit = ActionAudit::start(req, depot, "/api/tools/call", "callTool");
@@ -256,9 +270,9 @@ pub async fn tools_call(req: &mut Request, depot: &mut Depot, res: &mut Response
         guard.handler_returned(500, estimated, Some(false), None, "error_runtime_missing");
         return;
     };
-    // Parse the body as a raw JSON value so we can apply the params/arguments
-    // precedence rule explicitly and emit field-aware errors that include the
-    // tool name. We never echo the raw body back, so tokens/headers/env never
+    // Parse the body as a raw JSON value so we can reject mixed argument
+    // envelopes and emit field-aware errors before dispatch. We never echo the
+    // raw body back, so tokens/headers/env never
     // leak through error messages.
     let body: Value = match req.parse_json().await {
         Ok(body) => body,
@@ -500,7 +514,7 @@ fn tool_call_trace_effective_arguments(tool: &str, params: &Value) -> Value {
 /// - `{"tool":"git_diff_summary","project":"agent:c:p"}`
 /// - `{"tool":"git_status","project":"agent:c:p","recording_session_id":"wc_sess_..."}`
 ///
-/// Non-null `params` take precedence over flattened GPT Action fields. A null
+/// Non-null `params` cannot be mixed with flattened GPT Action fields. A null
 /// `params` wrapper is treated as absent. When `params` is absent/null, every
 /// top-level field except `tool` and reserved metadata like
 /// `recording_session_id` is collected into the params object for GPT Action
@@ -529,14 +543,53 @@ fn extract_tool_call(body: &Value) -> Result<(String, Value), String> {
     if obj.contains_key("arguments") {
         return Err("field 'arguments' is no longer supported; use 'params' or flattened top-level tool arguments".to_string());
     }
-    // Non-null params take precedence over flattened GPT Action fields. Some
-    // Action runtimes emit optional object properties as explicit nulls, which
-    // must not erase valid flattened tool arguments.
+    if obj
+        .get(TOOL_CALL_RECORDING_SESSION_ID_FIELD)
+        .is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|session_id| !session_id.trim().is_empty())
+        })
+    {
+        return Err("field 'recording_session_id' must be a non-empty string".to_string());
+    }
+    // Some Action runtimes emit optional object properties as explicit nulls;
+    // a null params wrapper must not erase valid flattened tool arguments.
     let params = if let Some(params) = obj
         .get(TOOL_CALL_PARAMS_FIELD)
         .filter(|params| !params.is_null())
     {
-        params.clone()
+        for field in obj.keys() {
+            if !TOOL_CALL_WRAPPER_FIELDS.contains(&field.as_str())
+                && field != TOOL_CALL_RECORDING_SESSION_ID_FIELD
+                && field != webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD
+                && field != webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD
+            {
+                return Err(format!(
+                    "field '{field}' cannot be supplied outside non-null 'params'; put all tool arguments inside 'params' or use only flattened arguments"
+                ));
+            }
+        }
+        let mut params = params.clone();
+        for field in [
+            webcodex_tool_contracts::TOOL_CALL_GOAL_CONTEXT_FIELD,
+            webcodex_tool_contracts::TOOL_CALL_CONTEXT_EPOCH_FIELD,
+        ] {
+            if let Some(value) = obj.get(field) {
+                let params_object = params.as_object_mut().ok_or_else(|| {
+                    format!("field 'params' must be an object when {field} is supplied")
+                })?;
+                if params_object
+                    .insert(field.to_string(), value.clone())
+                    .is_some()
+                {
+                    return Err(format!(
+                        "{field} was supplied both outside and inside 'params'"
+                    ));
+                }
+            }
+        }
+        params
     } else {
         let mut flattened = serde_json::Map::new();
         for (key, value) in obj {

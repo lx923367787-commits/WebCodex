@@ -1,3 +1,5 @@
+pub(crate) mod dispatch;
+
 use super::config::RunnerPolicy;
 use super::output::CommandResult;
 use super::shell::cwd_allowed;

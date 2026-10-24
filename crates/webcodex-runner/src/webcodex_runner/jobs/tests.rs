@@ -369,6 +369,8 @@ fn detached_job_request(
         client_id: "detached-agent".to_string(),
         runner_instance_id: "old-runner-instance".to_string(),
         context: ShellJobContext {
+            agent_execution: None,
+            document: None,
             runtime_project_id: Some("agent:detached-agent:project".to_string()),
             workflow_session_id: None,
             ssh_resource: None,
@@ -398,7 +400,8 @@ fn detached_job_request(
                     .into_owned(),
                 args: vec![
                     "--exact".to_string(),
-                    "job_manager_tests::detached_job_payload_subprocess_entrypoint".to_string(),
+                    "webcodex_runner::jobs::tests::detached_job_payload_subprocess_entrypoint"
+                        .to_string(),
                     "--nocapture".to_string(),
                 ],
             },
@@ -740,7 +743,11 @@ fn job_manager_stop_terminates_the_process_group() {
         .current_dir(temp.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let child = Arc::new(Mutex::new(ManagedChild::spawn(&mut command).unwrap()));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(
+            ManagedChild::spawn(&mut command).unwrap(),
+        ),
+    ));
     let leader_pid = child.lock().unwrap().id();
     let pid_file = temp.path().join("descendant.pid");
     let descendant_pid = wait_for_pid_marker(
@@ -795,7 +802,11 @@ fn job_shutdown_reaps_a_sigterm_responsive_child() {
         .current_dir(temp.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let child = Arc::new(Mutex::new(ManagedChild::spawn(&mut command).unwrap()));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(
+            ManagedChild::spawn(&mut command).unwrap(),
+        ),
+    ));
     let leader_pid = child.lock().unwrap().id();
     assert!(wait_until(Duration::from_secs(5), || ready.exists()));
     let manager = JobManager::new(1);
@@ -835,7 +846,11 @@ fn job_shutdown_escalates_ignored_sigterm_for_parent_and_descendant() {
         .current_dir(temp.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let child = Arc::new(Mutex::new(ManagedChild::spawn(&mut command).unwrap()));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(
+            ManagedChild::spawn(&mut command).unwrap(),
+        ),
+    ));
     let leader_pid = child.lock().unwrap().id();
     let pid_file = temp.path().join("descendant.pid");
     let descendant_pid = wait_for_pid_marker(
@@ -1842,6 +1857,106 @@ fn phase_e2_stopped_queued_job_never_executes_after_slot_release() {
     assert!(lock_unpoison(&manager.queued)
         .iter()
         .all(|entry| entry.operation.job_id() != stopped.job_id));
+}
+
+#[test]
+#[ignore = "requires explicit WEBCODEX_TEST_CARGO_HOME, WEBCODEX_TEST_RUSTUP_HOME and RUSTUP_TOOLCHAIN; runs an offline Cargo check"]
+fn runner_toolchain_real_process_validation_uses_explicit_rust_toolchain() {
+    let cargo_home = PathBuf::from(
+        std::env::var_os("WEBCODEX_TEST_CARGO_HOME")
+            .expect("set WEBCODEX_TEST_CARGO_HOME to an installed Cargo home"),
+    );
+    let rustup_home = PathBuf::from(
+        std::env::var_os("WEBCODEX_TEST_RUSTUP_HOME")
+            .expect("set WEBCODEX_TEST_RUSTUP_HOME to an installed Rustup home"),
+    );
+    let toolchain = std::env::var("RUSTUP_TOOLCHAIN")
+        .expect("set RUSTUP_TOOLCHAIN to the recorded installed toolchain");
+    assert!(!toolchain.trim().is_empty());
+    assert!(cargo_home.is_absolute() && rustup_home.is_absolute());
+    let cargo_bin = cargo_home.join("bin");
+    for program in ["cargo", "rustc"] {
+        assert!(cargo_bin
+            .join(format!("{program}{}", std::env::consts::EXE_SUFFIX))
+            .is_file());
+    }
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = 'runner-toolchain-fixture'\nversion = '0.0.0'\nedition = '2021'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    let quote_path = |path: &Path| toml::Value::String(path.to_str().unwrap().to_string());
+    let config: toml::Value = toml::from_str(&format!(
+        "[shell]\nenvironment_mode = 'isolated'\npath_prepend = [{}]\n\
+         [shell.env]\nCARGO_HOME = {}\nRUSTUP_HOME = {}\nRUSTUP_TOOLCHAIN = {}\nCARGO_NET_OFFLINE = 'true'\n",
+        quote_path(&cargo_bin),
+        quote_path(&cargo_home),
+        quote_path(&rustup_home),
+        toml::Value::String(toolchain),
+    ))
+    .unwrap();
+    let shell: ShellConfig = config.get("shell").unwrap().clone().try_into().unwrap();
+    let steps = vec![ShellJobValidationStep {
+        name: "check".to_string(),
+        program: "cargo".to_string(),
+        args: vec!["check".to_string(), "--all-targets".to_string()],
+        env: Vec::new(),
+    }];
+    let (sink, mut rx) = structured_test_sink("toolchain-agent", "toolchain-instance");
+    let manager = JobManager::new(1);
+    manager.enqueue(
+        sink,
+        PendingJobStart::from_wire(
+            1,
+            RunnerPolicy {
+                allow_cwd_anywhere: true,
+                ..RunnerPolicy::default()
+            },
+            shell,
+            SshConfig::default(),
+            temp.path().join("project-registry"),
+            serde_json::from_value(json!({
+                "request_id": "request-explicit-toolchain",
+                "client_id": "toolchain-agent",
+                "kind": "start_validation_job",
+                "job_id": "explicit-toolchain",
+                "cwd": temp.path(),
+                "command": serde_json::to_string(&steps).unwrap(),
+                "timeout_secs": 60,
+                "requested_by": "test",
+                "created_at": chrono::Utc::now().timestamp(),
+                "job_context": test_job_context(temp.path(), vec!["check".to_string()]),
+            }))
+            .unwrap(),
+        ),
+    );
+    let updates = collect_job_updates(&mut rx, Duration::from_secs(75));
+    wait_for_job_workers(&manager);
+    let terminal = updates.iter().find(|update| update.finished).unwrap();
+    assert_eq!(terminal.status, "completed", "{terminal:?}");
+    assert_eq!(terminal.exit_code, Some(0), "{terminal:?}");
+    assert_eq!(
+        terminal.validation_progress,
+        Some(ShellJobValidationProgress {
+            completed: 1,
+            current_step: None,
+            failed_step: None,
+        })
+    );
+    assert!(std::fs::read_dir(temp.path().join("target/debug/deps"))
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "rmeta")));
 }
 
 #[cfg(unix)]
@@ -4028,7 +4143,7 @@ fn python_module_probe_reports_tool_unavailable_without_running_recipe() {
 /// Platform-native liveness probe for job descendants, so the tree tests never
 /// shell out to `tasklist`/`ps`/PowerShell.
 #[cfg(windows)]
-pub(super) fn process_running(pid: u32) -> bool {
+pub(crate) fn process_running(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -4048,7 +4163,7 @@ pub(super) fn process_running(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn process_running(pid: u32) -> bool {
+pub(crate) fn process_running(pid: u32) -> bool {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
     let size = std::mem::size_of::<libc::proc_bsdinfo>();
     let bytes = unsafe {
@@ -4068,14 +4183,14 @@ pub(super) fn process_running(pid: u32) -> bool {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-pub(super) fn process_running(pid: u32) -> bool {
+pub(crate) fn process_running(pid: u32) -> bool {
     // SAFETY: signal 0 is an existence probe; the pid comes from our own
     // helper subprocess.
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn process_running(pid: u32) -> bool {
+pub(crate) fn process_running(pid: u32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
     };
@@ -4302,7 +4417,7 @@ fn extract_grandchild_pid(text: &str) -> Option<u32> {
 fn insert_running_job(
     manager: &JobManager,
     job_id: &str,
-    child: Option<Arc<Mutex<ManagedChild>>>,
+    child: Option<Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>>,
 ) -> Arc<AtomicBool> {
     let stop_requested = Arc::new(AtomicBool::new(false));
     lock_unpoison(&manager.jobs).insert(
@@ -4353,7 +4468,9 @@ fn seed_running_job_tree(
     );
     let parent_pid = managed.id();
     let grandchild_pid = read_grandchild_pid(&output);
-    let child = Arc::new(Mutex::new(managed));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(managed),
+    ));
     let stop_requested = insert_running_job(manager, job_id, Some(child));
     (
         RunningJobTreeFixture {
@@ -4418,7 +4535,9 @@ fn runner_real_process_job_cleanup_after_parent_exit_terminates_descendant_and_r
         OutputTextSource::LocalProcess,
     )];
     drop(tx);
-    let child = Arc::new(Mutex::new(managed));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(managed),
+    ));
 
     // The direct child exits on its own right after spawning the grandchild;
     // collect its pid line from the production reader's chunk stream.
@@ -4545,7 +4664,9 @@ fn runner_real_process_job_stop_twice_is_idempotent() {
 fn runner_real_process_job_stop_after_natural_exit_does_not_panic() {
     let (managed, _rx) = spawn_helper_raw("sleep", &["0", "0"]);
     let parent_pid = managed.id();
-    let child = Arc::new(Mutex::new(managed));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(managed),
+    ));
     assert!(
         wait_until(Duration::from_secs(30), || lock_unpoison(&child)
             .try_wait()
@@ -4592,7 +4713,9 @@ fn runner_real_process_last_job_manager_owner_drop_terminates_running_tree_with_
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_cleanup_managed_tree_on_exited_tree_does_not_panic() {
     let (managed, _rx) = spawn_helper_raw("sleep", &["0", "0"]);
-    let child = Arc::new(Mutex::new(managed));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(managed),
+    ));
     assert!(wait_until(Duration::from_secs(30), || lock_unpoison(
         &child
     )

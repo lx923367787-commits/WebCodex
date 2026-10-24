@@ -7,6 +7,8 @@ __pycache__/
 
 # Local runtime data (SQLite DB and durable runtime state)
 data*
+# Agent private workspaces and control-owned runtime records must never enter Git.
+agent-runtime/
 
 # Local Codex CLI workspace
 .codex

@@ -268,6 +268,7 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // capability and must fail closed across mixed-version rollout.
             internal_posix_script: false,
             structured_execution_jobs: true,
+            agent_isolated_execution_v1: false,
             // Detached process authority is advertised only by a running binary
             // after its durable ownership-transfer backend is installed.
             detached_process_jobs: false,

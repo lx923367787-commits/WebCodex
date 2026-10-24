@@ -3,6 +3,7 @@ use super::*;
 const SEARCH_PROJECT_TEXT_EXCLUDES: &[&str] = &[
     "--exclude-dir=.git",
     "--exclude-dir=.claude",
+    "--exclude-dir=.webcodex-office",
     "--exclude-dir=target",
     "--exclude-dir=node_modules",
     "--exclude-dir=.venv",
@@ -34,6 +35,8 @@ const SEARCH_PROJECT_TEXT_RG_EXCLUDE_GLOBS: &[&str] = &[
     "!**/.git/**",
     "!.claude/**",
     "!**/.claude/**",
+    "!.webcodex-office/**",
+    "!**/.webcodex-office/**",
     "!target/**",
     "!**/target/**",
     "!node_modules/**",
@@ -1581,7 +1584,7 @@ impl ToolRuntime {
             Ok(options) => options,
             Err(error) => return error.into_tool_result(),
         };
-        let proj = match self.resolve_project(&project).await {
+        let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };

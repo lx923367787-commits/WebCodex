@@ -95,6 +95,24 @@ export interface ProjectSelection {
   runtime_project_id?: string | null;
 }
 
+export interface RegisteredProject {
+  id: string;
+  name: string;
+  path: string;
+  revision: string;
+  enabled: boolean;
+  connected: boolean;
+  agent_status: string;
+  active_jobs: number;
+}
+
+export interface ProjectRegistrySnapshot {
+  projects: RegisteredProject[];
+  can_manage: boolean;
+}
+
+export type ProjectAction = "enable" | "disable" | "unregister";
+
 export interface BinaryInfo {
   directory: string;
   version: string;
@@ -135,6 +153,7 @@ export interface TunnelProxySnapshot {
 export type DesktopOperationKind =
   | "local_setup"
   | "local_project_activate"
+  | "project_management"
   | "remote_setup"
   | "quick_share_start"
   | "quick_share_stop"
@@ -230,4 +249,3 @@ export interface ActivityEntry {
     | "operation_failed";
   message: string;
 }
-

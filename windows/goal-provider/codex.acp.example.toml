@@ -1,0 +1,20 @@
+# Replace C:/WebCodex and the Node executable path for the destination host.
+# Merge this agent into the existing [acp] configuration; do not duplicate id.
+[[acp.agents]]
+id = "codex"
+name = "Codex goal executor"
+executable = 'C:/Program Files/nodejs/node.exe'
+args = ['C:/WebCodex/windows/goal-provider/start.mjs']
+allowed_config_options = ["reasoning_effort"]
+
+[acp.agents.env_from_env]
+PATH = "PATH"
+PATHEXT = "PATHEXT"
+SystemRoot = "SystemRoot"
+WINDIR = "WINDIR"
+ComSpec = "ComSpec"
+TEMP = "TEMP"
+TMP = "TMP"
+USERPROFILE = "USERPROFILE"
+APPDATA = "APPDATA"
+LOCALAPPDATA = "LOCALAPPDATA"

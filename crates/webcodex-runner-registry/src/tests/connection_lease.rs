@@ -13,6 +13,7 @@ async fn register_with_connection(
     registry
         .register_streaming_session(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -364,6 +365,7 @@ async fn stale_connection_runtime_metadata_does_not_overwrite_current() {
         registry
             .register_streaming_session(
                 RunnerRegisterRequest {
+                    agent_execution_resources: Vec::new(),
                     process_started_at: None,
                     build: None,
                     job_concurrency_limit: None,

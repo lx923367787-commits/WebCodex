@@ -1,23 +1,21 @@
-use super::activity::{ActivityRecorder, NoopActivityRecorder};
-use super::checkpoint;
-use super::observations::RuntimeObservations;
+use super::activity::ActivityRecorder;
+#[cfg(test)]
 use super::permissions::PermissionEvaluator;
 use super::runtime_info::RuntimeInfo;
 use super::sessions;
-use super::SessionShellRegistry;
 use crate::runner_http::RunnerRegistry;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
-use tokio::sync::Mutex;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-fn new_git_diff_hunks_continuation_mac_key() -> Arc<[u8; 32]> {
+pub(super) fn new_git_diff_hunks_continuation_mac_key() -> Arc<[u8; 32]> {
     let mut hasher = Sha256::new();
     hasher.update(b"webcodex.git-diff-hunks.runtime-mac-key.v1\0");
     hasher.update(Uuid::new_v4().as_bytes());
@@ -101,122 +99,48 @@ impl ValidationTerminalReconciliationTestHook {
     }
 }
 
+/// Composition root and compatibility facade for the canonical Tool Kernel.
+/// Domain services own their dependencies; public registry/info fields retain
+/// their existing API and have no duplicate authoritative copy.
 #[derive(Clone)]
 pub struct ToolRuntime {
     pub runner_registry: Arc<RunnerRegistry>,
-    pub(crate) mcp_gateway: Arc<crate::mcp_gateway::McpGatewayRuntime>,
-    pub(crate) plugin_gateway: Arc<crate::plugin_gateway::PluginGatewayRuntime>,
-    pub(crate) ssh_resource_gateway: Arc<crate::ssh_resource_gateway::SshResourceGatewayRuntime>,
-    pub(crate) coding_agent_runs: Arc<super::coding_agent::CodingAgentServerState>,
     pub runtime_info: Arc<RuntimeInfo>,
-    runtime_exposure: crate::model_surface::RuntimeExposure,
-    pub(crate) checkpoint_store: checkpoint::CheckpointStore,
     pub(crate) sessions: sessions::SessionStore,
-    pub(crate) session_shells: SessionShellRegistry,
-    pub(crate) semantic_navigation_probe_timeout: Duration,
-    pub(crate) repository_overview_probe_timeout: Duration,
-    /// One deadline shared by every item in a `read_files` batch.
-    pub(crate) read_files_deadline: Duration,
-    /// One deadline shared by every query in a `search_project_texts` batch.
-    pub(crate) search_project_texts_deadline: Duration,
-    /// Internal synchronous wait window for a read-only structured validation
-    /// before it promotes to a Job. Defaults to `SYNC_VALIDATION_WAIT_SECS`;
-    /// tests shrink it so the handoff path can be exercised without sleeping.
-    pub(crate) validation_sync_wait: Duration,
-    /// Orders authoritative terminal-Job snapshot acquisition through Session
-    /// marker/evidence materialization. Marker eviction interprets absence from
-    /// that snapshot as retention exit, so a later snapshot must never commit
-    /// before an earlier snapshot has finished using its eviction authority.
-    /// Cloned runtimes share this mutex; restart drops all in-flight snapshots.
-    pub(crate) validation_terminal_reconciliation: Arc<Mutex<()>>,
-    #[cfg(test)]
-    pub(crate) validation_terminal_reconciliation_test_hook:
-        Arc<ValidationTerminalReconciliationTestHook>,
-    /// Runtime cap for the model-requested synchronous grace before typed
-    /// process/script Job handoff. Production permits the public maximum;
-    /// each call's StructuredExecutionBudget selects the actual wait. Tests
-    /// shrink this cap to exercise handoff without sleeping.
-    pub(crate) structured_execution_sync_wait: Duration,
-    /// Per-runtime secret used only to authenticate opaque committed-range
-    /// git_diff_hunks continuation state. Clones share the same key; a runtime
-    /// restart intentionally invalidates old committed continuations fail-closed.
-    pub(crate) git_diff_hunks_continuation_mac_key: Arc<[u8; 32]>,
-    /// Authoritative permission evaluator for this runtime instance.
-    /// Resolved once at construction (`WEBCODEX_AUTHORITY_MODE`); dispatch
-    /// evaluates once per tool request before mutation.
-    pub(crate) permission_evaluator: PermissionEvaluator,
-    /// Sink for the workspace activity ledger (mutating tool executions).
-    /// No-op unless the host injects a durable recorder.
-    pub(crate) activity: Arc<dyn ActivityRecorder>,
-    /// Cross-surface connection observations (connector endpoint activity,
-    /// last successful meaningful tool call). Shared with the connector
-    /// runtime; never stores payloads or secrets.
-    pub(crate) observations: Arc<RuntimeObservations>,
-    /// Process-local payload-free view of currently in-flight MCP Window
-    /// requests. It is observability only and intentionally resets on restart.
-    pub(crate) window_activity: Arc<super::window_activity::WindowActivityRegistry>,
-    /// Fail-open metrics projection. This consumes canonical runtime/transport
-    /// facts and has no authority over execution or persistence.
-    pub(crate) metrics: Arc<dyn super::runtime_metrics::RuntimeMetrics>,
-    /// Durable ActionAudit-backed Window activity query handle. This shares the
-    /// normal Server SQLite database and never becomes an authorization store.
-    pub(crate) window_activity_db: Option<Arc<crate::Database>>,
-    /// Optional Control-owned durable project Memory store. It is injected by
-    /// the server from the existing webcodex.db handle; Runner-native project
-    /// filesystems never own Memory v1 persistence.
-    pub(crate) memory_db: Option<Arc<crate::Database>>,
-    /// Optional Control-owned durable Agent and Conversation store. It shares
-    /// the Server SQLite handle with other durable domains but owns independent tables.
-    pub(crate) communication_db: Option<Arc<crate::Database>>,
-    /// Optional process-local Host continuation registry/controller. It is
-    /// created only when the durable communication database is injected and is
-    /// intentionally empty again after process restart.
-    pub(crate) agent_continuations: Option<crate::agent_wake::AgentContinuationController>,
+    pub(crate) execution_state: super::services::ExecutionState,
+    pub(crate) goals: super::services::GoalService,
+    pub(crate) gateways: super::services::GatewayService,
+    pub(crate) config: super::services::RuntimeConfig,
+    pub(crate) observation: super::services::ObservationService,
+    pub(crate) memory: super::services::MemoryService,
+    pub(crate) communication: super::services::CommunicationService,
+    pub(crate) validation: super::services::ValidationService,
+    pub(crate) agent_team_assets: Option<Arc<dyn crate::agent_team_execution::AgentTeamAssets>>,
 }
 
 impl ToolRuntime {
+    pub(crate) fn agent_team_watchers(
+        &self,
+    ) -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+        self.execution_state.team_cli_watchers.clone()
+    }
+    pub(crate) fn isolation_database(&self) -> Option<&crate::Database> {
+        self.goals.store()
+    }
     pub fn new(runner_registry: Arc<RunnerRegistry>, runtime_info: Arc<RuntimeInfo>) -> Self {
         Self {
             runner_registry,
-            mcp_gateway: Arc::new(crate::mcp_gateway::McpGatewayRuntime::default()),
-            plugin_gateway: Arc::new(crate::plugin_gateway::PluginGatewayRuntime::default()),
-            ssh_resource_gateway: Arc::new(
-                crate::ssh_resource_gateway::SshResourceGatewayRuntime::default(),
-            ),
-            coding_agent_runs: Arc::new(super::coding_agent::CodingAgentServerState::default()),
             runtime_info,
-            runtime_exposure: crate::model_surface::RuntimeExposure::Runtime(
-                crate::model_surface::ModelSurface::LocalCoding,
-            ),
-            checkpoint_store: checkpoint::CheckpointStore::default(),
             sessions: sessions::SessionStore::default(),
-            session_shells: SessionShellRegistry::default(),
-            semantic_navigation_probe_timeout:
-                super::semantic_navigation::DEFAULT_SEMANTIC_NAVIGATION_PROBE_TIMEOUT,
-            repository_overview_probe_timeout:
-                super::coding_task::DEFAULT_REPOSITORY_OVERVIEW_PROBE_TIMEOUT,
-            read_files_deadline: super::read_files::DEFAULT_READ_FILES_DEADLINE,
-            search_project_texts_deadline:
-                super::search_project_texts::DEFAULT_SEARCH_PROJECT_TEXTS_DEADLINE,
-            validation_sync_wait: Duration::from_secs(super::helpers::SYNC_VALIDATION_WAIT_SECS),
-            validation_terminal_reconciliation: Arc::new(Mutex::new(())),
-            #[cfg(test)]
-            validation_terminal_reconciliation_test_hook: Arc::new(
-                ValidationTerminalReconciliationTestHook::default(),
-            ),
-            structured_execution_sync_wait: Duration::from_secs(
-                super::structured_execution::STRUCTURED_EXECUTION_SYNC_WAIT_MAX_SECS,
-            ),
-            git_diff_hunks_continuation_mac_key: new_git_diff_hunks_continuation_mac_key(),
-            permission_evaluator: PermissionEvaluator::from_env(),
-            activity: Arc::new(NoopActivityRecorder),
-            observations: Arc::new(RuntimeObservations::default()),
-            window_activity: Arc::new(super::window_activity::WindowActivityRegistry::default()),
-            metrics: Arc::new(super::runtime_metrics::TracingRuntimeMetrics),
-            window_activity_db: None,
-            memory_db: None,
-            communication_db: None,
-            agent_continuations: None,
+            execution_state: super::services::ExecutionState::default(),
+            goals: super::services::GoalService::default(),
+            gateways: super::services::GatewayService::default(),
+            config: super::services::RuntimeConfig::default(),
+            observation: super::services::ObservationService::default(),
+            memory: super::services::MemoryService::default(),
+            communication: super::services::CommunicationService::default(),
+            validation: super::services::ValidationService::default(),
+            agent_team_assets: None,
         }
     }
 
@@ -224,7 +148,7 @@ impl ToolRuntime {
         mut self,
         runtime_exposure: crate::model_surface::RuntimeExposure,
     ) -> Self {
-        self.runtime_exposure = runtime_exposure;
+        self.config.runtime_exposure = runtime_exposure;
         self
     }
 
@@ -239,40 +163,44 @@ impl ToolRuntime {
     }
 
     pub(crate) fn runtime_exposure(&self) -> crate::model_surface::RuntimeExposure {
-        self.runtime_exposure
+        self.config.runtime_exposure
     }
 
     pub(crate) fn model_surface(&self) -> Option<crate::model_surface::ModelSurface> {
-        self.runtime_exposure.model_surface()
+        self.config.runtime_exposure.model_surface()
     }
 
     /// Attach a durable workspace-activity recorder (server wiring).
     pub fn with_activity_recorder(mut self, recorder: Arc<dyn ActivityRecorder>) -> Self {
-        self.activity = recorder;
+        self.observation.activity = recorder;
         self
     }
 
     pub(crate) fn with_window_activity_database(mut self, db: Arc<crate::Database>) -> Self {
-        self.window_activity_db = Some(db);
+        self.observation.window_activity_db = Some(db);
         self
     }
 
     pub(crate) fn window_activity_registry(
         &self,
     ) -> Arc<super::window_activity::WindowActivityRegistry> {
-        self.window_activity.clone()
+        self.observation.window_activity.clone()
     }
 
     pub(crate) fn with_memory_database(mut self, db: Arc<crate::Database>) -> Self {
-        self.memory_db = Some(db);
+        self.memory.memory_db = Some(db);
         self
     }
 
     pub(crate) fn with_communication_database(mut self, db: Arc<crate::Database>) -> Self {
-        self.agent_continuations = Some(crate::agent_wake::AgentContinuationController::new(
-            db.clone(),
+        self.agent_team_assets = Some(Arc::new(
+            crate::agent_team_catalog::RunnerAgentTeamAssets::new(
+                self.runner_registry.clone(),
+                db.clone(),
+            ),
         ));
-        self.communication_db = Some(db);
+        self.goals.attach_database(db.clone());
+        self.communication.attach_database(db);
         self
     }
 
@@ -320,44 +248,81 @@ impl ToolRuntime {
 
     #[cfg(test)]
     pub(crate) fn with_semantic_navigation_probe_timeout(mut self, timeout: Duration) -> Self {
-        self.semantic_navigation_probe_timeout = timeout;
+        self.config.semantic_navigation_probe_timeout = timeout;
         self
     }
 
     #[cfg(test)]
     pub(crate) fn with_repository_overview_probe_timeout(mut self, timeout: Duration) -> Self {
-        self.repository_overview_probe_timeout = timeout;
+        self.config.repository_overview_probe_timeout = timeout;
         self
     }
 
     #[cfg(test)]
     pub(crate) fn with_read_files_deadline(mut self, deadline: Duration) -> Self {
-        self.read_files_deadline = deadline;
+        self.config.read_files_deadline = deadline;
         self
     }
 
     #[cfg(test)]
     pub(crate) fn with_search_project_texts_deadline(mut self, deadline: Duration) -> Self {
-        self.search_project_texts_deadline = deadline;
+        self.config.search_project_texts_deadline = deadline;
         self
     }
 
     #[cfg(test)]
     pub(crate) fn with_validation_sync_wait(mut self, wait: Duration) -> Self {
-        self.validation_sync_wait = wait;
+        self.config.validation_sync_wait = wait;
         self
     }
 
     #[cfg(test)]
     pub(crate) fn with_structured_execution_sync_wait(mut self, wait: Duration) -> Self {
-        self.structured_execution_sync_wait = wait;
+        self.config.structured_execution_sync_wait = wait;
         self
     }
 
     /// Replace the permission evaluator (tests: mode matrix / single-eval counters).
     #[cfg(test)]
     pub(crate) fn with_permission_evaluator(mut self, evaluator: PermissionEvaluator) -> Self {
-        self.permission_evaluator = evaluator;
+        self.config.permission_evaluator = evaluator;
         self
+    }
+}
+
+impl ToolRuntime {
+    pub(crate) fn execution(&self) -> super::services::ExecutionService<'_> {
+        super::services::ExecutionService {
+            runner_registry: &self.runner_registry,
+        }
+    }
+
+    pub(crate) async fn memory_scope_list(
+        &self,
+        auth: Option<&crate::auth::AuthContext>,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> super::ToolResult {
+        self.memory
+            .memory_scope_list(&self.runner_registry, auth, offset, limit)
+            .await
+    }
+
+    pub(crate) async fn memory_scope_purge(
+        &self,
+        auth: Option<&crate::auth::AuthContext>,
+        memory_scope_id: String,
+        expected_catalog_revision: String,
+        confirm: bool,
+    ) -> super::ToolResult {
+        self.memory
+            .memory_scope_purge(
+                &self.runner_registry,
+                auth,
+                memory_scope_id,
+                expected_catalog_revision,
+                confirm,
+            )
+            .await
     }
 }
