@@ -11,9 +11,6 @@ WebCodex Desktop/
   mycodex-tools/                    # Office/PDF/OCR/绘图完整独立运行时
   provider-python/                  # 聊天工具的独立 Python 3.11 及锁定依赖
   node/                            # Node 可执行文件及许可证
-  cli/codebuddy/                   # CodeBuddy 2.162.0 及 vendor
-  cli/codex/                       # 全局 Codex CLI 0.159.2 完整 npm 包
-  cli/agy/                         # Agy 1.4.5
   tunnel/tunnel-client.exe          # Tunnel 客户端 0.0.12，不含 Tunnel ID
   chat-handoff/extension-runtime/node_modules/
   chat-agents/
@@ -47,9 +44,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$app\configure-providers.ps
 pwsh -File "$app\launch-portable.ps1"
 ```
 
-启动脚本只向新客户端进程传入随包 Node、CodeBuddy、Codex、Agy 的路径；相应文件存在时设置 `WEBCODEX_NODE`、`WEBCODEX_CODEBUDDY`、`WEBCODEX_CODEX`、`WEBCODEX_TUNNEL_CLIENT_BIN`，不修改系统 PATH。若直接启动 `WebCodex.exe`，应自行保证 Node/CLI 已在 PATH，或在启动该进程前显式设置对应路径。Desktop 的部分工具发现逻辑优先查当前用户的安装目录；目标机若另装了不同版本，应在该功能的配置中选择期望的可执行文件。脚本不会写入 Runner 配置或安装系统服务。
+启动脚本优先选择包内 `node/node.exe`；源码构建目录没有随包 Node 时，只使用 PATH 中第一个真实的 `node.exe`。两处都没有 Node 或缺少 `WebCodex.exe` 时会报错并停止。脚本只向新客户端传入所选 Node 的 `WEBCODEX_NODE` 和 PATH，以及存在时的 `WEBCODEX_TUNNEL_CLIENT_BIN`，不修改系统 PATH。用户自行安装的 CLI 仍通过原有环境和产品配置发现，启动器不指定或附加独立 CLI 路径。Desktop 的部分工具发现逻辑优先查当前用户的安装目录；目标机若另装了不同版本，应在该功能的配置中选择期望的可执行文件。脚本不会写入 Runner 配置或安装系统服务。
 
-离线包保留两份用途不同的 Codex：全局 CLI 为 `0.159.2`，Goal ACP 的锁定依赖内置 `0.153.4`，不能为了去重而用一份覆盖另一份。原电脑未安装 Gemini CLI，本包没有宣称包含 Gemini CLI；如果以后启用该 provider，另行安装并登录即可。随包 CLI 不含原电脑账号和认证资料，首次模型调用需要在新机登录。
+离线包保留 Goal ACP 锁定依赖内置的 Codex `0.153.4`，它是适配器运行依赖。其他独立 CLI 由用户按需另行安装并登录；包中不携带这些软件或原电脑账号和认证资料。首次模型调用需要在新机完成相应登录。
 
 ## 从源码重新准备聊天依赖
 

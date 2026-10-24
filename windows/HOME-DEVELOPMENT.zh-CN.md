@@ -2,6 +2,12 @@
 
 本次交付包含两部分：`windows/current-20261024` 分支保存全部项目源码和自有开发工具；`windows-home-20261025` GitHub 草稿附件保存当前 Windows 客户端与运行依赖。草稿附件需要登录仓库所有者 `lx923367787-commits` 才能访问。保持草稿是为了不触发现有 `release: published` 的 Linux 镜像发布流程；这不是一个跨平台版本发布。
 
+## 已纠正的打包范围
+
+旧迁移包误收了 WorkBuddy/CodeBuddy、反重力和独立 Codex CLI 程序本体，已从 GitHub 撤下。请使用文件名带 `-corrected` 的新包。这三类外部程序由家里电脑自行安装和登录，仓库继续保留 WebCodex 对接代码。
+
+`goal-provider/node_modules` 中的 Codex 0.153.4 是 Goal ACP 适配器默认启动 `app-server` 所需的固定依赖，明确作为该组件的私有运行依赖保留；它与已移除的全局 Codex 0.159.2 安装包不同。需要改用系统 Codex 时，必须按适配器的 `CODEX_PATH` 和 Runner 显式环境映射契约配置，不能只删目录。
+
 ## 下载与核对
 
 在家中安装 Git/GitHub CLI 后，以同一 GitHub 账号登录：
@@ -11,8 +17,8 @@ gh auth login
 gh api user --jq .login
 gh release download windows-home-20261025 --repo lx923367787-commits/WebCodex --dir .\WebCodex-Transfer
 Get-Content .\WebCodex-Transfer\SHA256SUMS.txt
-Get-FileHash .\WebCodex-Transfer\WebCodex-Windows-Home-20261025.zip -Algorithm SHA256
-Get-FileHash .\WebCodex-Transfer\WebCodex-Source-20261025.zip -Algorithm SHA256
+Get-FileHash .\WebCodex-Transfer\WebCodex-Windows-Home-20261025-corrected.zip -Algorithm SHA256
+Get-FileHash .\WebCodex-Transfer\WebCodex-Source-20261025-corrected.zip -Algorithm SHA256
 ```
 
 将哈希与 `SHA256SUMS.txt` 对比，再解压客户端包到一个新的目录。不要覆盖另一套安装或复制旧卸载器。包中 `MANIFEST.json` 逐文件记录大小与 SHA-256，独立的 `Windows-Package-MANIFEST.json` 供下载前检查。
@@ -29,9 +35,6 @@ Get-FileHash .\WebCodex-Transfer\WebCodex-Source-20261025.zip -Algorithm SHA256
 | ACP 接口及其独立 Codex 0.153.4 | `goal-provider/`，含锁定的 `node_modules` |
 | Node 24.15.0 与独立聊天 Python | `node/`、`provider-python/`；没有搬运不可移植的旧 `.venv` |
 | Python 离线重建材料 | `offline/provider-wheels/` 和 `offline/` 内 embedded Python 压缩包 |
-| CodeBuddy 2.162.0 | `cli/codebuddy/`，包含 vendor 辅助文件 |
-| 独立 Codex CLI 0.159.2 | `cli/codex/`，包含 helper、sandbox、搜索与语音资源；与 ACP 内置版本分开 |
-| Antigravity 1.4.5 | `cli/agy/agy.exe` |
 | OpenAI Tunnel 客户端 0.0.12 | `tunnel/tunnel-client.exe`；不含 Tunnel ID 或 API key |
 | 安全删除插件 | `safe-delete/` |
 | 路径配置和启动入口 | `configure-providers.ps1`、`setup-providers.ps1`、`launch-portable.cmd` |
@@ -62,7 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File 'D:\Apps\WebCodex Desktop\co
   -ProjectRoot 'D:\Dev\WebCodex'
 ```
 
-它只生成包含新路径的 TOML 模板。按 [PORTABLE.zh-CN.md](PORTABLE.zh-CN.md) 合并到新机实际 Runner，重新登记项目。使用 `launch-portable.cmd` 让 Desktop 继承随包 Node/CLI/Tunnel 路径；没有改动系统 PATH。首次使用仍须配置自己的 API key/Tunnel ID、CLI 登录及浏览器扩展授权。Host carrier、执行器权限/路径指纹由新机正式流程生成，不应手工复制旧 nonce、租约或权限状态。
+它只生成包含新路径的 TOML 模板。按 [PORTABLE.zh-CN.md](PORTABLE.zh-CN.md) 合并到新机实际 Runner，重新登记项目。使用 `launch-portable.cmd` 让 Desktop 继承所选 Node 和随包 Tunnel 路径；Node 优先使用包内版本，没有时查找系统安装。外部 CLI 由家里电脑自行安装，沿用原用户环境；没有改动系统 PATH。首次使用仍须配置自己的 API key/Tunnel ID、CLI 登录及浏览器扩展授权。Host carrier、执行器权限/路径指纹由新机正式流程生成，不应手工复制旧 nonce、租约或权限状态。
 
 ## 明确排除的内容
 

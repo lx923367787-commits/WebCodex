@@ -101,6 +101,7 @@ def copy_manifest_payload(source: Path, name: str, destination: Path) -> None:
     seen: set[str] = set()
     included = {}
     omitted = []
+    omitted_launchers = []
     for relative, recorded in files.items():
         path = relative_path(relative)
         folded = path.as_posix().casefold()
@@ -117,10 +118,15 @@ def copy_manifest_payload(source: Path, name: str, destination: Path) -> None:
         if is_cache(path):
             omitted.append(relative)
             continue
+        if path.suffix.lower() == ".exe" and path.parent.as_posix().casefold() in (
+                "python/lib/site-packages/bin", "drawing/vendor/bin"):
+            omitted_launchers.append(relative)
+            continue
         copy_file(original, destination / path, expected, size)
         included[relative] = recorded
     manifest["files"] = included
     manifest["omitted_reproducible_caches"] = omitted
+    manifest["omitted_nonportable_launchers"] = omitted_launchers
     manifest["input_manifest_sha256"] = digest(manifest_path)
     output_manifest = destination / name
     if output_manifest.exists():
@@ -173,6 +179,21 @@ def prepare_python(archive: Path, output: Path, wheels: Path, lock: Path) -> Non
     run([sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
          "--no-index", "--find-links", str(wheels), "--no-deps", "--no-compile",
          "--only-binary=:all:", "--target", str(site_packages), "-r", str(lock)], timeout=300)
+    # These console wrappers embed this build machine's Python path. The provider
+    # uses modules through the embedded interpreter, not these generated wrappers.
+    # output was created above; never perform this cleanup on an existing runtime.
+    check_path(output)
+    owned_output = output.resolve(strict=True)
+    launcher_dir = site_packages / "bin"
+    check_path(launcher_dir)
+    for launcher in launcher_dir.glob("*.exe"):
+        check_path(launcher)
+        resolved = launcher.resolve(strict=True)
+        if (not resolved.is_relative_to(owned_output)
+                or resolved.parent != owned_output / "Lib" / "site-packages" / "bin"
+                or not launcher.is_file()):
+            raise ValueError(f"Refusing to remove a launcher outside the new Python output: {launcher}")
+        launcher.unlink()
     (output / "python311._pth").write_text(
         "python311.zip\n.\nLib/site-packages\n../chat-handoff\n../chat-agents\n../subagent-pilot\nimport site\n",
         encoding="utf-8")
@@ -186,8 +207,7 @@ def prepare_python(archive: Path, output: Path, wheels: Path, lock: Path) -> Non
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("output", "client-root", "office-payload", "drawing-addon", "provider-npm-root",
-                 "node-root", "python-archive", "provider-wheels", "codebuddy-root",
-                 "codex-package", "agy-bin", "tunnel-bin"):
+                 "node-root", "python-archive", "provider-wheels", "tunnel-bin"):
         parser.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args()
     if os.name != "nt" or sys.version_info[:2] != (3, 11) or struct.calcsize("P") != 8:
@@ -199,7 +219,7 @@ def main() -> None:
     if args.output.exists():
         raise SystemExit("Choose a new output directory; existing output is never overwritten")
     for name in ("client_root", "office_payload", "drawing_addon", "provider_npm_root", "node_root",
-                 "provider_wheels", "codebuddy_root", "codex_package"):
+                 "provider_wheels"):
         source = getattr(args, name)
         if not source.is_dir() or args.output == source or source in args.output.parents:
             raise SystemExit(f"Expected an input directory outside the output ancestry: {name}")
@@ -220,10 +240,6 @@ def main() -> None:
         check_path(required)
         if not required.is_file():
             raise SystemExit(f"Incomplete official Node archive directory: {required.name}")
-    for required in (args.codebuddy_root / "codebuddy.exe", args.codex_package / "bin" / "codex.js", args.agy_bin):
-        check_path(required)
-        if not required.is_file():
-            raise SystemExit(f"Missing external CLI input: {required}")
     for prefix in (*("windows/" + name for name in PROVIDERS), "plugins/safe-delete"):
         untracked = git("ls-files", "--others", "--exclude-standard", "--", prefix)
         if untracked:
@@ -242,10 +258,6 @@ def main() -> None:
     for relative in NPM_TREES:
         copy_tree(args.provider_npm_root / relative, args.output / relative)
     copy_tree(args.node_root, args.output / "node")
-    copy_file(args.codebuddy_root / "codebuddy.exe", args.output / "cli" / "codebuddy" / "codebuddy.exe")
-    copy_tree(args.codebuddy_root / "vendor", args.output / "cli" / "codebuddy" / "vendor")
-    copy_tree(args.codex_package, args.output / "cli" / "codex")
-    copy_file(args.agy_bin, args.output / "cli" / "agy" / "agy.exe")
     copy_file(args.tunnel_bin, args.output / "tunnel" / "tunnel-client.exe", tunnel_pin.group(1))
     for name in GUIDES:
         copy_file(REPO / "windows" / name, args.output / name)
@@ -266,16 +278,11 @@ def main() -> None:
         else:
             record["inspection"] = "hashed only; desktop was not started"
         executables[relative] = record
-    cli_commands = {
-        "cli/codebuddy/codebuddy.exe": [str(args.output / "cli/codebuddy/codebuddy.exe")],
-        "cli/codex/bin/codex.js": [str(args.output / "node/node.exe"), str(args.output / "cli/codex/bin/codex.js")],
-        "cli/agy/agy.exe": [str(args.output / "cli/agy/agy.exe")],
-        "tunnel/tunnel-client.exe": [str(args.output / "tunnel/tunnel-client.exe")],
+    tunnel = args.output / "tunnel/tunnel-client.exe"
+    executables["tunnel/tunnel-client.exe"] = {
+        "sha256": digest(tunnel), "bytes": tunnel.stat().st_size,
+        "version": run([str(tunnel), "--version"], timeout=30),
     }
-    for relative, command in cli_commands.items():
-        executable = args.output / relative
-        executables[relative] = {"sha256": digest(executable), "bytes": executable.stat().st_size,
-                                 "version": run([*command, "--version"], timeout=30)}
     if git("rev-parse", "HEAD") != head:
         raise RuntimeError("Repository HEAD changed during packaging; rebuild from a stable checkout")
     dirty = dirty or bool(git("status", "--porcelain", "--untracked-files=normal"))

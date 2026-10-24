@@ -174,30 +174,11 @@
       "package_path": "node/"
     },
     {
-      "name": "CodeBuddy",
-      "version": "2.162.0",
-      "package_path": "cli/codebuddy/",
-      "executable_sha256": "5d06f03f55fe07aa2748a1b02d6898fca5932c52cd85db05487765851282f94a"
-    },
-    {
-      "name": "Codex CLI",
-      "version": "0.159.2",
-      "package_path": "cli/codex/",
-      "package": "@openai/codex",
-      "executable_sha256": "52f75c649bebb8001102a1dd129c1ea6d02b0940321e6d7e82ee0526753bd58a"
-    },
-    {
       "name": "Codex ACP",
       "version": "1.9.0",
       "package_path": "goal-provider/",
       "embedded_codex_version": "0.153.4",
-      "note": "Separate from the standalone Codex CLI; retained with its existing npm lock."
-    },
-    {
-      "name": "Antigravity CLI",
-      "version": "1.4.5",
-      "package_path": "cli/agy/agy.exe",
-      "executable_sha256": "d191b2e423c8c5a96ffba84699dd5f52f4eec0e74bb457e8d5f755dc55528f9d"
+      "note": "The Goal adapter uses this private pinned execution dependency by default. It is not the separately installed standalone Codex CLI; do not remove it without configuring the adapter CODEX_PATH contract."
     },
     {
       "name": "OpenAI tunnel-client",
@@ -206,6 +187,23 @@
       "archive_sha256": "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356",
       "executable_sha256": "6649169733686805ca16cccd91774594d0c017fd729c37ad4ce1cd18323d9ae8",
       "package_path": "tunnel/tunnel-client.exe"
+    }
+  ],
+  "external_cli_programs": [
+    {
+      "name": "CodeBuddy / WorkBuddy",
+      "included": false,
+      "setup": "Install and authenticate on the destination computer; WebCodex integration source is retained."
+    },
+    {
+      "name": "Standalone Codex CLI",
+      "included": false,
+      "setup": "Install and authenticate on the destination computer; WebCodex integration source is retained."
+    },
+    {
+      "name": "Antigravity CLI",
+      "included": false,
+      "setup": "Install and authenticate on the destination computer; WebCodex integration source is retained."
     }
   ]
 }

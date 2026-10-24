@@ -1,5 +1,15 @@
 # Windows snapshot validation — updated 2026-10-25
 
+## Packaging-scope correction — 2026-10-25
+
+The earlier portable ZIPs incorrectly included independent CodeBuddy/WorkBuddy, Antigravity and standalone Codex installations. Those two ZIP assets have been withdrawn from GitHub. The corrected package excludes the entire top-level `cli/` tree: 65 files, 840,647,007 bytes. Their WebCodex integration code remains available and uses software installed by the destination operator. The Goal ACP adapter's private pinned Codex dependency remains because its default `app-server` startup resolves that package directly; it is explicitly documented as an adapter dependency.
+
+The audit also found and fixed two Node-discovery inconsistencies: source builds may rely on a system Node while the old launcher required a bundled Node, and direct Desktop/installer launch bypassed the launcher's environment. Both launchers now prefer a bundled `node.exe` and otherwise use the first real `node.exe` on PATH; the handoff provider itself also discovers the adjacent bundled Node. Independent CLI PATH/variable injection has been removed. Eight headless launcher fixture checks and six provider configuration tests passed, without starting Desktop or a browser.
+
+Eighteen unused pip-generated `bin/*.exe` helpers contained build-machine Python paths. They are excluded from the corrected package and future packaging. Their `.py` scripts, native modules, PDFium, Playwright Node, pywin32 helpers and Graphviz executables remain. Internal component manifests explicitly record the omissions. The corrected package is assembled into an empty directory from an allowlist, not by archiving an old directory containing these programs.
+
+The deployed WebCodex source and four native application binaries were not changed by this packaging correction. Previous functional validation still applies to unchanged components. No actual credentials, account databases or chat state were found in the audited package; certificate-authority files and synthetic test fixtures are retained. Download the assets whose ZIP names end in `-corrected.zip`; prior package counts below are historical and superseded.
+
 ## Native fresh-chat connection repair — 2026-10-25
 
 The deployed repair was synchronized as 12 exact SHA-256-matched files: 10 Rust source/test files (including two new files) and two troubleshooting documents. It connects first-use native chats to independent Agent enrollment while preserving existing isolation, revocation and retired-window boundaries.
@@ -16,11 +26,11 @@ Changed-line whitespace validation passed. The repaired `agent_isolation.rs` imp
 
 Updated source/client ZIPs are dated 20261025. The 20261024 draft remains available as a previous snapshot; use the newer draft for deployment.
 
-## Complete home-computer transfer follow-up
+## Original home-computer transfer follow-up (historical; packaging superseded)
 
 The follow-up explicitly adds the current Windows client binaries and runtime dependencies, not just build recipes. The canonical production source was rehashed and had not changed since the first snapshot. Five previously omitted historical development helpers and the three parameterized installer build scripts are now included. The old installed uninstaller is intentionally excluded because it belongs to the original installation identity; its Tauri/NSIS source is retained.
 
-The portable package contains 9,868 recorded files before its root manifest, about 2.06 GB unpacked. Its Desktop, Server, Runner and CLI hashes match the current installed binaries. CodeBuddy 2.162.0, standalone Codex 0.159.2, ACP's separate Codex 0.153.4, Antigravity 1.4.5, Node 24.15.0 and Tunnel client 0.0.12 are present with their runtime resources. Only fixed `--version` commands were used; no model task, GUI, service restart or login operation was performed.
+The original package had 9,868 recorded files and about 2.06 GB unpacked; its mistaken inclusion of independent CLI installations has now been corrected as described above. Desktop, Server, Runner and WebCodex CLI hashes were matched to the installed binaries. Node, Tunnel and the Goal adapter's private runtime remain application dependencies. Only fixed `--version` commands were used; no model task, GUI, service restart or login operation was performed.
 
 Fresh portable Python 3.11.9 matched all 34 provider dependency versions and imported the native pywin32 DLLs successfully. Portable-provider tests ran 632 cases: **603 passed and 29 opt-in cases skipped**. A separate entirely offline setup rebuilt a new venv from the bundled wheelhouse and passed `pip check`. Windows PowerShell 5.1 generated four TOML templates with Chinese/spaced paths, and launcher environment handling was checked using headless fixtures. The packaged drawing `doctor` passed for Graphviz and all chart/document dependencies. The complete package file set and every recorded file hash were checked after these tests; no extra runtime/state files appeared.
 

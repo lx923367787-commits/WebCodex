@@ -102,6 +102,32 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ext.ExtensionBrowserError, "extension_configuration_unavailable"):
             ext.discover_endpoint()
 
+    def test_node_explicit_override_has_priority_without_fallback(self):
+        explicit = self.root / "explicit-node.exe"
+        with patch.dict(os.environ, {"WEBCODEX_NODE": str(explicit)}, clear=True), \
+                patch.object(ext.shutil, "which") as lookup, patch.object(Path, "is_file") as exists:
+            self.assertEqual(ext._discover_node(), explicit)
+        lookup.assert_not_called()
+        exists.assert_not_called()
+
+    def test_node_bundled_with_application_is_found_without_launcher(self):
+        bundled = self.root / "node" / "node.exe"
+        bundled.parent.mkdir()
+        bundled.write_bytes(b"fixture, never executed")
+        with patch.object(ext, "ROOT", self.root / "chat-handoff"), \
+                patch.dict(os.environ, {}, clear=True), patch.object(ext.shutil, "which") as lookup:
+            self.assertEqual(ext._discover_node(), bundled)
+        lookup.assert_not_called()
+
+    def test_node_system_path_and_program_files_remain_fallbacks(self):
+        program_files = self.root / "Program Files"
+        with patch.object(ext, "ROOT", self.root / "chat-handoff"), \
+                patch.dict(os.environ, {"ProgramFiles": str(program_files)}, clear=True):
+            with patch.object(ext.shutil, "which", return_value=str(self.node)):
+                self.assertEqual(ext._discover_node(), self.node)
+            with patch.object(ext.shutil, "which", return_value=None):
+                self.assertEqual(ext._discover_node(), program_files / "nodejs" / "node.exe")
+
 
 class FacadeTests(unittest.TestCase):
     def setUp(self):

@@ -23,8 +23,20 @@ import uuid
 import weakref
 
 ROOT = Path(__file__).resolve().parent
-NODE = Path(os.environ.get("WEBCODEX_NODE", "") or shutil.which("node") or
-            str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "nodejs" / "node.exe"))
+
+
+def _discover_node():
+    explicit = os.environ.get("WEBCODEX_NODE", "")
+    if explicit:
+        return Path(explicit)
+    bundled = ROOT.parent / "node" / "node.exe"
+    if bundled.is_file():
+        return bundled
+    return Path(shutil.which("node") or
+                str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "nodejs" / "node.exe"))
+
+
+NODE = _discover_node()
 CHAT_URL = "https://chatgpt.com/"
 VERSION = "0.0.83"
 RPC_TIMEOUT = 45
