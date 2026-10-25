@@ -1,5 +1,7 @@
 # Using WebCodex Desktop
 
+**External tools:** Install model CLIs on each Runner computer, sign in with that user’s account or configure their key, then configure and validate the Runner. WebCodex packages integration code and account-independent runtimes, not preconfigured user tool installations. See [tools, accounts and migration](EXTERNAL_TOOLS.md).
+
 [English](desktop-guide.md) | [简体中文](desktop-guide.zh-CN.md)
 
 Desktop prepares local projects and manages connections. You ask for work in ChatGPT or another AI client. For installation, Tunnel configuration, and system permissions, see the [installation and connection guide](desktop-install.md).

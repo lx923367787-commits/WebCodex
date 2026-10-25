@@ -1,16 +1,18 @@
 # 在家里的 Windows 电脑继续开发
 
-本次交付包含两部分：`windows/current-20261024` 分支保存全部项目源码和自有开发工具；`windows-home-20261025` GitHub 草稿附件保存当前 Windows 客户端与运行依赖。草稿附件需要登录仓库所有者 `lx923367787-commits` 才能访问。保持草稿是为了不触发现有 `release: published` 的 Linux 镜像发布流程；这不是一个跨平台版本发布。
+**当前迁移规则：** 先阅读[工具、账号与迁移](../docs/EXTERNAL_TOOLS.md#简体中文)。Runner 的模型 CLI 必须在目标机自行安装、登录后配置。本页 20261025 下载清单记录历史附件；`-corrected` 包仍含 Goal ACP 内嵌 Codex，当前源码已停止打包该依赖。本轮未重发附件，请用最新源码在新目录构建，不能用历史包作为新规范验收证据。
+
+`windows/current-20261024` 分支保存全部项目源码和自有开发工具；`windows-home-20261025` GitHub 草稿附件保存当时的 Windows 客户端与运行依赖，供历史核对。草稿附件需要登录仓库所有者 `lx923367787-commits` 才能访问。保持草稿是为了不触发现有 `release: published` 的 Linux 镜像发布流程；这不是一个跨平台版本发布。
 
 ## 已纠正的打包范围
 
-旧迁移包误收了 WorkBuddy/CodeBuddy、反重力和独立 Codex CLI 程序本体，已从 GitHub 撤下。请使用文件名带 `-corrected` 的新包。这三类外部程序由家里电脑自行安装和登录，仓库继续保留 WebCodex 对接代码。
+旧迁移包误收了 WorkBuddy/CodeBuddy、反重力和独立 Codex CLI 程序本体，已从 GitHub 撤下。文件名带 `-corrected` 的历史附件修正了这三项，但仍包含下面所述的嵌套依赖。这些外部程序由家里电脑自行安装和登录，仓库继续保留 WebCodex 对接代码。
 
-`goal-provider/node_modules` 中的 Codex 0.153.4 是 Goal ACP 适配器默认启动 `app-server` 所需的固定依赖，明确作为该组件的私有运行依赖保留；它与已移除的全局 Codex 0.159.2 安装包不同。需要改用系统 Codex 时，必须按适配器的 `CODEX_PATH` 和 Runner 显式环境映射契约配置，不能只删目录。
+历史 `goal-provider/node_modules` 还嵌套 Codex 0.153.4，不能因为它属于适配器依赖就忽略目标机账号配置。当前打包只保留 Goal 适配器源码和锁文件，不复制安装后的 npm 树；目标机需要时运行 `setup-providers.ps1 -IncludeGoalProvider` 安装，再登录并显式配置。已有安装由用户按需迁移，不直接删除正在使用的依赖。
 
-## 下载与核对
+## 历史附件下载与核对
 
-在家中安装 Git/GitHub CLI 后，以同一 GitHub 账号登录。使用新的 `WebCodex-Transfer-corrected` 下载目录，避免混入以前下载的旧 ZIP 或校验文件：
+以下命令仅用于核对历史附件；新安装请按后文从当前源码构建。安装 Git/GitHub CLI 后，以同一 GitHub 账号登录。使用新的 `WebCodex-Transfer-corrected` 下载目录，避免混入以前下载的 ZIP 或校验文件：
 
 ```powershell
 gh auth login
@@ -25,14 +27,14 @@ Get-FileHash .\WebCodex-Transfer-corrected\WebCodex-Source-20261025-corrected.zi
 
 客户端包保存的是当前安装的 `WebCodex.exe`、Server/Runner/CLI 三个 EXE，以及它们各自的真实版本和哈希；没有伪装成用新的 Git 提交重新编译的发行版。旧二进制的 `dirty=true` 构建标记原样保留。源码和这些运行文件的部署对应关系已经核对。
 
-## 包里有什么
+## 历史附件内容（当前源码打包范围见上方规则）
 
 | 材料 | 位置/用途 |
 | --- | --- |
 | 现用 Windows Desktop 与三个运行时 EXE | `WebCodex.exe`、`webcodex-runtime/` |
 | Office/PDF/OCR/绘图工具及运行依赖 | `mycodex-tools/`，含嵌入 Python、PDFium、Tesseract、中文/英文模型、Graphviz、Matplotlib、字体 |
 | 网页 Host、接续、子助手和开发辅助脚本 | `chat-handoff/`、`chat-agents/`、`subagent-pilot/` |
-| ACP 接口及其独立 Codex 0.153.4 | `goal-provider/`，含锁定的 `node_modules` |
+| Goal ACP | 历史附件含内嵌 Codex；当前只交付 `goal-provider/` 源码和锁文件，目标机按需安装 |
 | Node 24.15.0 与独立聊天 Python | `node/`、`provider-python/`；没有搬运不可移植的旧 `.venv` |
 | Python 离线重建材料 | `offline/provider-wheels/` 和 `offline/` 内 embedded Python 压缩包 |
 | OpenAI Tunnel 客户端 0.0.12 | `tunnel/tunnel-client.exe`；不含 Tunnel ID 或 API key |
@@ -43,7 +45,7 @@ Gemini CLI 没有安装在此次原机清单中，不能把 Antigravity 或它�
 
 ## 2026-10-25 连接修复
 
-请使用本页的 20261025 新包。此前 20261024 包里的 Server 尚未包含首次聊天自动注册修复。新包保持现用 Desktop/Runner/CLI 和工具依赖，并更新 Server。新电脑必须按 [NATIVE-HOST-SETUP.zh-CN.md](NATIVE-HOST-SETUP.zh-CN.md) 配置本机 Host 的自动注册；只填写 API key/Tunnel ID 不能替代这一步。不要复制旧机 Host、OAuth 绑定、carrier 或数据库。新聊天接入仍保持独立 Agent 隔离，CLI/子助手的执行限制沿用原策略。
+以下记录 20261025 历史包的连接修复；不表示其满足当前工具分发规则。此前 20261024 包里的 Server 尚未包含首次聊天自动注册修复。新包保持现用 Desktop/Runner/CLI 和工具依赖，并更新 Server。新电脑必须按 [NATIVE-HOST-SETUP.zh-CN.md](NATIVE-HOST-SETUP.zh-CN.md) 配置本机 Host 的自动注册；只填写 API key/Tunnel ID 不能替代这一步。不要复制旧机 Host、OAuth 绑定、carrier 或数据库。新聊天接入仍保持独立 Agent 隔离，CLI/子助手的执行限制沿用原策略。
 
 ## 接着开发
 

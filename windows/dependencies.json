@@ -158,7 +158,7 @@
     "Node.js 22 or newer compatible version with npm and a development Python 3.11 x64 with pip (the embeddable runtime does not provide pip)",
     "Microsoft WebView2 Runtime for Desktop",
     "A separately licensed local Microsoft Office installation exposing Word, Excel and PowerPoint COM APIs for native document workflows",
-    "Separate user authentication and configuration for Codex/other agent CLIs, tunnels and browser handoff; credentials are not source dependencies"
+    "Install model CLIs on each Runner computer, authenticate with that user account, then explicitly configure and validate its local execution resources. Never transfer account state, API keys, resource approvals or local Runner configuration."
   ],
   "limits": [
     "Version locks preserve selected dependency versions; Python wheel bytes are not hash-pinned in the existing requirements.lock files.",
@@ -172,13 +172,6 @@
       "url": "https://nodejs.org/dist/v24.15.0/node-v24.15.0-win-x64.zip",
       "archive_sha256": "cc5149eabd53779ce1e7bdc5401643622d0c7e6800ade18928a767e940bb0e62",
       "package_path": "node/"
-    },
-    {
-      "name": "Codex ACP",
-      "version": "1.9.0",
-      "package_path": "goal-provider/",
-      "embedded_codex_version": "0.153.4",
-      "note": "The Goal adapter uses this private pinned execution dependency by default. It is not the separately installed standalone Codex CLI; do not remove it without configuring the adapter CODEX_PATH contract."
     },
     {
       "name": "OpenAI tunnel-client",
@@ -204,6 +197,16 @@
       "name": "Antigravity CLI",
       "included": false,
       "setup": "Install and authenticate on the destination computer; WebCodex integration source is retained."
+    },
+    {
+      "name": "Goal ACP executor (including its pinned Codex dependency)",
+      "included": false,
+      "setup": "Optional destination-only installation using setup-providers.ps1 -IncludeGoalProvider; authenticate and validate before enabling in Runner."
+    },
+    {
+      "name": "Gemini CLI",
+      "included": false,
+      "setup": "Install, authenticate and explicitly configure on the destination Runner."
     }
   ]
 }

@@ -1,8 +1,10 @@
 # WebCodex
 
+**External tools:** Install model CLIs on each Runner computer, sign in with that user’s account or configure their key, then configure and validate the Runner. WebCodex packages integration code and account-independent runtimes, not preconfigured user tool installations. See [tools, accounts and migration](docs/EXTERNAL_TOOLS.md).
+
 **Windows snapshot, including the 2026-10-25 connection repair: [source, tools, dependencies and build instructions](windows/README.md).**
 
-**Moving development to another Windows PC: [current client package and transfer guide](windows/HOME-DEVELOPMENT.zh-CN.md).**
+**Moving development to another Windows PC: [source build, local account setup and historical transfer guide](windows/HOME-DEVELOPMENT.zh-CN.md).**
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 

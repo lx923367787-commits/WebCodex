@@ -5,10 +5,13 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 
 
 BUILD = Path(__file__).resolve().parent
+sys.path.insert(0, str(BUILD.parent))
+from package_payload_policy import validate_payload_tree
 REQUIRED = (
     "WebCodex.exe",
     "webcodex-runtime/webcodex.exe",
@@ -41,6 +44,7 @@ def main() -> None:
             raise SystemExit(f"Remove old installation metadata from the prepared payload: {reserved}")
     if output == PAYLOAD or PAYLOAD in output.parents:
         raise SystemExit("Output directory must be outside the payload")
+    validate_payload_tree(PAYLOAD)
     files: list[Path] = []
     directories: list[Path] = []
     for root, dirs, names in os.walk(PAYLOAD, followlinks=False):

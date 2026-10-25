@@ -1,5 +1,7 @@
 # Windows + OpenAI Secure MCP Tunnel: End-to-End Guide
 
+The Tunnel program is separate from its API key and Tunnel ID. Model CLIs, accounts, browser authorization and Runner configuration must be prepared locally; see [tools and accounts](EXTERNAL_TOOLS.md).
+
 [English](WINDOWS_OPENAI_TUNNEL.md) | [简体中文](WINDOWS_OPENAI_TUNNEL.zh-CN.md)
 
 This page is the current deep-dive guide for running an independent foreground WebCodex Server and Runner on Windows behind an OpenAI Secure MCP Tunnel. The stable setup and troubleshooting steps come first. A clearly separated [historical dogfood note](#historical-dogfood-note--2026-08-30) at the end preserves the real 2026-08-30 validation evidence without making that old version, machine, repository, or app name part of the current setup contract.

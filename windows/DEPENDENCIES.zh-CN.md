@@ -1,5 +1,7 @@
 # Windows 依赖与离线准备
 
+**外部工具与账号：** 模型 CLI 由用户在每台 Runner 电脑自行安装、登录或配置自己的 key，再配置并验证 Runner。WebCodex 交付对接代码和通用运行依赖，不交付另一用户配置好的工具环境。见[工具、账号与迁移规则](../docs/EXTERNAL_TOOLS.md#简体中文)。
+
 本目录记录 Windows x64 当前功能所需的外部运行时和可复用依赖。精确下载地址、文件大小、SHA-256 和来源在 [`dependencies.json`](dependencies.json)。这些文件可以放在任意本地磁盘的新目录，不依赖原开发机器的路径。
 
 对应的 Windows 离线运行包使用方法见 [PORTABLE.zh-CN.md](PORTABLE.zh-CN.md)。它将可移植运行时与源码分开交付；`configure-providers.ps1` 独立生成新电脑路径，不要求联网安装依赖。Python venv 必须在目标机重建，不能直接复制旧机器的 `.venv`。
@@ -18,7 +20,7 @@ Rust Server/Runner/CLI、Desktop、网页前端、Office/PDF 文档工具和绘�
 | Graphviz | 16.1.0，Windows x64 ZIP | [Graphviz 官方下载页](https://graphviz.org/download/)及同页 SHA-256 文件 |
 | 图表 Python 包 | `plugins/mycodex-tools/drawing/requirements.lock` 精确版本 | 独立安装到 `drawing/vendor`，保留 Office 包版本 |
 | 中文字体 | ZCOOL XiaoWei 原始 TTF，OFL-1.1 | [Google Fonts 源目录](https://github.com/google/fonts/tree/main/ofl/zcoolxiaowei)，仓库已含相同字节 |
-| Goal ACP provider | `windows/goal-provider/package-lock.json` | `npm ci` 恢复锁定 npm 包及 Windows 可选依赖 |
+| Goal ACP（可选、目标机安装） | `windows/goal-provider/package-lock.json` | 源码包保留锁文件；目标用户显式安装、登录，不将含模型执行器的 npm 树随包分发 |
 | 网页接续与子任务 | `windows/chat-handoff/requirements.lock` 与 `extension-runtime/package-lock.json` | 专用 Python venv；官方 Playwright MCP 扩展依赖 |
 
 ## 手动准备外部运行时

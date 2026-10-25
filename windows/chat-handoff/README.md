@@ -1,5 +1,7 @@
 # Windows 自动接续与网页子任务运行组件
 
+账号与外部工具遵循[项目分发规则](../../docs/EXTERNAL_TOOLS.md#简体中文)。下列通用聊天依赖安装不包括 Goal 模型执行器；需要时在目标机按 [Goal ACP 说明](../goal-provider/README.md) 单独安装和登录。浏览器账号、profile、扩展 token 与 Host carrier 不随包迁移。
+
 本目录与相邻 `chat-agents`、`subagent-pilot`、`goal-provider` 保存 2026-10-24 Windows 正在使用的仓库外工具源码。它们补充仓库内的 Server、Runner、Desktop、`plugins/mycodex-tools` 和 `plugins/safe-delete`。保持这四个目录相邻。
 
 | 目录 | 当前作用 |
@@ -19,7 +21,6 @@
 py -3.11 -m venv windows/.venv
 windows/.venv/Scripts/python.exe -m pip install -r windows/chat-handoff/requirements.lock
 npm ci --prefix windows/chat-handoff/extension-runtime
-npm ci --prefix windows/goal-provider
 ```
 
 Python 锁文件记录当前可用 Windows Python 3.11 环境中 `mcp==1.27.2`、`playwright==1.63.0` 的完整直接/间接依赖版本。官方扩展 MCP 锁定为 `@playwright/mcp@0.0.83`。无需 `playwright install` 下载另一份浏览器。第三方依赖从锁文件重新安装，不把 `node_modules`、虚拟环境或浏览器 profile 放入 Git。
@@ -27,7 +28,7 @@ Python 锁文件记录当前可用 Windows Python 3.11 环境中 `mcp==1.27.2`�
 ## 配置与授权
 
 1. 在目标 Windows 机器完成 Desktop 本地运行环境初始化、项目登记和 Host 连接。新机器使用自己的凭据与 Host 身份。
-2. 将 `edge-handoff.provider.example.toml`、相邻 `chat-agents/chat-agents.provider.example.toml` 中示例绝对路径改为实际路径，再合并进目标 Runner 的配置；保留现有 provider，不重复已有 id。`goal-provider/codex.acp.example.toml` 对应当前 Codex ACP Agent。插件候选检查、目录加载与运行实例状态分别验证。
+2. 将 `edge-handoff.provider.example.toml`、相邻 `chat-agents/chat-agents.provider.example.toml` 中示例绝对路径改为实际路径，再合并进目标 Runner 的配置；保留现有 provider，不重复已有 id。可选的 `goal-provider/codex.acp.example.toml` 仅在目标机安装 Goal 依赖、登录并配置执行资源后使用。插件候选检查、目录加载与运行实例状态分别验证。
 3. 在日常 Edge 的 `Default` profile 安装官方 Playwright 扩展并登录对应网站。扩展连接授权和账号登录属于目标机器的首次配置，不能通过复制旧 cookies 或令牌复刻。
 4. 扩展令牌保存在 `chat-handoff/runtime/playwright-extension-token.txt`。已有 `extension-runtime/capture_token.py` 仅在操作者已明确复制扩展自己的命名令牌后运行：`python windows/chat-handoff/extension-runtime/capture_token.py --user-copied-token`。它不输出令牌，并设置当前用户/SYSTEM 文件 ACL。不要提交或共享该文件。
 

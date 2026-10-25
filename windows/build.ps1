@@ -106,6 +106,7 @@ try {
     }
     Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $app
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $OutputDirectory 'BUILD-GUIDE.md')
+    Invoke-BuildCommand $Python @((Join-Path $PSScriptRoot 'package_payload_policy.py'), $app)
     $files = [ordered]@{}
     foreach ($file in Get-ChildItem -LiteralPath $app -File -Recurse) {
         $files[[IO.Path]::GetRelativePath($app, $file.FullName).Replace('\', '/')] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

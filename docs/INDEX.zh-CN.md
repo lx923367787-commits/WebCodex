@@ -1,5 +1,7 @@
 # 文档索引
 
+[外部工具、账号与迁移](EXTERNAL_TOOLS.md#简体中文) — 随包范围、本机安装登录、Runner 验收及打包边界。
+
 [English](INDEX.md) | [简体中文](INDEX.zh-CN.md)
 
 按你现在想完成的事情选择文档即可。

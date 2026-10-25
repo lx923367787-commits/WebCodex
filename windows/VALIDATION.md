@@ -1,6 +1,17 @@
 # Windows snapshot validation — updated 2026-10-25
 
-## Packaging-scope correction — 2026-10-25
+## 2026-10-25 external-tool distribution review
+
+This review updates the project documentation and packaging source, based on remote `f4938664`. It does not rebuild or replace historical release assets, remove locally installed CLIs, change Runner credentials, restart services, or validate separate Runner execution repairs. The older build/deployment checks below remain historical evidence.
+
+- Original standalone model CLI packaging had already been removed by `522f68ff`. The corrected transfer still contained `@agentclientprotocol/codex-acp@1.9.0` with nested `@openai/codex@0.153.4`. Portable packaging now omits the Goal installed npm tree; setup and configuration require explicit `-IncludeGoalProvider` on the destination machine.
+- Reviewed source build, portable assembly, installer generation and the standard three-binary release packager. The Windows tool-bundle paths now share a gate for known account state, private configuration and model executors. Account-independent Node, Python, document/OCR/drawing dependencies, integration sources and the credential-free Tunnel program remain eligible.
+- Read-only inspection covered 9,868 paths in the local historical installed manifest and 6,756 available text files (selected text extensions, at most 2 MiB each). High-confidence token/private-key signatures produced three matches, all verified as npm documentation placeholders or a cryptography parser constant. No actual credential was identified within that scope. This does not certify unexamined binaries, all file contents, unmanifested local state or every historical archive as secret-free.
+- Nine focused Python tests passed, including rejection before portable copying or installer generation, manifest rejection, default Goal omission, explicit Goal refusal without a local install, and opt-in template generation after a fixture install. No model was executed or dependency downloaded during these tests.
+- PowerShell syntax checks passed for build/setup/configure scripts; Python syntax and dependency JSON passed. Repository-local links in the changed documentation resolved. Read-only policy checks passed for the actual Node, chat-extension npm and Office/OCR/drawing dependency trees. The official Node tree contains an empty `node_modules/npm/.npmrc`; only that empty built-in file is allowed, while populated configuration is rejected. This false positive was fixed and covered by a copy test.
+- These focused checks do not replace a fresh full-package build or an authenticated isolated Runner acceptance run. Each user must install, sign in, configure execution resources and validate the selected model through the actual Runner, as described in [the project-wide rule](../docs/EXTERNAL_TOOLS.md).
+
+## Historical packaging-scope correction — 2026-10-25
 
 The earlier portable ZIPs incorrectly included independent CodeBuddy/WorkBuddy, Antigravity and standalone Codex installations. Those two ZIP assets have been withdrawn from GitHub. The corrected package excludes the entire top-level `cli/` tree: 65 files, 840,647,007 bytes. Their WebCodex integration code remains available and uses software installed by the destination operator. The Goal ACP adapter's private pinned Codex dependency remains because its default `app-server` startup resolves that package directly; it is explicitly documented as an adapter dependency.
 

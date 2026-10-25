@@ -1,5 +1,7 @@
 # 快速试用
 
+快速试用不会安装模型 CLI 或提供账号。如果需要外部执行器，先在 Runner 电脑自行安装、登录，再配置；见[工具与账号规则](EXTERNAL_TOOLS.md#简体中文)。
+
 [English](QUICK_START.md) | [简体中文](QUICK_START.zh-CN.md)
 
 这个页面只做一件事：用 `webcodex share` 临时分享一个本地仓库，让你几分钟内判断 WebCodex 是否适合自己。这个模式是一条命令的**临时、单项目、受限体验**；关闭命令后连接会结束。

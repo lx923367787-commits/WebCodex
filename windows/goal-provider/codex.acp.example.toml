@@ -1,3 +1,5 @@
+# Optional: install Goal ACP dependencies and authenticate on THIS Runner first.
+# Do not copy another machine's account, key or execution-resource approval.
 # Replace C:/WebCodex and the Node executable path for the destination host.
 # Merge this agent into the existing [acp] configuration; do not duplicate id.
 [[acp.agents]]

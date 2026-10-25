@@ -5,6 +5,7 @@ param(
     [string]$Python = 'python',
     [string]$Wheelhouse,
     [switch]$Offline,
+    [switch]$IncludeGoalProvider,
     [string]$ProjectRoot
 )
 $ErrorActionPreference = 'Stop'
@@ -16,10 +17,11 @@ if (-not (Test-Path -LiteralPath $node -PathType Leaf)) {
 }
 if ($Offline) {
     if (-not $Wheelhouse) { throw '-Offline requires -Wheelhouse with the locked Python wheels.' }
-    foreach ($relative in @('chat-handoff/extension-runtime/node_modules/@playwright/mcp/cli.js',
-        'goal-provider/node_modules/@agentclientprotocol/codex-acp/dist/index.js')) {
+    $requiredNpm = @('chat-handoff/extension-runtime/node_modules/@playwright/mcp/cli.js')
+    if ($IncludeGoalProvider) { $requiredNpm += 'goal-provider/node_modules/@agentclientprotocol/codex-acp/dist/index.js' }
+    foreach ($relative in $requiredNpm) {
         if (-not (Test-Path -LiteralPath (Join-Path $ToolRoot $relative) -PathType Leaf)) {
-            throw "Offline setup requires the bundled Node dependencies: $relative"
+            throw "Offline setup requires dependencies already installed on this computer: $relative"
         }
     }
 } else {
@@ -53,10 +55,12 @@ if ($Wheelhouse) { $pipArguments += @('--no-index', '--find-links', $Wheelhouse)
 Invoke-SetupCommand $venvPython $pipArguments
 Invoke-SetupCommand $venvPython @('-m', 'pip', 'check')
 if (-not $Offline) {
-    foreach ($relative in @('chat-handoff/extension-runtime', 'goal-provider')) {
+    $npmProviders = @('chat-handoff/extension-runtime')
+    if ($IncludeGoalProvider) { $npmProviders += 'goal-provider' }
+    foreach ($relative in $npmProviders) {
         Invoke-SetupCommand $npm @('ci', '--prefix', (Join-Path $ToolRoot $relative))
     }
 }
-& (Join-Path $PSScriptRoot 'configure-providers.ps1') -ToolRoot $ToolRoot -Python $venvPython -Node $node -ProjectRoot $ProjectRoot
+& (Join-Path $PSScriptRoot 'configure-providers.ps1') -ToolRoot $ToolRoot -Python $venvPython -Node $node -ProjectRoot $ProjectRoot -IncludeGoalProvider:$IncludeGoalProvider
 Write-Output 'Provider dependencies installed and local path templates generated.'
 Write-Output 'Runner configuration, credentials, Desktop, browser, and services were not changed or started.'

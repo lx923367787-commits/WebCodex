@@ -1,5 +1,7 @@
 # Runner
 
+**外部工具与账号：** 模型 CLI 由用户在每台 Runner 电脑自行安装、登录或配置自己的 key，再配置并验证 Runner。WebCodex 交付对接代码和通用运行依赖，不交付另一用户配置好的工具环境。见[工具、账号与迁移规则](EXTERNAL_TOOLS.md#简体中文)。
+
 Runner 是真正执行工作的组件。可执行文件是 `webcodex-runner`；管理它的 CLI 命名
 空间是 `webcodex runner ...`。`webcodex` 与 `webcodex-runner` 是两个独立可执行
 文件。运维生命周期统一使用 `runner` 命名空间；历史 `agent` 术语只保留在兼容性所需

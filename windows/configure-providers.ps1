@@ -6,7 +6,8 @@ param(
     [string]$Node,
     [string]$ProjectRoot,
     [string]$OfficeRoot,
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    [switch]$IncludeGoalProvider
 )
 $ErrorActionPreference = 'Stop'
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'These providers require Windows.' }
@@ -33,7 +34,13 @@ function Toml-Path([string]$Path) {
     ConvertTo-Json -InputObject $Path.Replace('\', '/') -Compress
 }
 $templates = @('chat-handoff/edge-handoff.provider.example.toml',
-    'chat-agents/chat-agents.provider.example.toml', 'goal-provider/codex.acp.example.toml')
+    'chat-agents/chat-agents.provider.example.toml')
+if ($IncludeGoalProvider) {
+    if (-not (Test-Path -LiteralPath (Join-Path $ToolRoot 'goal-provider/node_modules/@agentclientprotocol/codex-acp/dist/index.js') -PathType Leaf)) {
+        throw 'Install the optional Goal ACP dependencies on this computer before generating its Runner template.'
+    }
+    $templates += 'goal-provider/codex.acp.example.toml'
+}
 $files = @{}
 foreach ($relative in $templates) {
     $template = Get-Content -LiteralPath (Join-Path $ToolRoot $relative) -Raw

@@ -1,5 +1,7 @@
 # Windows 安装器源码
 
+安装器与便携包采用同一[工具分发规则](../../docs/EXTERNAL_TOOLS.md#简体中文)。`generate_payload.py` 会拒绝已知私有状态路径、独立模型 CLI 和 Goal ACP 安装依赖；仍须独立审查文件内容，不能把路径检查当成完整密钥扫描。
+
 此目录补入原来放在本机 `.local/installer-build/` 的工具增强版安装器源码：
 
 - `generate_payload.py`：遍历已准备的 Windows 便携目录，生成逐文件安装/卸载清单及 SHA-256 清单。

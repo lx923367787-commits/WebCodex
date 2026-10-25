@@ -15,12 +15,14 @@ import subprocess
 import sys
 import zipfile
 
+from package_payload_policy import validate_payload_path, validate_payload_tree
+
 
 REPO = Path(__file__).resolve().parents[1]
 PROVIDERS = ("chat-handoff", "chat-agents", "subagent-pilot", "goal-provider")
 CLIENT_FILES = ("WebCodex.exe", "webcodex-runtime/webcodex.exe",
                 "webcodex-runtime/webcodex-server.exe", "webcodex-runtime/webcodex-runner.exe")
-NPM_TREES = ("chat-handoff/extension-runtime/node_modules", "goal-provider/node_modules")
+NPM_TREES = ("chat-handoff/extension-runtime/node_modules",)
 GUIDES = ("configure-providers.ps1", "setup-providers.ps1", "launch-portable.cmd",
           "launch-portable.ps1", "PORTABLE.zh-CN.md", "DEPENDENCIES.zh-CN.md", "dependencies.json",
           "HOME-DEVELOPMENT.zh-CN.md", "VALIDATION.md", "configure-native-host.py", "NATIVE-HOST-SETUP.zh-CN.md")
@@ -56,6 +58,8 @@ def is_cache(path: Path) -> bool:
 
 def copy_file(source: Path, destination: Path, expected: str | None = None,
               expected_size: int | None = None) -> None:
+    validate_payload_path(source.name, source=source)
+    validate_payload_path(destination.name, source=source)
     check_path(source)
     if not source.is_file():
         raise ValueError(f"Missing regular input file: {source}")
@@ -87,6 +91,7 @@ def tree_files(root: Path):
 
 
 def copy_tree(source: Path, destination: Path) -> None:
+    validate_payload_tree(source)
     for path in tree_files(source):
         copy_file(path, destination / path.relative_to(source))
 
@@ -104,6 +109,7 @@ def copy_manifest_payload(source: Path, name: str, destination: Path) -> None:
     omitted_launchers = []
     for relative, recorded in files.items():
         path = relative_path(relative)
+        validate_payload_path(path, source=source / path)
         folded = path.as_posix().casefold()
         if folded in seen:
             raise ValueError(f"Case-insensitive manifest collision: {relative}")
@@ -154,6 +160,7 @@ def copy_tracked(prefix: str, destination: Path) -> None:
     for value in paths:
         relative = relative_path(value)
         child = relative.relative_to(Path(prefix))
+        validate_payload_path(child, source=REPO / relative)
         if not is_cache(child):
             copy_file(REPO / relative, destination / child)
 
@@ -164,6 +171,7 @@ def prepare_python(archive: Path, output: Path, wheels: Path, lock: Path) -> Non
         seen: set[str] = set()
         for info in bundle.infolist():
             relative = relative_path(info.filename)
+            validate_payload_path(relative)
             folded = relative.as_posix().casefold()
             if folded in seen or stat.S_ISLNK(info.external_attr >> 16):
                 raise ValueError(f"Unsupported Python archive entry: {info.filename}")
@@ -286,6 +294,7 @@ def main() -> None:
     if git("rev-parse", "HEAD") != head:
         raise RuntimeError("Repository HEAD changed during packaging; rebuild from a stable checkout")
     dirty = dirty or bool(git("status", "--porcelain", "--untracked-files=normal"))
+    validate_payload_tree(args.output)
     files = {}
     for path in tree_files(args.output):
         files[path.relative_to(args.output).as_posix()] = {"sha256": digest(path), "bytes": path.stat().st_size}

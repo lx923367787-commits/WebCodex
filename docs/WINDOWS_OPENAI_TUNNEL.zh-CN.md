@@ -1,5 +1,7 @@
 # Windows + OpenAI Secure MCP Tunnel 实操指南
 
+Tunnel 程序和 API key/Tunnel ID 是不同的交付内容；模型 CLI、账号、浏览器授权和 Runner 本机配置也不能从发布者电脑搬来。请先阅读[工具与账号规则](EXTERNAL_TOOLS.md#简体中文)。
+
 [English](WINDOWS_OPENAI_TUNNEL.md) | [简体中文](WINDOWS_OPENAI_TUNNEL.zh-CN.md)
 
 本文是当前 Windows 独立前台 WebCodex Server + Runner + OpenAI Secure MCP Tunnel 的深入配置指南。稳定的当前操作和排障步骤放在前面；文末单独保留 [2026-08-30 historical dogfood note](#historical-dogfood-note--2026-08-30)，用于保存真实验证证据，而不会让当时的版本、机器、项目、app 或 branch 看起来像当前配置要求。
