@@ -188,6 +188,49 @@ pub(super) async fn handle(
                     Ok(metadata) => crate::tool_runtime::ToolResult::ok(metadata),
                     Err(code) => crate::agent_isolation::denial(code),
                 }
+            } else if auth.is_native_host() && call.name == "agent_projects" {
+                if !call.arguments.as_object().is_some_and(|a| a.is_empty()) {
+                    return denied("agent_invalid_input");
+                }
+                match auth
+                    .native_host
+                    .as_ref()
+                    .and_then(|host| db.native_workspace_choices(host).ok())
+                {
+                    Some(catalog) => ToolResult::ok(
+                        json!({"projects":catalog.projects,"state_changed":false,"next_action":"Select the project named by the user with agent_select_project. If the name is missing or ambiguous, ask the user; never guess."}),
+                    ),
+                    None => crate::agent_isolation::denial("workspace_not_authorized"),
+                }
+            } else if auth.is_native_host() && call.name == "agent_select_project" {
+                let selected = call
+                    .arguments
+                    .as_object()
+                    .filter(|a| a.len() == 1)
+                    .and_then(|a| a.get("project"))
+                    .and_then(Value::as_str)
+                    .filter(|p| !p.is_empty() && p.len() <= 256);
+                let Some(selected) = selected else {
+                    return denied("agent_invalid_input");
+                };
+                let Some(host) = auth.native_host.as_ref() else {
+                    return denied("agent_host_authorization_required");
+                };
+                match db.select_native_host_workspace(
+                    host,
+                    window.key(),
+                    Some(selected),
+                    chrono::Utc::now().timestamp_millis(),
+                ) {
+                    Ok(binding) => {
+                        let mut result = connection_status(db, &binding);
+                        result.output["project"] =
+                            serde_json::to_value(db.agent_native_workspace(&binding).ok())
+                                .unwrap_or(Value::Null);
+                        result
+                    }
+                    Err(error) => crate::agent_isolation::denial(error.code()),
+                }
             } else if call.name == "agent_attach" {
                 crate::agent_enrollment::attach(db, &principal, window.key(), call.arguments)
             } else if call.name == "goal_handoff" {
@@ -234,6 +277,9 @@ pub(super) async fn handle(
                             .isolated_model_call_async(&call.name, call.arguments, Some(&effective))
                             .await
                     }
+                    Err(error) if error.code() == "workspace_selection_required" => ToolResult::ok(
+                        json!({"connected":true,"agent_state":"project_selection_required","state_changed":false,"next_action":"Call agent_projects. Ask the user which named project to use, then call agent_select_project with its exact id. No project has been selected and no task has started."}),
+                    ),
                     Err(error)
                         if native_status && error.code() == "agent_host_enrollment_required" =>
                     {

@@ -101,6 +101,7 @@ impl CliCatalog {
 pub struct TrustedMetadataContext {
     provider: Provider,
     executable: PathBuf,
+    entrypoint: Option<PathBuf>,
     environment: BTreeMap<OsString, OsString>,
     system_proxy_used: bool,
 }
@@ -125,6 +126,28 @@ const PROXY_UNSUPPORTED: &str =
     "CLI 元数据查询不支持带凭据或无效的代理配置；请核查已有配置后刷新。";
 
 impl TrustedMetadataContext {
+    /// Trusted host adapter for an installed CodeBuddy Node package. These paths
+    /// are controller-selected, never model arguments or shell command text.
+    pub fn for_codebuddy_node(
+        node: &Path,
+        entrypoint: &Path,
+        config_directory: &Path,
+    ) -> Result<Self, String> {
+        if !entrypoint.is_absolute()
+            || !entrypoint.is_file()
+            || !config_directory.is_absolute()
+            || !config_directory.is_dir()
+        {
+            return Err("CodeBuddy CLI 安装或配置目录无效。".into());
+        }
+        let mut context = Self::for_current_user(Provider::WorkBuddy, node, None)?;
+        context.entrypoint = Some(entrypoint.into());
+        context
+            .environment
+            .insert("CODEBUDDY_CONFIG_DIR".into(), config_directory.into());
+        Ok(context)
+    }
+
     pub fn for_current_user(
         provider: Provider,
         trusted_executable: &Path,
@@ -232,6 +255,7 @@ impl TrustedMetadataContext {
         Ok(Self {
             provider,
             executable: executable.into(),
+            entrypoint: None,
             environment,
             system_proxy_used,
         })
@@ -550,6 +574,9 @@ async fn run_query(
         return Err("CLI 查询超时，请检查网络与登录状态。");
     }
     let mut command = Command::new(executable);
+    if let Some(entrypoint) = &context.entrypoint {
+        command.arg(entrypoint);
+    }
     command
         .args(args)
         .stdin(Stdio::null())

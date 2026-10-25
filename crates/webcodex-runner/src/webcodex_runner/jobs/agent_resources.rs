@@ -2,7 +2,6 @@
 //! explicit administrator allowlist, not Store authorization or backend readiness.
 //! No inherited environment, recursive source directory grant, or source ACL edit.
 use serde::{Deserialize, Serialize};
-#[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -20,6 +19,11 @@ const MAX_FILES: usize = 256;
 const MAX_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const PROGRAM: &str = "bin/program.exe";
 const WRITABLE_DIRS: &[&str] = &["workspace", "home", "state", "cache", "temp", "session"];
+// Sorted JSON pairs (execution-relative path, SHA-256), covering the complete
+// 2.175.0 runtime package including all four regional product overlays. Source
+// paths remain separately bound by the ordinary reviewed payload manifest.
+const CODEBUDDY_NODE_PACKAGE_SHA256: &str =
+    "b73fa4b0ff76193035e67efe06b80176688424c9d8a77d4ce5a20aa42837d478";
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +44,10 @@ pub(crate) struct AgentExecutionResourceProfile {
     pub(crate) reviewed_controls: Option<ReviewedAgentCliControls>,
     #[serde(default)]
     pub(crate) user_https_proxy: bool,
+    /// Operator-selected metadata configuration for the reviewed Node package.
+    /// Bound into the resource review; never selected by a model or inherited env.
+    #[serde(default)]
+    pub(crate) codebuddy_config_directory: Option<PathBuf>,
     pub(crate) executable: PathBuf,
     pub(crate) executable_sha256: String,
     #[serde(default)]
@@ -66,6 +74,7 @@ struct ValidatedProfile {
     provider: Option<AgentCliProvider>,
     reviewed_controls: Option<ReviewedAgentCliControls>,
     user_https_proxy: bool,
+    codebuddy_config_directory: Option<String>,
     executable_identity: String,
     files: Vec<ResourceFile>,
     manifest: String,
@@ -177,6 +186,7 @@ fn payload_manifest(
     provider: Option<AgentCliProvider>,
     files: &[ResourceFile],
     user_https_proxy: bool,
+    codebuddy_config_directory: Option<&str>,
 ) -> Result<String, String> {
     // Default-off retains the exact D4 payload. Opt-in is a new reviewed
     // subject, so an existing review cannot authorize a flipped proxy flag.
@@ -188,18 +198,65 @@ fn payload_manifest(
         }
     }
     .map_err(|_| "agent_resources_manifest_encoding")?;
+    let payload = resource_payload_sha256(&encoded)?;
+    let Some(directory) = codebuddy_config_directory else {
+        return Ok(payload);
+    };
+    let encoded = serde_json::to_vec(&("codebuddy-metadata-config-v1", payload, directory))
+        .map_err(|_| "agent_resources_manifest_encoding")?;
     resource_payload_sha256(&encoded)
 }
 
-fn reviewed_codebuddy_files(
+fn codebuddy_config_directory(
+    provider: Option<AgentCliProvider>,
+    controls: Option<&ReviewedAgentCliControls>,
+    directory: Option<&Path>,
+) -> Result<Option<String>, String> {
+    let node = provider == Some(AgentCliProvider::WorkBuddy)
+        && controls.is_some_and(|control| {
+            control.loading_method
+                == webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING
+        });
+    match (node, directory) {
+        (true, Some(directory)) => absolute_path(directory).map(Some),
+        (true, None) => Err("agent_resources_codebuddy_config_required".into()),
+        (false, Some(_)) => Err("agent_resources_codebuddy_config_mapping_mismatch".into()),
+        (false, None) => Ok(None),
+    }
+}
+
+fn reviewed_file_worker(
     provider: Option<AgentCliProvider>,
     executable_identity: &str,
     controls: Option<&ReviewedAgentCliControls>,
 ) -> bool {
-    use webcodex_core::agent_cli_controls::CODEBUDDY_FILES_EXE_SHA256;
-    provider == Some(AgentCliProvider::WorkBuddy)
-        && executable_identity == format!("sha256:{CODEBUDDY_FILES_EXE_SHA256}")
-        && controls.is_some_and(|review| review.require_supported_loading().is_ok())
+    controls.is_some_and(|review| {
+        provider == Some(review.provider)
+            && executable_identity == format!("sha256:{}", review.executable_sha256)
+            && review.require_supported_loading().is_ok()
+    })
+}
+
+fn validate_codebuddy_node_package(files: &[ResourceFile]) -> Result<(), String> {
+    use webcodex_core::agent_cli_controls::{
+        CODEBUDDY_FILES_MCP_PATH, CODEBUDDY_FILES_SETTINGS_PATH,
+    };
+    let mut package: Vec<_> = files
+        .iter()
+        .filter(|file| {
+            !matches!(
+                file.destination.as_str(),
+                PROGRAM | CODEBUDDY_FILES_MCP_PATH | CODEBUDDY_FILES_SETTINGS_PATH
+            )
+        })
+        .map(|file| (file.destination.as_str(), file.sha256.as_str()))
+        .collect();
+    package.sort_unstable();
+    let bytes = serde_json::to_vec(&package).map_err(|_| "agent_resources_package_encoding")?;
+    if format!("{:x}", Sha256::digest(bytes)) != CODEBUDDY_NODE_PACKAGE_SHA256 {
+        return Err("agent_resources_codebuddy_node_package_mismatch".into());
+    }
+    Ok(())
 }
 
 fn execution_manifest(
@@ -209,14 +266,37 @@ fn execution_manifest(
     files: &[ResourceFile],
     controls: Option<&ReviewedAgentCliControls>,
     user_https_proxy: bool,
+    codebuddy_config_directory: Option<&str>,
 ) -> Result<String, String> {
-    if user_https_proxy && !reviewed_codebuddy_files(provider, executable_identity, controls) {
-        return Err("agent_resources_proxy_requires_reviewed_codebuddy_files".into());
+    if user_https_proxy && !reviewed_file_worker(provider, executable_identity, controls) {
+        return Err("agent_resources_proxy_requires_reviewed_file_worker".into());
     }
-    let payload = payload_manifest(id, provider, files, user_https_proxy)?;
+    let payload = payload_manifest(
+        id,
+        provider,
+        files,
+        user_https_proxy,
+        codebuddy_config_directory,
+    )?;
     let Some(controls) = controls else {
         return Ok(payload);
     };
+    if controls.loading_method == webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING {
+        validate_codebuddy_node_package(files)?;
+    }
+    if controls.loading_method == webcodex_core::agent_cli_controls::ANTIGRAVITY_FILES_LOADING
+        && (files.len() != 3
+            || files.iter().any(|file| {
+                !matches!(
+                    file.destination.as_str(),
+                    PROGRAM
+                        | webcodex_core::agent_cli_controls::ANTIGRAVITY_AGENT_PATH
+                        | webcodex_core::agent_cli_controls::ANTIGRAVITY_SETTINGS_PATH
+                )
+            }))
+    {
+        return Err("agent_resources_antigravity_package_mismatch".into());
+    }
     controls.validate_shape()?;
     if controls.payload_sha256 != payload {
         return Err("agent_resources_control_payload_mismatch".into());
@@ -242,6 +322,7 @@ fn validate_profile_manifest(id: &str, profile: &ValidatedProfile) -> Result<(),
         &profile.files,
         profile.reviewed_controls.as_ref(),
         profile.user_https_proxy,
+        profile.codebuddy_config_directory.as_deref(),
     )? != profile.manifest
     {
         return Err("agent_resources_manifest_mismatch".into());
@@ -302,7 +383,61 @@ fn materialized_execution_args(
             index += 1;
         }
     }
+    if controls.loading_method == webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING {
+        args.splice(
+            0..0,
+            [
+                "--preserve-symlinks".into(),
+                "--preserve-symlinks-main".into(),
+                absolute_path(&root.join("bin/codebuddy/bin/codebuddy"))?,
+            ],
+        );
+    }
     Ok(args)
+}
+
+fn codebuddy_node_environment(
+    root: &Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    environment.insert(
+        "CODEBUDDY_CONFIG_DIR".into(),
+        absolute_path(&root.join("state/codebuddy"))?,
+    );
+    let instance = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
+    environment.insert(
+        "CLIENT_INFO_MACHINE_ID".into(),
+        format!(
+            "{}-{}-{}-{}-{}",
+            &instance[..8],
+            &instance[8..12],
+            &instance[12..16],
+            &instance[16..20],
+            &instance[20..32]
+        ),
+    );
+    environment.insert(
+        "CODEBUDDY_USER_ID".into(),
+        format!("isolated-{}", &instance[..16]),
+    );
+    environment.insert("CODEBUDDY_TEAM_MEMORY_ENABLED".into(), "false".into());
+    environment.insert("CODEBUDDY_DISABLE_SHELL_SNAPSHOT".into(), "1".into());
+    Ok(())
+}
+
+fn antigravity_control_bytes(root: &Path) -> Result<(Vec<u8>, Vec<u8>), String> {
+    use webcodex_core::agent_cli_controls::*;
+    let home = absolute_path(&root.join("home"))?;
+    let workspace = absolute_path(&root.join("workspace"))?;
+    let mut settings: serde_json::Value = serde_json::from_slice(ANTIGRAVITY_SETTINGS_BYTES)
+        .map_err(|_| "antigravity_settings_encoding")?;
+    settings["permissions"]["deny"][0] = serde_json::Value::String(format!("read_file({home})"));
+    let settings = serde_json::to_vec(&settings).map_err(|_| "antigravity_settings_encoding")?;
+    let agent = std::str::from_utf8(ANTIGRAVITY_AGENT_BYTES)
+        .map_err(|_| "antigravity_agent_encoding")?
+        .replace("@WEBCODEX_WORKSPACE@", &workspace)
+        .into_bytes();
+    Ok((settings, agent))
 }
 
 /// Pure, deterministic validation of the trusted startup configuration. Shape
@@ -366,6 +501,11 @@ pub(crate) fn validate_profiles(
             }
         }
         let executable_identity = format!("sha256:{}", profile.executable_sha256);
+        let codebuddy_config_directory = codebuddy_config_directory(
+            profile.provider,
+            profile.reviewed_controls.as_ref(),
+            profile.codebuddy_config_directory.as_deref(),
+        )?;
         let manifest = execution_manifest(
             &profile.id,
             profile.provider,
@@ -373,6 +513,7 @@ pub(crate) fn validate_profiles(
             &files,
             profile.reviewed_controls.as_ref(),
             profile.user_https_proxy,
+            codebuddy_config_directory.as_deref(),
         )?;
         if profiles
             .insert(
@@ -381,6 +522,7 @@ pub(crate) fn validate_profiles(
                     provider: profile.provider,
                     reviewed_controls: profile.reviewed_controls.clone(),
                     user_https_proxy: profile.user_https_proxy,
+                    codebuddy_config_directory,
                     executable_identity,
                     files,
                     manifest,
@@ -397,6 +539,9 @@ pub(crate) fn validate_profiles(
 impl ValidatedResourceProfiles {
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+    pub(crate) fn requires_proxy_controller(&self) -> bool {
+        self.0.values().any(|profile| profile.user_https_proxy)
     }
     pub(crate) fn manifest(&self, resource_set_id: &str) -> Option<&str> {
         self.0.get(resource_set_id).map(|p| p.manifest.as_str())
@@ -438,7 +583,7 @@ impl ValidatedResourceProfiles {
     ) -> Result<(bool, bool), String> {
         let profile = selected_profile(self, start)?;
         Ok((
-            reviewed_codebuddy_files(
+            reviewed_file_worker(
                 profile.provider,
                 &profile.executable_identity,
                 profile.reviewed_controls.as_ref(),
@@ -452,8 +597,41 @@ impl ValidatedResourceProfiles {
 /// It conveys an administrator-selected binary, not task or credential authority.
 pub(crate) struct PinnedCatalogExecutable {
     pub(crate) program: PathBuf,
+    pub(crate) entrypoint: Option<PathBuf>,
+    pub(crate) codebuddy_config_directory: Option<PathBuf>,
     pub(crate) descriptor: AgentExecutionResourceDescriptor,
     _pins: Vec<std::fs::File>,
+}
+
+fn catalog_entrypoint(profile: &ValidatedProfile) -> Result<Option<PathBuf>, String> {
+    if profile.reviewed_controls.as_ref().is_some_and(|control| {
+        control.loading_method == webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING
+    }) {
+        let entrypoint = PathBuf::from(
+            &profile
+                .files
+                .iter()
+                .find(|file| file.destination == "bin/codebuddy/bin/codebuddy")
+                .ok_or("agent_resources_codebuddy_entrypoint_missing")?
+                .source,
+        );
+        let package = entrypoint
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("agent_resources_codebuddy_package_layout")?;
+        // Metadata runs at the installed source path. Its relative imports
+        // must resolve to the very files pinned by the reviewed manifest.
+        for file in &profile.files {
+            if let Some(relative) = file.destination.strip_prefix("bin/codebuddy/") {
+                if Path::new(&file.source) != package.join(relative) {
+                    return Err("agent_resources_codebuddy_package_layout".into());
+                }
+            }
+        }
+        Ok(Some(entrypoint))
+    } else {
+        Ok(None)
+    }
 }
 
 impl std::fmt::Debug for PinnedCatalogExecutable {
@@ -863,10 +1041,59 @@ mod windows {
         binding: &AgentExecutionBinding,
         resource_root: &Path,
     ) -> Result<(), String> {
-        let target = resource_root
+        let home = resource_root
             .join(format!("agent-{}", binding.identity_hash()?))
-            .join("home")
-            .join(webcodex_core::agent_cli_controls::CODEBUDDY_NATIVE_AUTH_RELATIVE);
+            .join("home");
+        let codebuddy =
+            home.join(webcodex_core::agent_cli_controls::CODEBUDDY_NATIVE_AUTH_RELATIVE);
+        cleanup_auth_directory(
+            codebuddy.parent().ok_or("agent_resources_cleanup_parent")?,
+            0,
+            &mut 0,
+        )?;
+        cleanup_auth_path(
+            &home.join(webcodex_core::agent_cli_controls::ANTIGRAVITY_NATIVE_AUTH_RELATIVE),
+        )?;
+        Ok(())
+    }
+
+    // A native refresh may atomically replace the private copy and create a
+    // lock/temporary file beside it. Clean only that execution's credential
+    // leaf after the process tree stops; never follow links or read contents.
+    fn cleanup_auth_directory(path: &Path, depth: usize, count: &mut usize) -> Result<(), String> {
+        if depth > 4 {
+            return Err("agent_resources_auth_cleanup_limit".into());
+        }
+        let mut pins = Vec::new();
+        let mut ancestors = path.ancestors().collect::<Vec<_>>();
+        ancestors.reverse();
+        for ancestor in ancestors {
+            let Some(pin) = open_cleanup_path(ancestor, true)? else {
+                return Ok(());
+            };
+            pins.push(pin);
+        }
+        for entry in
+            std::fs::read_dir(path).map_err(|_| "agent_resources_auth_cleanup_read_failed")?
+        {
+            *count += 1;
+            if *count > 64 {
+                return Err("agent_resources_auth_cleanup_limit".into());
+            }
+            let entry = entry.map_err(|_| "agent_resources_auth_cleanup_read_failed")?;
+            let kind = entry
+                .file_type()
+                .map_err(|_| "agent_resources_auth_cleanup_read_failed")?;
+            if kind.is_dir() {
+                cleanup_auth_directory(&entry.path(), depth + 1, count)?;
+            } else {
+                cleanup_auth_path(&entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn cleanup_auth_path(target: &Path) -> Result<(), String> {
         let parent = target.parent().ok_or("agent_resources_cleanup_parent")?;
         let mut ancestors = parent.ancestors().collect::<Vec<_>>();
         ancestors.reverse();
@@ -971,6 +1198,9 @@ mod windows {
                 let file = source(Path::new(&item.source), &item.sha256, &mut total, &mut pins)?;
                 pins.push(file);
             }
+            if let Some(directory) = &profile.codebuddy_config_directory {
+                pin_directories(Path::new(directory), &mut pins)?;
+            }
             // Every configured content hash has just been verified through a
             // retained reader. Recompute P and the bound review/F from it.
             validate_profile_manifest(id, profile)?;
@@ -1002,8 +1232,20 @@ mod windows {
             pins.push(file);
         }
         validate_profile_manifest(id, profile)?;
+        let entrypoint = catalog_entrypoint(profile)?;
+        let codebuddy_config_directory = profile
+            .codebuddy_config_directory
+            .as_ref()
+            .map(PathBuf::from);
+        if let Some(directory) = &codebuddy_config_directory {
+            // Keep the selected directory and its ancestors stable for the
+            // bounded metadata query without reading or pinning credentials.
+            pin_directories(directory, &mut pins)?;
+        }
         Ok(PinnedCatalogExecutable {
             program,
+            entrypoint,
+            codebuddy_config_directory,
             descriptor: AgentExecutionResourceDescriptor {
                 resource_set_id: id.into(),
                 manifest_hash: profile.manifest.clone(),
@@ -1063,6 +1305,15 @@ mod windows {
         Ok((bytes, pin))
     }
 
+    fn delivery_publication_error(error: String) -> String {
+        match error.as_str() {
+            "agent_resources_open_failed:2" | "agent_resources_open_failed:3" => {
+                "agent_cli_delivery_not_published".into()
+            }
+            _ => error,
+        }
+    }
+
     pub(super) fn read_delivery_bundle(
         binding: &AgentExecutionBinding,
         resource_root: &Path,
@@ -1075,17 +1326,26 @@ mod windows {
             .join("workspace/publish");
         absolute_path(&publish)?;
         let mut directories = Vec::new();
-        pin_directories(&publish, &mut directories)?;
+        // A missing execution workspace is unavailable evidence, not proof of
+        // absent publication. Classify only the worker's publish subtree.
+        pin_directories(
+            publish.parent().ok_or("agent_cli_delivery_invalid_path")?,
+            &mut directories,
+        )?;
         // Only this stopped Job's publication subtree denies write sharing.
         // Shared host ancestors retain the normal no-delete directory pins.
-        directories.push(open(
-            &publish,
-            true,
-            FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
-            FILE_SHARE_READ,
-        )?);
+        directories.push(
+            open(
+                &publish,
+                true,
+                FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
+                FILE_SHARE_READ,
+            )
+            .map_err(delivery_publication_error)?,
+        );
         let (manifest_bytes, manifest_pin) =
-            pin_delivery_file(&publish.join("manifest.json"), AGENT_CLI_MANIFEST_MAX_BYTES)?;
+            pin_delivery_file(&publish.join("manifest.json"), AGENT_CLI_MANIFEST_MAX_BYTES)
+                .map_err(delivery_publication_error)?;
         let manifest = webcodex_core::agent_cli::parse_delivery_manifest(&manifest_bytes)?;
         let mut identities = BTreeSet::from([manifest_pin.identity]);
         let mut readers = vec![manifest_pin];
@@ -1177,7 +1437,7 @@ mod windows {
             // only this mask; never WRITE_DAC, WRITE_OWNER, or broad AAP access.
             let mut sddl = format!("D:P(A;{inheritance};RC;;;OW)(A;{inheritance};FA;;;{owner})(A;{inheritance};FA;;;SY)(A;{inheritance};0x{mask:08x};;;{sid})");
             if low_integrity {
-                sddl.push_str("S:(ML;OICI;NW;;;LW)");
+                sddl.push_str(&format!("S:(ML;{inheritance};NW;;;LW)"));
             }
             let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
             let mut descriptor = null_mut();
@@ -1359,7 +1619,7 @@ mod windows {
     }
 
     fn copy_file(
-        source: &mut File,
+        source: &mut impl Read,
         path: &Path,
         expected: &str,
         descriptor: &Descriptor,
@@ -1454,6 +1714,7 @@ mod windows {
         root: &Path,
         directory_acl: &Descriptor,
         file_acl: &Descriptor,
+        refresh_acl: Option<(&Descriptor, &Descriptor)>,
         destination_pins: &mut Vec<File>,
     ) -> Result<(), String> {
         use webcodex_core::agent_cli_controls::CODEBUDDY_NATIVE_AUTH_RELATIVE;
@@ -1481,8 +1742,14 @@ mod windows {
             .components()
         {
             directory.push(part);
-            create_directory(&directory, directory_acl, destination_pins)?;
+            let acl = if Some(directory.as_path()) == destination_path.parent() {
+                refresh_acl.map(|pair| pair.0).unwrap_or(directory_acl)
+            } else {
+                directory_acl
+            };
+            create_directory(&directory, acl, destination_pins)?;
         }
+        let file_acl = refresh_acl.map(|pair| pair.1).unwrap_or(file_acl);
         let name = wide(&destination_path);
         let attributes = file_acl.attributes();
         let raw = unsafe {
@@ -1528,6 +1795,12 @@ mod windows {
         verify_acl(&destination, file_acl)?;
         let destination_identity = file_identity(&destination)?;
         drop(destination);
+        // Ancestors remain pinned. Only this execution's leaf is writable;
+        // native authentication refresh must be able to replace its own copy.
+        // The source was opened read-only and is never written back.
+        if refresh_acl.is_some() {
+            return Ok(());
+        }
         let pinned = open(
             &destination_path,
             false,
@@ -1539,6 +1812,143 @@ mod windows {
         }
         verify_acl(&pinned, file_acl)?;
         destination_pins.push(pinned);
+        Ok(())
+    }
+
+    fn copy_antigravity_auth(
+        root: &Path,
+        owner: &str,
+        package: &str,
+        pins: &mut Vec<File>,
+    ) -> Result<PathBuf, String> {
+        use windows_sys::Win32::Security::Credentials::{
+            CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
+        };
+        struct Credential(*mut CREDENTIALW);
+        impl Drop for Credential {
+            fn drop(&mut self) {
+                unsafe {
+                    let value = &mut *self.0;
+                    if !value.CredentialBlob.is_null()
+                        && value.CredentialBlobSize <= 2 * 1024 * 1024
+                    {
+                        std::ptr::write_bytes(
+                            value.CredentialBlob,
+                            0,
+                            value.CredentialBlobSize as usize,
+                        );
+                    }
+                    CredFree(self.0.cast());
+                }
+            }
+        }
+        let target: Vec<u16> = "gemini:antigravity".encode_utf16().chain(Some(0)).collect();
+        let mut pointer = null_mut();
+        if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut pointer) } == 0 {
+            return Err("antigravity_native_auth_unavailable".into());
+        }
+        let credential = Credential(pointer);
+        let value = unsafe { &*credential.0 };
+        if value.CredentialBlob.is_null()
+            || value.CredentialBlobSize == 0
+            || value.CredentialBlobSize > 2 * 1024 * 1024
+        {
+            return Err("antigravity_native_auth_invalid".into());
+        }
+        let directory_acl = Descriptor::new(
+            owner,
+            package,
+            FILE_GENERIC_READ
+                | FILE_GENERIC_WRITE
+                | FILE_GENERIC_EXECUTE
+                | DELETE
+                | FILE_DELETE_CHILD,
+            true,
+            true,
+        )?;
+        let file_acl = Descriptor::new(owner, package, FILE_GENERIC_READ, false, false)?;
+        let mut directory = root.join("home");
+        for name in [".gemini", "antigravity-cli"] {
+            directory.push(name);
+            create_directory(&directory, &directory_acl, pins)?;
+        }
+        // Confirmed by a non-secret malformed-file probe against this pinned
+        // CLI version. Keep the native token profile opaque; no host writeback.
+        let path = directory.join("antigravity-oauth-token");
+        let name = wide(&path);
+        let raw = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+                FILE_SHARE_READ,
+                &file_acl.attributes(),
+                CREATE_NEW,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(error("native_auth_copy_create_failed"));
+        }
+        let mut file = unsafe { File::from_raw_handle(raw as _) };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(value.CredentialBlob, value.CredentialBlobSize as usize)
+        };
+        file.write_all(bytes)
+            .map_err(|_| "antigravity_native_auth_copy_failed")?;
+        file.sync_all()
+            .map_err(|_| "antigravity_native_auth_copy_failed")?;
+        verify_acl(&file, &file_acl)?;
+        pins.push(file);
+        Ok(path)
+    }
+
+    fn install_antigravity_controls(
+        root: &Path,
+        owner: &str,
+        package: &str,
+        pins: &mut Vec<File>,
+    ) -> Result<(), String> {
+        let ro = Descriptor::new(owner, package, FILE_GENERIC_READ, false, false)?;
+        let ro_dir = Descriptor::new(
+            owner,
+            package,
+            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+            true,
+            false,
+        )?;
+        let config = root.join("home/.gemini/config");
+        // Native CLI creates its config lock/state beside the agent directory.
+        // The agent directory and both policy files remain read-only and pinned.
+        let config_dir = Descriptor::new(
+            owner,
+            package,
+            FILE_GENERIC_READ
+                | FILE_GENERIC_WRITE
+                | FILE_GENERIC_EXECUTE
+                | DELETE
+                | FILE_DELETE_CHILD,
+            true,
+            true,
+        )?;
+        create_directory(&config, &config_dir, pins)?;
+        create_directory(&config.join("agents"), &ro_dir, pins)?;
+        let (settings, agent) = antigravity_control_bytes(root)?;
+        for (target, bytes) in [
+            (
+                root.join("home/.gemini/antigravity-cli/settings.json"),
+                settings,
+            ),
+            (config.join("agents/webcodex-file-worker.md"), agent),
+        ] {
+            let digest = format!("{:x}", Sha256::digest(&bytes));
+            pins.push(copy_file(
+                &mut std::io::Cursor::new(bytes),
+                &target,
+                &digest,
+                &ro,
+            )?);
+        }
         Ok(())
     }
 
@@ -1608,7 +2018,7 @@ mod windows {
             .unwrap();
             let file = Descriptor::new(&owner, &package, FILE_GENERIC_READ, false, false).unwrap();
             let mut pins = Vec::new();
-            copy_native_auth(&host, &root, &dir, &file, &mut pins).unwrap();
+            copy_native_auth(&host, &root, &dir, &file, None, &mut pins).unwrap();
             let copied = root
                 .join("home")
                 .join(webcodex_core::agent_cli_controls::CODEBUDDY_NATIVE_AUTH_RELATIVE);
@@ -1622,6 +2032,80 @@ mod windows {
             assert_eq!(std::fs::read(&source).unwrap(), fixture);
             std::fs::write(&source, b"host can refresh independently").unwrap();
             assert_eq!(std::fs::read(&copied).unwrap(), fixture);
+        }
+
+        #[test]
+        fn native_refresh_is_private_replaceable_and_all_copies_are_cleaned() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = temp.path().join("host");
+            let root = temp.path().join("execution");
+            let relative = webcodex_core::agent_cli_controls::CODEBUDDY_NATIVE_AUTH_RELATIVE;
+            let source = host.join(relative);
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(root.join("home")).unwrap();
+            std::fs::write(&source, b"synthetic original").unwrap();
+            let sid =
+                webcodex_process::windows_lpac::AppContainerSid::derive("private-refresh-unit")
+                    .unwrap();
+            let owner = current_user().unwrap();
+            let package = sid_text(sid.as_ptr()).unwrap();
+            let ro_dir = Descriptor::new(
+                &owner,
+                &package,
+                FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+                true,
+                false,
+            )
+            .unwrap();
+            let ro_file =
+                Descriptor::new(&owner, &package, FILE_GENERIC_READ, false, false).unwrap();
+            let rw_dir = Descriptor::new(
+                &owner,
+                &package,
+                FILE_GENERIC_READ
+                    | FILE_GENERIC_WRITE
+                    | FILE_GENERIC_EXECUTE
+                    | DELETE
+                    | FILE_DELETE_CHILD,
+                true,
+                true,
+            )
+            .unwrap();
+            let rw_file = Descriptor::new(
+                &owner,
+                &package,
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
+                false,
+                true,
+            )
+            .unwrap();
+            let mut pins = Vec::new();
+            copy_native_auth(
+                &host,
+                &root,
+                &ro_dir,
+                &ro_file,
+                Some((&rw_dir, &rw_file)),
+                &mut pins,
+            )
+            .unwrap();
+            let copied = root.join("home").join(relative);
+            let parent = copied.parent().unwrap();
+            let lock = parent.join(".auth.workbuddy.lock");
+            std::fs::create_dir(&lock).unwrap();
+            std::fs::write(lock.join("lease"), b"synthetic lease").unwrap();
+            std::fs::rename(&copied, parent.join("auth.backup")).unwrap();
+            std::fs::write(&copied, b"synthetic refreshed").unwrap();
+            assert_eq!(std::fs::read(&source).unwrap(), b"synthetic original");
+            cleanup_auth_directory(parent, 0, &mut 0).unwrap();
+            assert!(!copied.exists());
+            assert!(!parent.join("auth.backup").exists());
+            assert!(!lock.join("lease").exists());
+            assert_eq!(std::fs::read(&source).unwrap(), b"synthetic original");
+            // Reject aliases before deleting a possible host file.
+            std::fs::hard_link(&source, parent.join("aliased")).unwrap();
+            assert!(cleanup_auth_directory(parent, 0, &mut 0).is_err());
+            assert_eq!(std::fs::read(&source).unwrap(), b"synthetic original");
         }
     }
 
@@ -1640,13 +2124,13 @@ mod windows {
         operator_probe: bool,
     ) -> Result<PreparedAgentResources, String> {
         use webcodex_core::agent_cli_controls::*;
-        let codebuddy_files = operator_probe
-            || reviewed_codebuddy_files(
+        let file_worker = operator_probe
+            || reviewed_file_worker(
                 profile.provider,
                 &profile.executable_identity,
                 profile.reviewed_controls.as_ref(),
             );
-        if codebuddy_files
+        if operator_probe
             && profile.executable_identity != format!("sha256:{CODEBUDDY_FILES_EXE_SHA256}")
         {
             return Err("codebuddy_native_binary_mismatch".into());
@@ -1735,11 +2219,21 @@ mod windows {
         if !operator_probe {
             validate_execution_args(profile, start)?;
         }
-        if codebuddy_files {
+        let antigravity_files =
+            file_worker && profile.provider == Some(AgentCliProvider::Antigravity);
+        if file_worker && !antigravity_files {
             let user_home = std::env::var_os("USERPROFILE")
                 .map(PathBuf::from)
                 .ok_or("codebuddy_native_auth_source_unavailable")?;
-            copy_native_auth(&user_home, &root, &ro_dir, &input_file, &mut pins)?;
+            let refresh_file = Descriptor::new(
+                &owner,
+                &package,
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
+                false,
+                true,
+            )?;
+            let refresh = (!operator_probe).then_some((&rw_dir, &refresh_file));
+            copy_native_auth(&user_home, &root, &ro_dir, &input_file, refresh, &mut pins)?;
             if operator_probe {
                 write_auth_canary(&root, &input_file, &mut pins)?;
             }
@@ -1768,6 +2262,13 @@ mod windows {
             }
         }
         let mut environment = environment(&root, &windows_path)?;
+        if profile
+            .reviewed_controls
+            .as_ref()
+            .is_some_and(|control| control.loading_method == CODEBUDDY_NODE_FILES_LOADING)
+        {
+            codebuddy_node_environment(&root, &mut environment)?;
+        }
         let proxy_requested = !operator_probe && profile.user_https_proxy;
         if proxy_requested {
             environment.insert(
@@ -1775,14 +2276,19 @@ mod windows {
                 super::super::agent_proxy::read_user_https_proxy()?,
             );
         }
+        if antigravity_files {
+            // The durable Job already owns cleanup intent before preparation.
+            copy_antigravity_auth(&root, &owner, &package, &mut pins)?;
+            install_antigravity_controls(&root, &owner, &package, &mut pins)?;
+        }
         Ok(PreparedAgentResources {
             program: root.join(PROGRAM),
             cwd: root.join("workspace"),
             environment,
             args,
             proxy_requested,
-            network: if codebuddy_files {
-                webcodex_process::windows_lpac::LpacNetwork::CodeBuddyFilesInternetClient
+            network: if file_worker {
+                webcodex_process::windows_lpac::LpacNetwork::ReviewedFileWorkerInternetClient
             } else {
                 webcodex_process::windows_lpac::LpacNetwork::None
             },

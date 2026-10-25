@@ -158,6 +158,8 @@ struct StoredReview {
     content_sha256: String,
     completion_key_sha256: String,
     expected_worker_revision: i64,
+    #[serde(default)]
+    worker_terminal_preserved: bool,
     request_hash: String,
 }
 /// Uses the original attempt's existing immutable review_json slot. There is no
@@ -825,13 +827,22 @@ impl Database {
                 return Err(conflict());
             }
             let execution = worker_execution(&tx, &original)?;
-            let expected_state = match review.reference.decision {
-                AgentCliReviewDecision::Accept => AgentTaskState::Succeeded,
-                AgentCliReviewDecision::Reject => AgentTaskState::Failed,
+            let expected_state = if review.worker_terminal_preserved {
+                AgentTaskState::Failed
+            } else {
+                match review.reference.decision {
+                    AgentCliReviewDecision::Accept => AgentTaskState::Succeeded,
+                    AgentCliReviewDecision::Reject => AgentTaskState::Failed,
+                }
             };
-            if execution.revision != review.expected_worker_revision.saturating_add(1)
-                || execution.state != expected_state
-            {
+            let expected_revision = review.expected_worker_revision.saturating_add(
+                if review.worker_terminal_preserved {
+                    0
+                } else {
+                    1
+                },
+            );
+            if execution.revision != expected_revision || execution.state != expected_state {
                 return Err(denied());
             }
             return Ok(AgentCliDeliveryReviewResult {
@@ -870,15 +881,35 @@ impl Database {
                 Some("CLI delivery rejected by an authorized reviewer"),
             ),
         };
-        let completed = crate::agent_task::complete_cli_worker_task_on_connection(
-            &tx,
-            &original.binding,
-            expected_worker_revision,
-            outcome,
-            result,
-            reason,
-            &key,
-        )?;
+        let execution = worker_execution(&tx, &original)?;
+        let worker_terminal_preserved = execution.state == AgentTaskState::Failed;
+        let execution = if worker_terminal_preserved {
+            // A stopped failed process may already have explicitly published
+            // useful files. Review that immutable artifact without rewriting
+            // the worker's failed completion, revision, reason or replay key.
+            if execution.revision != expected_worker_revision
+                || !original.terminal
+                || !crate::agent_execution_close::agent_execution_binding_stop_proven_on_connection(
+                    &tx,
+                    &original.binding,
+                )
+                .map_err(storage)?
+            {
+                return Err(denied());
+            }
+            execution
+        } else {
+            crate::agent_task::complete_cli_worker_task_on_connection(
+                &tx,
+                &original.binding,
+                expected_worker_revision,
+                outcome,
+                result,
+                reason,
+                &key,
+            )?
+            .execution
+        };
         let reference = AgentCliDeliveryReviewReference {
             entry_id: entry.entry_id,
             reviewer_agent_id: entry.author_agent_id,
@@ -897,6 +928,7 @@ impl Database {
             content_sha256: content_sha,
             completion_key_sha256: key_sha,
             expected_worker_revision,
+            worker_terminal_preserved,
             request_hash,
         };
         let changed=tx.execute("UPDATE wc_team_cli_attempts SET review_json=?2 WHERE attempt_id=?1 AND review_json IS NULL",params![source_attempt_id,encode(&saved)?]).map_err(storage)?;
@@ -907,9 +939,9 @@ impl Database {
         Ok(AgentCliDeliveryReviewResult {
             delivery: delivery.reference,
             review: reference,
-            worker_task_id: completed.execution.task_id,
-            worker_revision: completed.execution.revision,
-            worker_state: completed.execution.state,
+            worker_task_id: execution.task_id,
+            worker_revision: execution.revision,
+            worker_state: execution.state,
             replayed: false,
         })
     }

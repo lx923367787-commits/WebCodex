@@ -121,9 +121,13 @@ impl Database {
         // Reuse the original frozen plan and slot. No reserve, counter, key,
         // attempt ID, WorkerTask, Agent, or enrollment is created here.
         load_team_cli_attempt_for_fallback(&tx, &auth.communication_principal, attempt_id)?;
-        if old.requester.call_index >= auth.policy.max_cli_calls {
-            return Err(denied());
-        }
+        cli_slot_budget_on(
+            &tx,
+            &old.requester.root_task_id,
+            &old.requester.source_task_id,
+            old.requester.call_index,
+            auth.policy.max_cli_calls,
+        )?;
         let worker = crate::agent_isolation::recover_cancelled_cli_worker_on_connection(
             &tx, requester, &old,
         )

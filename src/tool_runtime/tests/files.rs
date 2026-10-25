@@ -9,6 +9,144 @@ use serde_json::{json, Value};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[tokio::test]
+async fn named_workspaces_files_pin_each_granted_root_and_enforce_revocation() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(crate::Database::open(&temp.path().join("state.db")).unwrap());
+    let user = crate::test_support::seed_user(&db, "workspace-owner");
+    let runtime = test_runtime()
+        .with_communication_database(db.clone())
+        .with_permission_evaluator(PermissionEvaluator::with_mode(AuthorityMode::TrustedAgent));
+    let mut folders = vec![];
+    for client in ["code", "docs"] {
+        let root = temp.path().join(client);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("hello.txt"), client).unwrap();
+        register_agent_with_projects(
+            &runtime,
+            client,
+            Some(&user.username),
+            RunnerCapabilities {
+                file_read: true,
+                file_write: true,
+                ..Default::default()
+            },
+            vec![named_registered_project(
+                client,
+                "main",
+                "main",
+                &root.to_string_lossy(),
+                1,
+            )],
+        )
+        .await;
+        let project = runner_project_runtime_id(client, "main");
+        folders.push(webcodex_store::NativeWorkspaceFolder {
+            project,
+            name: client.into(),
+            path: root.to_string_lossy().into_owned(),
+        });
+    }
+    let issued = db
+        .register_native_agent_host(&format!("tunnel_{}", "a".repeat(32)), &"b".repeat(64))
+        .unwrap();
+    let host = db
+        .authenticate_native_agent_host(&issued.into_secret())
+        .unwrap();
+    let mut workspace = webcodex_store::NativeWorkspace {
+        id: format!("wc_workspace_{}", "a".repeat(32)),
+        name: "Multi folder".into(),
+        enabled: true,
+        folders: folders.clone(),
+    };
+    db.configure_native_workspaces(host.host_id(), &user.id, 0, vec![workspace.clone()])
+        .unwrap();
+    let binding = db
+        .ensure_native_host_window(
+            &host,
+            &"c".repeat(64),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    for (index, client) in ["code", "docs"].into_iter().enumerate() {
+        let mut task = tokio::spawn({
+            let runtime = runtime.clone();
+            let binding = binding.clone();
+            let folder = folders[index].project.clone();
+            async move {
+                super::super::named_project_files::call(
+                    &runtime,
+                    &binding,
+                    json!({"action":"read","folder":folder,"path":"hello.txt"}),
+                )
+                .await
+            }
+        });
+        let req = tokio::select! {
+            req = wait_for_patch_agent_request(&runtime, client) => req,
+            result = &mut task => panic!("File call ended before dispatch: {:?}", result),
+        };
+        assert_eq!(req.kind, "file_read");
+        assert!(req.command.is_empty());
+        assert_eq!(req.cwd.as_deref(), Some(folders[index].path.as_str()));
+        complete_agent_ranged_file_read_request(&runtime, client, &req, client).await;
+        let result = task.await.unwrap();
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output.to_string().contains(client));
+    }
+    let task = tokio::spawn({
+        let runtime = runtime.clone();
+        let binding = binding.clone();
+        let folder = folders[0].project.clone();
+        async move {
+            super::super::named_project_files::call(&runtime,&binding,json!({"action":"write","folder":folder,"path":"hello.txt","content":"updated","expected_sha256":"a".repeat(64)})).await
+        }
+    });
+    let req = wait_for_patch_agent_request(&runtime, "code").await;
+    assert_eq!(req.kind, "file_write_project_file");
+    assert!(req.command.is_empty());
+    assert_eq!(req.cwd.as_deref(), Some(folders[0].path.as_str()));
+    let payload: Value = serde_json::from_str(req.content.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["expected_sha256"], "a".repeat(64));
+    assert_eq!(payload["overwrite"], true);
+    complete_patch_agent_request(&runtime,"code",&req.request_id,0,r#"{"path":"hello.txt","bytes_written":7,"sha256":"abc","changed":true,"state_changed":true,"execution_state":"completed"}"#,"").await;
+    assert!(task.await.unwrap().success);
+    for path in ["../outside.txt", "D:/outside.txt", ".env"] {
+        assert!(
+            !super::super::named_project_files::call(
+                &runtime,
+                &binding,
+                json!({"action":"read","folder":folders[0].project,"path":path})
+            )
+            .await
+            .success
+        );
+    }
+    workspace.folders.pop();
+    db.configure_native_workspaces(host.host_id(), &user.id, 1, vec![workspace.clone()])
+        .unwrap();
+    let denied = super::super::named_project_files::call(
+        &runtime,
+        &binding,
+        json!({"action":"read","folder":folders[1].project,"path":"hello.txt"}),
+    )
+    .await;
+    assert_eq!(
+        denied.output["error_kind"],
+        "workspace_folder_not_authorized"
+    );
+    workspace.folders[0].path.push_str("-changed");
+    db.configure_native_workspaces(host.host_id(), &user.id, 2, vec![workspace])
+        .unwrap();
+    let denied = super::super::named_project_files::call(
+        &runtime,
+        &binding,
+        json!({"action":"read","folder":folders[0].project,"path":"hello.txt"}),
+    )
+    .await;
+    assert_eq!(denied.output["error_kind"], "workspace_folder_changed");
+}
+
 #[cfg(windows)]
 async fn run_windows_tracked_listing(
     runtime: &ToolRuntime,

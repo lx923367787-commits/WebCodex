@@ -1,11 +1,10 @@
 //! Atomic construction around the canonical public Task and original CLI slot.
 //! Opaque controller values are not model input and cannot be deserialized.
 use super::*;
-#[path = "agent_execution_resume.rs"]
-mod resume;
 #[path = "agent_execution_read.rs"]
 mod read;
-pub use read::{AgentCliPlannedSlot, AgentCliPreparationPhase, AgentCliPreparationSnapshot};
+#[path = "agent_execution_resume.rs"]
+mod resume;
 use crate::agent_isolation::{
     activate_cli_worker_on_connection, authorize_agent_assignment_on_connection,
     enrollment_projection_on_connection, ensure_agent_run_execution_open_on_connection,
@@ -16,6 +15,7 @@ use crate::{
     AgentAssignmentOperation, AgentEnrollmentInput, AgentEnrollmentPolicy, AgentEnrollmentPurpose,
     NewAgentEnrollment, VerifiedAgentRun,
 };
+pub use read::{AgentCliPlannedSlot, AgentCliPreparationPhase, AgentCliPreparationSnapshot};
 use webcodex_core::runner_protocol::{
     AgentExecutionBinding, AgentExecutionCarrier, AgentExecutionExecutor, AgentExecutionRequester,
     AgentExecutionStart, AgentExecutionTarget, AgentRunRef,
@@ -398,9 +398,14 @@ impl Database {
         )?;
         ensure_agent_run_execution_open_on_connection(&tx, &run_ref(requester))
             .map_err(auth_error)?;
-        if request.call_index >= auth.policy.max_cli_calls
-            || !matches!(request.carrier, AgentExecutionCarrier::Job { .. })
-        {
+        cli_slot_budget_on(
+            &tx,
+            &request.root_task_id,
+            &request.source_task_id,
+            request.call_index,
+            auth.policy.max_cli_calls,
+        )?;
+        if !matches!(request.carrier, AgentExecutionCarrier::Job { .. }) {
             return Err(denied());
         }
         let reservation = reserve_team_cli_attempt_on_connection(
@@ -491,7 +496,7 @@ impl Database {
                 task_id: worker_task.task.summary.task_id.clone(),
                 task_directory: format!("workspace/cli-{}", uuid::Uuid::new_v4().simple()),
                 brief: attempt.instruction.clone(),
-                inputs: vec![],
+                inputs: attempt.inputs.clone(),
                 room_ids: vec![],
                 policy: AgentEnrollmentPolicy {
                     max_subagents: 0,

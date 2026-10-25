@@ -15,6 +15,7 @@ fn profile() -> AgentExecutionResourceProfile {
         provider: None,
         reviewed_controls: None,
         user_https_proxy: false,
+        codebuddy_config_directory: None,
         executable: path("worker.exe"),
         executable_sha256: "a".repeat(64),
         files: vec![

@@ -20,11 +20,16 @@ pub(crate) fn ensure(
     };
     if matches!(
         tool,
-        "agent_identity" | "agent_assignment" | "agent_private" | "agent_meeting"
+        "agent_identity"
+            | "agent_assignment"
+            | "agent_private"
+            | "agent_meeting"
+            | "agent_project_files"
     ) || crate::agent_team::supports(tool)
     {
-        // File targets/write fences and meeting membership are checked again
-        // in the transaction surrounding the actual operation.
+        // Each adapter rechecks its own authority: private Goal write fences,
+        // meeting membership, or the enrolled named-project grant. This list
+        // alone grants neither a filesystem target nor execution.
         return Ok(());
     }
     if matches!(

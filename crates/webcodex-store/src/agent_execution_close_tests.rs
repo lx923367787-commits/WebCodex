@@ -110,12 +110,14 @@ fn fixture_with_binding(bind: bool) -> Fixture {
                 task_id: task.clone(),
                 cli_calls: vec![
                     TeamCliCall {
+                        inputs: vec![],
                         provider_id: "workbuddy".into(),
                         model: "synthetic-model".into(),
                         effort: Some("high".into()),
                         instruction: Some("First explicit subtask".into()),
                     },
                     TeamCliCall {
+                        inputs: vec![],
                         provider_id: "workbuddy".into(),
                         model: "synthetic-model".into(),
                         effort: Some("high".into()),
@@ -521,6 +523,99 @@ fn pending_handoff_keeps_source_active_but_cannot_activate_before_close_proof() 
     assert_eq!(active.agent_id(), f.requester.agent_id());
     assert_eq!(active.run_id(), successor.run_id);
     assert!(f.db.validate_agent_run(&f.requester).is_err());
+}
+
+fn native_member(f: &Fixture) -> VerifiedAgentRun {
+    let task = new_task(&f.db, "native-member");
+    let (member, enrollment) =
+        enrolled(&f.db, &task, "native-member", "member", Some(&f.requester));
+    let principal = crate::agent_isolation::enrollment_principal_for_execution("owner");
+    let conn = f.db.conn.lock().unwrap();
+    conn.execute("INSERT INTO wc_team_agent_attempts(team_agent_attempt_id,root_task_id,source_task_id,project,owner_principal_kind,owner_principal_digest,request_key_hash,request_fingerprint,state,record_json,created_at_unix_ms) VALUES('native-queue',?1,?2,'project',?3,?4,'native-key','native-fingerprint','running','{}',1)",params![f.binding.requester.root_task_id,task,principal.kind,principal.digest]).unwrap();
+    conn.execute("INSERT INTO wc_agent_host_dispatch_bindings(queue_kind,queue_id,owner_user,project,root_task_id,source_task_id,task_id,manager_agent_id,enrollment_id,agent_id,thinking_profile_id,created_at_unix_ms) VALUES('member','native-queue','owner','project',?1,?2,?2,?3,?4,?5,'profile',1)",params![f.binding.requester.root_task_id,task,f.requester.agent_id(),enrollment,member.agent_id()]).unwrap();
+    member
+}
+
+#[test]
+fn claimed_native_member_closes_as_descendant_without_rewriting_team_history() {
+    let f = fixture();
+    let member = native_member(&f);
+    let plan = begin(&f);
+    assert!(plan.blocked_attempt_ids().is_empty());
+    assert_eq!(plan.requests().len(), 1);
+    assert!(
+        !f.db
+            .agent_execution_close_status("owner", "project", &reference(&f.requester))
+            .unwrap()
+            .complete
+    );
+    {
+        let conn = f.db.conn.lock().unwrap();
+        assert!(ensure_agent_run_execution_open_on_connection(&conn, &reference(&member)).is_err());
+    }
+    assert!(
+        f.db.accept_agent_execution_close_receipt(&receipt(&plan.requests()[0]))
+            .unwrap()
+            .complete
+    );
+    f.db.validate_agent_run(&member).unwrap();
+    let conn = f.db.conn.lock().unwrap();
+    let queue: (String,String) = conn.query_row("SELECT state,record_json FROM wc_team_agent_attempts WHERE team_agent_attempt_id='native-queue'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(queue, ("running".into(), "{}".into()));
+    let assignment: String = conn
+        .query_row(
+            "SELECT state FROM wc_agent_enrollment_assignments WHERE agent_id=?1",
+            [member.agent_id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(assignment, "active");
+}
+
+#[test]
+fn native_member_without_exact_claim_or_scope_still_blocks_closure() {
+    for mutation in [
+        "DELETE FROM wc_agent_host_dispatch_bindings",
+        "UPDATE wc_agent_host_dispatch_bindings SET owner_user='other'",
+        "UPDATE wc_agent_host_dispatch_bindings SET manager_agent_id='other'",
+        "UPDATE wc_agent_host_dispatch_bindings SET agent_id='other'",
+        "UPDATE wc_agent_enrollments SET state='issued' WHERE purpose='member'",
+    ] {
+        let f = fixture();
+        native_member(&f);
+        f.db.conn.lock().unwrap().execute(mutation, []).unwrap();
+        let plan = begin(&f);
+        assert!(!plan.blocked_attempt_ids().is_empty(), "{mutation}");
+    }
+}
+
+#[test]
+fn already_proven_native_descendants_allow_atomic_source_handoff_closure() {
+    let f = fixture();
+    let member = native_member(&f);
+    let worker_plan =
+        f.db.begin_agent_execution_close("owner", "project", &reference(&f.worker), now() + 30_000)
+            .unwrap();
+    f.db.accept_agent_execution_close_receipt(&receipt(&worker_plan.requests()[0]))
+        .unwrap();
+    let mut conn = f.db.conn.lock().unwrap();
+    let tx = conn.transaction().unwrap();
+    require_agent_run_execution_closed_on_connection(
+        &tx,
+        "owner",
+        "project",
+        &reference(&f.requester),
+    )
+    .unwrap();
+    assert!(ensure_agent_run_execution_open_on_connection(&tx, &reference(&member)).is_err());
+    tx.commit().unwrap();
+    assert!(conn
+        .query_row(
+            "SELECT execution_closed_at_unix_ms IS NOT NULL FROM wc_agent_runs WHERE run_id=?1",
+            [f.requester.run_id()],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
 }
 
 #[test]

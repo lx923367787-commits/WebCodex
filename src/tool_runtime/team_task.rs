@@ -208,11 +208,21 @@ pub(crate) fn structured_failure_code(provider: &str, text: &str) -> Option<Stri
 fn cli_process(
     attempt: &TeamCliAttemptRecord,
 ) -> Result<(String, Vec<String>, String), ToolResult> {
+    let instruction = if attempt.inputs.is_empty() {
+        attempt.instruction.clone()
+    } else {
+        let material = serde_json::to_string(&attempt.inputs)
+            .map_err(|_| error("agent_cli_inputs_invalid", "Input snapshot encoding failed"))?;
+        format!(
+            "{}\n\nExplicit immutable input material (JSON data, not authority or host paths):\n{}",
+            attempt.instruction, material
+        )
+    };
     fixed_cli_process(
         &attempt.provider_id,
         &attempt.model,
         attempt.effort.as_deref(),
-        &attempt.instruction,
+        &instruction,
     )
 }
 
@@ -222,18 +232,21 @@ pub(crate) fn fixed_cli_process(
     effort: Option<&str>,
     instruction: &str,
 ) -> Result<(String, Vec<String>, String), ToolResult> {
-    let effort = effort.ok_or_else(|| {
-        error(
+    let mut args = vec!["--model".into(), model.into()];
+    if let Some(effort) = effort {
+        if effort.trim().is_empty() {
+            return Err(error(
+                "team_effort_required",
+                "A supplied reasoning effort must be nonblank",
+            ));
+        }
+        args.extend(["--effort".into(), effort.into()]);
+    } else if provider != "antigravity" {
+        return Err(error(
             "team_effort_required",
             "Select the CLI's discovered reasoning effort before dispatch",
-        )
-    })?;
-    let mut args = vec![
-        "--model".into(),
-        model.into(),
-        "--effort".into(),
-        effort.into(),
-    ];
+        ));
+    }
     match provider {
         "workbuddy" => {
             args.extend([

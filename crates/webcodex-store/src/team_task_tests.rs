@@ -6,6 +6,62 @@ use std::sync::{Arc, Barrier};
 
 const PROJECT: &str = "agent:runner:team";
 
+#[test]
+fn saved_policy_effort_resolves_null_and_replays_original_revision() {
+    let (_dir, db) = database();
+    let owner = principal('a');
+    let root = task(&db, &owner, PROJECT, "saved-root");
+    let child = task(&db, &owner, PROJECT, "saved-child");
+    let mut settings = TeamPolicyInput::default();
+    settings.providers[0].model = Some("discovered-model".into());
+    settings.providers[0].effort = Some("high".into());
+    settings.providers[1].model = Some("agy-model".into());
+    db.save_team_policy(&owner, PROJECT, 0, settings.clone())
+        .unwrap();
+    let mut input = plan(&root, &child);
+    input.manager.cli_calls[0].effort = Some("project_policy".into());
+    input.manager.cli_calls[1].provider_id = "antigravity".into();
+    input.manager.cli_calls[1].model = "agy-model".into();
+    input.manager.cli_calls[1].effort = Some("project_policy".into());
+    let mut wrong = input.clone();
+    wrong.manager.cli_calls[1].model = "other-model".into();
+    assert_eq!(
+        db.register_team_plan(&owner, PROJECT, &root, 1, wrong, "wrong")
+            .unwrap_err()
+            .code(),
+        "team_saved_selection_mismatch"
+    );
+    assert_eq!(
+        db.register_team_plan(&owner, PROJECT, &root, 0, input.clone(), "stale")
+            .unwrap_err()
+            .code(),
+        "team_policy_revision_conflict"
+    );
+    let frozen = db
+        .register_team_plan(&owner, PROJECT, &root, 1, input.clone(), "saved-plan")
+        .unwrap();
+    assert_eq!(
+        frozen.plan.plan.manager.cli_calls[0].effort.as_deref(),
+        Some("high")
+    );
+    assert_eq!(frozen.plan.plan.manager.cli_calls[1].effort, None);
+    settings.providers[1].effort = Some("new-effort".into());
+    settings.providers[1].enabled = false;
+    db.save_team_policy(&owner, PROJECT, 1, settings).unwrap();
+    let replay = db
+        .register_team_plan(&owner, PROJECT, &root, 1, input.clone(), "saved-plan")
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.plan.plan.manager.cli_calls[1].effort, None);
+    input.manager.cli_calls[1].effort = None;
+    assert_eq!(
+        db.register_team_plan(&owner, PROJECT, &root, 1, input, "saved-plan")
+            .unwrap_err()
+            .code(),
+        "team_idempotency_conflict"
+    );
+}
+
 fn principal(hex: char) -> CommunicationPrincipal {
     CommunicationPrincipal {
         kind: "user".into(),
@@ -44,6 +100,7 @@ fn task(db: &Database, owner: &CommunicationPrincipal, project: &str, key: &str)
 
 fn call() -> TeamCliCall {
     TeamCliCall {
+        inputs: vec![],
         provider_id: "workbuddy".into(),
         model: "discovered-model".into(),
         effort: Some("high".into()),
@@ -244,12 +301,12 @@ fn custom_policy_counts_all_ordinary_members_and_pins_native_selection() {
 }
 
 #[test]
-fn missing_or_blank_cli_effort_cannot_freeze_an_unstartable_plan() {
+fn optional_cli_effort_preserves_none_but_rejects_blank_values() {
     let (_dir, db) = database();
     let owner = principal('a');
     let root = task(&db, &owner, PROJECT, "root");
     let child = task(&db, &owner, PROJECT, "child");
-    for effort in [None, Some(String::new()), Some(" \t".into())] {
+    for effort in [Some(String::new()), Some(" \t".into())] {
         let mut planned = plan(&root, &child);
         planned.manager.cli_calls[0].effort = effort;
         assert_eq!(
@@ -265,21 +322,13 @@ fn missing_or_blank_cli_effort_cannot_freeze_an_unstartable_plan() {
             .total_count,
         0
     );
+    let mut no_effort = plan(&root, &child);
+    no_effort.manager.cli_calls[0].effort = None;
     let valid = db
-        .register_team_plan(
-            &owner,
-            PROJECT,
-            &root,
-            0,
-            plan(&root, &child),
-            "valid-effort",
-        )
+        .register_team_plan(&owner, PROJECT, &root, 0, no_effort, "valid-effort")
         .unwrap();
     assert!(valid.created);
-    assert_eq!(
-        valid.plan.plan.manager.cli_calls[0].effort.as_deref(),
-        Some("high")
-    );
+    assert_eq!(valid.plan.plan.manager.cli_calls[0].effort.as_deref(), None);
     assert!(valid
         .plan
         .policy

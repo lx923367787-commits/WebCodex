@@ -10,16 +10,17 @@ mod accounts;
 mod activity;
 mod admin_project_lifecycle;
 mod native_agent_host;
+mod native_workspaces;
 pub use native_agent_host::{
     NativeAgentHostGrant, VerifiedNativeAgentHost, NATIVE_AGENT_HOST_TOKEN_PREFIX,
 };
-pub(crate) mod agent_execution_close;
+pub use native_workspaces::{NativeWorkspace, NativeWorkspaceCatalog, NativeWorkspaceFolder};
 pub(crate) mod agent_cli_delivery;
+pub(crate) mod agent_execution_close;
 pub use agent_cli_delivery::{
     AgentCliDeliveryReference, AgentCliDeliveryRejectionResult, AgentCliDeliveryReviewReference,
-    AgentCliDeliveryReviewResult,
-    AgentCliDeliveryStopEvidence, AgentCliDeliveryView, AgentCliReviewDecision,
-    AuthenticatedAgentCliDeliverySnapshot,
+    AgentCliDeliveryReviewResult, AgentCliDeliveryStopEvidence, AgentCliDeliveryView,
+    AgentCliReviewDecision, AuthenticatedAgentCliDeliverySnapshot,
 };
 #[cfg(test)]
 mod agent_cli_delivery_tests;
@@ -39,9 +40,9 @@ mod agent_task;
 pub use agent_isolation::{
     AgentAssignmentOperation, AgentEnrollmentAuthority, AgentEnrollmentClaim, AgentEnrollmentGrant,
     AgentEnrollmentInput, AgentEnrollmentIssued, AgentEnrollmentPolicy, AgentEnrollmentProjection,
-    AgentEnrollmentPurpose, AgentEnrollmentSnapshot, AgentEnrollmentStatus, AgentHostManagerBinding,
-    AgentIsolationError,
-    AgentRunGrant, IsolatedAgentIdentity, NewAgentEnrollment, VerifiedAgentRun,
+    AgentEnrollmentPurpose, AgentEnrollmentSnapshot, AgentEnrollmentStatus,
+    AgentHostManagerBinding, AgentIsolationError, AgentRunGrant, IsolatedAgentIdentity,
+    NewAgentEnrollment, VerifiedAgentRun,
 };
 pub use agent_meeting::{
     AgentMeetingArtifact, AgentMeetingArtifactTarget, AgentMeetingEntry, AgentMeetingKind,
@@ -85,14 +86,15 @@ mod window_activity;
 
 pub use self::admin_project_lifecycle::{AdminProjectAudit, AdminProjectIdempotencyRecord};
 pub use self::agent_task::{
-    AgentCliWorkerTaskSnapshot, AgentPublicTaskExecution, AgentPublicTaskMutation, AgentTaskAttemptCompletionMutation,
-    AgentTaskAttemptHeartbeatMutation, AgentTaskAttemptRecord, AgentTaskAttemptStartMutation,
-    AgentTaskAttemptState, AgentTaskCodingRunBindingIntent, AgentTaskCodingRunBindingRecord,
-    AgentTaskCodingRunDispatchClaim, AgentTaskCodingRunDispatchState,
-    AgentTaskCodingRunObservation, AgentTaskCodingRunPrepared, AgentTaskCodingRunReconcileMutation,
-    AgentTaskCodingRunStartContext, AgentTaskDetail, AgentTaskExecutionRecoveryKind,
-    AgentTaskExecutionStatus, AgentTaskMutation, AgentTaskPage, AgentTaskState, AgentTaskSummary,
-    NewAgentTask, MAX_AGENT_TASK_LIST_LIMIT, MAX_AGENT_TASK_TERMINAL_TEXT_BYTES,
+    AgentCliWorkerTaskSnapshot, AgentPublicTaskExecution, AgentPublicTaskMutation,
+    AgentTaskAttemptCompletionMutation, AgentTaskAttemptHeartbeatMutation, AgentTaskAttemptRecord,
+    AgentTaskAttemptStartMutation, AgentTaskAttemptState, AgentTaskCodingRunBindingIntent,
+    AgentTaskCodingRunBindingRecord, AgentTaskCodingRunDispatchClaim,
+    AgentTaskCodingRunDispatchState, AgentTaskCodingRunObservation, AgentTaskCodingRunPrepared,
+    AgentTaskCodingRunReconcileMutation, AgentTaskCodingRunStartContext, AgentTaskDetail,
+    AgentTaskExecutionRecoveryKind, AgentTaskExecutionStatus, AgentTaskMutation, AgentTaskPage,
+    AgentTaskState, AgentTaskSummary, NewAgentTask, MAX_AGENT_TASK_LIST_LIMIT,
+    MAX_AGENT_TASK_TERMINAL_TEXT_BYTES,
 };
 #[allow(unused_imports)]
 pub use self::agent_wake::{

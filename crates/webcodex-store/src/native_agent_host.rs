@@ -83,6 +83,16 @@ impl Database {
                host_id TEXT PRIMARY KEY REFERENCES wc_native_agent_hosts(host_id),
                owner_user TEXT NOT NULL REFERENCES users(id), project TEXT NOT NULL,
                max_subagents INTEGER NOT NULL, max_cli_calls INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS wc_native_workspace_catalogs (
+               host_id TEXT PRIMARY KEY REFERENCES wc_native_agent_hosts(host_id),
+               owner_user TEXT NOT NULL REFERENCES users(id), revision INTEGER NOT NULL,
+               projects_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS wc_native_workspace_team_targets (
+               agent_id TEXT PRIMARY KEY REFERENCES wc_isolated_agents(agent_id),
+               host_id TEXT NOT NULL REFERENCES wc_native_agent_hosts(host_id),
+               folder_json TEXT NOT NULL
              );",
         )?;
         Ok(())

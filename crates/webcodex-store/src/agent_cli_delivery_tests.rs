@@ -230,6 +230,7 @@ impl Fixture {
         let planned = |task_id: String| TeamAgentPlan {
             task_id,
             cli_calls: vec![TeamCliCall {
+                inputs: vec![],
                 provider_id: "workbuddy".into(),
                 model: "synthetic-model".into(),
                 effort: Some("high".into()),
@@ -928,6 +929,105 @@ fn cli_delivery_concurrent_connections_commit_one_review_and_worker_terminal() {
     assert_eq!(f.execution().state, AgentTaskState::Succeeded);
     assert_eq!(f.execution().revision, f.started.execution.revision + 1);
     f.assert_other_tasks_active();
+}
+
+#[test]
+fn cli_delivery_reviews_published_output_after_failure_without_rewriting_execution() {
+    for decision in [
+        AgentCliReviewDecision::Accept,
+        AgentCliReviewDecision::Reject,
+    ] {
+        let f = Fixture::new();
+        f.observe(
+            ShellCommandExecutionState::TimedOut,
+            Some("provider_failed"),
+        );
+        f.prove_stop();
+        let failed =
+            f.db.complete_agent_cli_worker_task(
+                &f.permit,
+                f.started.execution.revision,
+                AgentTaskState::Failed,
+                None,
+                Some("Original timeout"),
+                "observer-timeout",
+            )
+            .unwrap();
+        let published =
+            f.db.publish_agent_cli_delivery(&SyntheticDelivery::new(&f.binding, ARTIFACT))
+                .unwrap();
+        let original_execution = f.execution();
+        let original_attempt = f.attempt_json();
+        let counts = f.counts();
+        assert!(f
+            .db
+            .review_agent_cli_delivery(
+                &f.caller,
+                f.attempt(),
+                failed.execution.revision - 1,
+                &published.artifact,
+                decision,
+                "Independently inspected candidate",
+                "review"
+            )
+            .is_err());
+        assert_eq!(f.counts(), counts);
+        let reviewed =
+            f.db.review_agent_cli_delivery(
+                &f.caller,
+                f.attempt(),
+                failed.execution.revision,
+                &published.artifact,
+                decision,
+                "Independently inspected candidate",
+                "review",
+            )
+            .unwrap();
+        assert_eq!(reviewed.worker_state, AgentTaskState::Failed);
+        assert_eq!(reviewed.worker_revision, failed.execution.revision);
+        assert!(!reviewed.replayed);
+        let reopened = f.reopen();
+        let replay = reopened
+            .review_agent_cli_delivery(
+                &f.caller,
+                f.attempt(),
+                failed.execution.revision,
+                &published.artifact,
+                decision,
+                "Independently inspected candidate",
+                "review",
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(f.execution(), original_execution);
+        assert_eq!(f.attempt_json(), original_attempt);
+        assert_eq!(f.counts(), (counts.0, counts.1, counts.2 + 1, counts.3));
+        assert!(reopened
+            .review_agent_cli_delivery(
+                &f.caller,
+                f.attempt(),
+                failed.execution.revision,
+                &published.artifact,
+                decision,
+                "Changed decision grounds",
+                "review"
+            )
+            .is_err());
+        // Original failure completion still replays with its original key.
+        assert!(
+            f.db.complete_agent_cli_worker_task(
+                &f.permit,
+                f.started.execution.revision,
+                AgentTaskState::Failed,
+                None,
+                Some("Original timeout"),
+                "observer-timeout"
+            )
+            .unwrap()
+            .replayed
+        );
+        f.assert_other_tasks_active();
+    }
 }
 
 #[test]

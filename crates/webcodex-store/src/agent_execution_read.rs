@@ -10,8 +10,9 @@ pub struct AgentCliPlannedSlot {
     pub call_index: u32,
     pub provider_id: String,
     pub model: String,
-    pub effort: String,
+    pub effort: Option<String>,
     pub instruction: String,
+    pub inputs: Vec<crate::AgentEnrollmentInput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,9 +54,13 @@ impl Database {
             &identity.requester.source_task_id,
             true,
         )?;
-        if identity.requester.call_index >= auth.policy.max_cli_calls {
-            return Err(denied());
-        }
+        cli_slot_budget_on(
+            &tx,
+            &identity.requester.root_task_id,
+            &identity.requester.source_task_id,
+            identity.requester.call_index,
+            auth.policy.max_cli_calls,
+        )?;
         let requester = enrollment_projection_on_connection(&tx, current).map_err(auth_error)?;
         if requester.enrollment_id != identity.requester.enrollment_id {
             return Err(denied());
@@ -149,9 +154,13 @@ impl Database {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(store_error)?;
         let auth = source_authority(&tx, current, root_task_id, source_task_id, false)?;
-        if call_index >= 32 || call_index >= auth.policy.max_cli_calls {
-            return Err(denied());
-        }
+        cli_slot_budget_on(
+            &tx,
+            root_task_id,
+            source_task_id,
+            call_index,
+            auth.policy.max_cli_calls,
+        )?;
         owned_task(
             &tx,
             &auth.communication_principal,
@@ -164,7 +173,7 @@ impl Database {
             current.project(),
             source_task_id,
         )?;
-        let plan = plan_on(&tx, &auth.communication_principal, root_task_id)?;
+        let plan = execution_plan_on(&tx, &auth.communication_principal, root_task_id)?;
         if plan.project_id != current.project() {
             return Err(denied());
         }
@@ -177,16 +186,13 @@ impl Database {
                     "The exact CLI slot is not in the frozen plan",
                 )
             })?;
-        let effort = call
+        if call
             .effort
             .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                error(
-                    "team_cli_effort_required",
-                    "Frozen CLI effort is unavailable",
-                )
-            })?;
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(error("invalid_team_request", "Frozen CLI effort is blank"));
+        }
         Ok(AgentCliPlannedSlot {
             project: current.project().into(),
             root_task_id: root_task_id.into(),
@@ -194,8 +200,9 @@ impl Database {
             call_index,
             provider_id: call.provider_id.clone(),
             model: call.model.clone(),
-            effort: effort.into(),
+            effort: call.effort.clone(),
             instruction: call.instruction.clone().unwrap_or(source.instruction),
+            inputs: call.inputs.clone(),
         })
     }
 

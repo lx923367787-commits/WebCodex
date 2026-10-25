@@ -39,6 +39,7 @@ fn member(task_id: &str, calls: usize) -> TeamAgentPlan {
         task_id: task_id.into(),
         cli_calls: (0..calls)
             .map(|index| TeamCliCall {
+                inputs: vec![],
                 provider_id: "workbuddy".into(),
                 model: "observed-model".into(),
                 effort: Some("high".into()),

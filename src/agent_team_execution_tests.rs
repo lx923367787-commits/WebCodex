@@ -9,6 +9,41 @@ use webcodex_core::runner_protocol::{
 };
 
 #[test]
+fn agent_team_catalog_failure_preserves_denial_and_redacts_unknown_text() {
+    let busy = catalog_unavailable(
+        "agent_team_host_catalog_unavailable:profiles_read:plugin_provider_busy",
+    );
+    assert_eq!(busy.output["stage"], "profiles_read");
+    assert_eq!(busy.output["reason_code"], "plugin_provider_busy");
+    let private =
+        catalog_unavailable("agent_team_host_catalog_unavailable:secret-stage:secret-reason");
+    assert!(private.output.get("stage").is_none());
+    assert!(!serde_json::to_string(&private).unwrap().contains("secret"));
+    for reason in [
+        "agent_team_host_provider_unavailable",
+        "agent_team_cli_resource_binding_mismatch",
+        "workspace_team_new_chat_required",
+    ] {
+        let result = catalog_unavailable(reason);
+        assert!(!result.success);
+        assert_eq!(result.output["reason_code"], reason);
+        assert_eq!(result.output["dispatched"], false);
+        assert_eq!(result.output["state_changed"], false);
+    }
+    for reason in [
+        "private credential value",
+        "agent_team_host_provider_unavailable\nsecret",
+    ] {
+        let result = catalog_unavailable(reason);
+        assert_eq!(
+            result.output["reason_code"],
+            "agent_team_catalog_unavailable"
+        );
+        assert!(!serde_json::to_string(&result).unwrap().contains(reason));
+    }
+}
+
+#[test]
 fn agent_team_execution_delivery_contract_is_deterministic_and_keeps_task_on_stdin() {
     let brief = "Produce the requested report.\n--model is task text, not argv.";
     let prompt = cli_worker_prompt(brief);
@@ -86,6 +121,25 @@ fn provider(id: &str) -> ObservedCliProvider {
         resource_manifest_hash: controls.execution_manifest_sha256().unwrap(),
         controls: Some(controls),
     }
+}
+
+#[test]
+fn antigravity_exact_catalog_slug_pins_effort_without_override() {
+    let mut observed = provider("antigravity");
+    observed.models.push("gemini-3.8-flash-high".into());
+    assert!(cli_selection_discovered(
+        &observed,
+        "gemini-3.8-flash-high",
+        None
+    ));
+    assert!(!cli_selection_discovered(&observed, "unknown-high", None));
+    assert!(!cli_selection_discovered(&observed, "explicit-model", None));
+    observed.provider_id = "workbuddy".into();
+    assert!(!cli_selection_discovered(
+        &observed,
+        "gemini-3.8-flash-high",
+        None
+    ));
 }
 
 fn catalog(project: &str, providers: Vec<ObservedCliProvider>) -> AgentTeamCatalog {
@@ -454,15 +508,15 @@ fn agent_team_execution_control_flag_case_is_preserved_by_the_shared_shape_contr
 fn agent_team_execution_catalog_rejects_stale_wrong_scope_and_invalid_hash_facts() {
     let (_temp, _db, binding) = run_fixture();
     let valid = catalog(binding.project(), vec![provider("workbuddy")]);
-    assert!(validate_catalog(&valid, &binding, 1_500).is_ok());
+    assert!(validate_catalog(&_db, &valid, &binding, 1_500).is_ok());
     let mut wrong_project = valid.clone();
     wrong_project.project = "agent:test-runner:other".into();
-    assert!(validate_catalog(&wrong_project, &binding, 1_500).is_err());
+    assert!(validate_catalog(&_db, &wrong_project, &binding, 1_500).is_err());
     let mut wrong_runner = valid.clone();
     wrong_runner.target.client_id = "other-runner".into();
-    assert!(validate_catalog(&wrong_runner, &binding, 1_500).is_err());
-    assert!(validate_catalog(&valid, &binding, 999).is_err());
-    assert!(validate_catalog(&valid, &binding, 2_000).is_err());
+    assert!(validate_catalog(&_db, &wrong_runner, &binding, 1_500).is_err());
+    assert!(validate_catalog(&_db, &valid, &binding, 999).is_err());
+    assert!(validate_catalog(&_db, &valid, &binding, 2_000).is_err());
     for malformed in [
         "g".repeat(64),
         "a".repeat(63),
@@ -471,10 +525,10 @@ fn agent_team_execution_catalog_rejects_stale_wrong_scope_and_invalid_hash_facts
     ] {
         let mut binary = valid.clone();
         binary.providers[0].executable_sha256 = malformed.clone();
-        assert!(validate_catalog(&binary, &binding, 1_500).is_err());
+        assert!(validate_catalog(&_db, &binary, &binding, 1_500).is_err());
         let mut manifest = valid.clone();
         manifest.providers[0].resource_manifest_hash = malformed;
-        assert!(validate_catalog(&manifest, &binding, 1_500).is_err());
+        assert!(validate_catalog(&_db, &manifest, &binding, 1_500).is_err());
     }
 }
 
@@ -484,7 +538,7 @@ fn agent_team_execution_catalog_preserves_models_without_inventing_effort_choice
     let mut observed = provider("workbuddy");
     observed.efforts.clear();
     let observed = catalog(binding.project(), vec![observed]);
-    assert!(validate_catalog(&observed, &binding, 1_500).is_ok());
+    assert!(validate_catalog(&_db, &observed, &binding, 1_500).is_ok());
     let projected = catalog_projection(&observed);
     assert_eq!(
         projected["providers"][0]["models"],
@@ -544,6 +598,35 @@ fn agent_team_execution_fixed_argv_keeps_model_and_effort_literal_and_brief_on_s
         crate::tool_runtime::fixed_cli_process("unknown-provider", model, Some(effort), brief)
             .is_err()
     );
+}
+
+#[test]
+fn agent_team_execution_no_effort_is_allowed_only_for_catalogs_without_effort_options() {
+    let mut observed = provider("antigravity");
+    observed.efforts.clear();
+    assert!(cli_selection_discovered(&observed, "explicit-model", None));
+    assert!(!cli_selection_discovered(&observed, "unknown-model", None));
+    assert!(!cli_selection_discovered(
+        &observed,
+        "explicit-model",
+        Some("none")
+    ));
+    observed.efforts.push("high".into());
+    assert!(!cli_selection_discovered(&observed, "explicit-model", None));
+    assert!(cli_selection_discovered(
+        &observed,
+        "explicit-model",
+        Some("high")
+    ));
+    assert!(!cli_selection_discovered(
+        &observed,
+        "explicit-model",
+        Some("default")
+    ));
+    let (_, args, _) =
+        crate::tool_runtime::fixed_cli_process("antigravity", "explicit-model", None, "brief")
+            .unwrap();
+    assert!(!args.iter().any(|arg| arg == "--effort"));
 }
 
 #[test]
@@ -633,8 +716,10 @@ fn agent_team_execution_close_request_id_replays_stably_and_separates_targets() 
     };
     let original = close_request_id(&close);
     assert_eq!(close_request_id(&close.clone()), original);
-    assert!(original.starts_with("wc_close_request_"));
-    assert_eq!(original.len(), "wc_close_request_".len() + 64);
+    assert!(original.starts_with("wc_close_"));
+    assert_eq!(original.len(), "wc_close_".len() + 64);
+    // RunnerRegistry validates control request IDs with its 80-byte ID bound.
+    assert!(original.len() <= 80);
     let mut another_client = close.clone();
     another_client.target.client_id = "another-runner".into();
     assert_ne!(close_request_id(&another_client), original);
@@ -702,4 +787,36 @@ fn agent_team_execution_worker_observation_exposes_cas_without_private_completio
     assert!(!serialized.contains("private"));
     assert!(projection.get("stopped_confirmed").is_none());
     assert!(projection.get("job").is_none());
+}
+
+#[test]
+fn agent_team_execution_input_material_changes_launch_hash_and_is_not_argv() {
+    let mut inputs = vec![webcodex_store::AgentEnrollmentSnapshot {
+        name: "source.js".into(),
+        content: "const x=1;\n".into(),
+        sha256: "a".repeat(64),
+    }];
+    let prompt = cli_worker_input_prompt("Review material", &inputs).unwrap();
+    assert!(prompt.contains("workspace starts empty"));
+    let (_, args, stdin) =
+        crate::tool_runtime::fixed_cli_process("antigravity", "gemini-fixed", None, &prompt)
+            .unwrap();
+    assert!(!args.iter().any(|a| a.contains("const x")));
+    let process = AgentExecutionProcess {
+        executable: "sha256:example".into(),
+        args,
+    };
+    let h = compute_launch_intent_hash(&process, Some(&stdin), 900).unwrap();
+    inputs[0].content = "const x=2;\n".into();
+    let (_, _, second) = crate::tool_runtime::fixed_cli_process(
+        "antigravity",
+        "gemini-fixed",
+        None,
+        &cli_worker_input_prompt("Review material", &inputs).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(
+        h,
+        compute_launch_intent_hash(&process, Some(&second), 900).unwrap()
+    );
 }

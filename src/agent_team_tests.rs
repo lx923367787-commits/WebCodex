@@ -354,6 +354,7 @@ fn member_cli_worker_cas_is_readable_by_the_exact_root_manager_with_a_fresh_perm
             subagents: vec![TeamAgentPlan {
                 task_id: member_task.clone(),
                 cli_calls: vec![TeamCliCall {
+                    inputs: vec![],
                     provider_id: "workbuddy".into(),
                     model: "synthetic-explicit-model".into(),
                     effort: Some("high".into()),

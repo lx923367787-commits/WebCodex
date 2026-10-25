@@ -139,6 +139,8 @@ impl JobManager {
             query,
             &pinned.descriptor,
             &pinned.program,
+            pinned.entrypoint.as_deref(),
+            pinned.codebuddy_config_directory.as_deref(),
             &deadline,
         )
     }
@@ -199,6 +201,9 @@ impl JobManager {
             return Err("agent_execution_resources_unavailable".into());
         }
         profiles.verify_sources()?;
+        if profiles.requires_proxy_controller() {
+            super::agent_proxy::require_controller_privilege()?;
+        }
         let name = durable_root
             .file_name()
             .and_then(|name| name.to_str())

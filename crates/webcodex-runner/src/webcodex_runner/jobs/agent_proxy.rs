@@ -1,4 +1,4 @@
-//! Fixed CodeBuddy transport adapter. Authority and recovery intent belong to
+//! Fixed file-worker transport adapter. Authority and recovery intent belong to
 //! the existing per-Job journal, not this OS adapter. No model-provided URL/SID.
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -22,6 +22,37 @@ fn validate_proxy(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Windows ProxyServer is either one endpoint for every protocol or a
+// semicolon-separated protocol map. Only the HTTPS route is relevant here.
+fn system_https_proxy(enabled: bool, server: &str) -> Result<String, String> {
+    if !enabled || server.is_empty() || server.len() > 512 {
+        return Err("agent_proxy_system_proxy_unavailable".into());
+    }
+    let endpoint = if server.contains('=') || server.contains(';') {
+        let mut https = None;
+        for entry in server.split(';') {
+            let (protocol, endpoint) = entry
+                .split_once('=')
+                .ok_or("agent_proxy_system_proxy_invalid")?;
+            if protocol.trim().eq_ignore_ascii_case("https") {
+                if https.replace(endpoint.trim()).is_some() {
+                    return Err("agent_proxy_system_proxy_ambiguous".into());
+                }
+            }
+        }
+        https.ok_or("agent_proxy_system_https_missing")?
+    } else {
+        server.trim()
+    };
+    let value = if endpoint.starts_with("http://") {
+        endpoint.to_owned()
+    } else {
+        format!("http://{endpoint}")
+    };
+    validate_proxy(&value)?;
+    Ok(value)
+}
+
 fn preserve_others(
     before: &BTreeMap<String, u32>,
     after: &BTreeMap<String, u32>,
@@ -40,6 +71,20 @@ pub(crate) fn read_user_https_proxy() -> Result<String, String> {
     #[cfg(windows)]
     {
         windows::read_proxy()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("agent_proxy_platform_unavailable".into())
+    }
+}
+
+/// Check before advertising a proxy-enabled resource profile. Windows requires
+/// an elevated controller for per-binding LoopbackExempt grant and revocation;
+/// a readable proxy setting alone is not evidence of that capability.
+pub(crate) fn require_controller_privilege() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        windows::require_controller_privilege()
     }
     #[cfg(not(windows))]
     {
@@ -131,10 +176,71 @@ mod windows {
     use windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
+    pub(super) fn require_controller_privilege() -> Result<(), String> {
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        let mut token = null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err("agent_proxy_controller_token_unavailable".into());
+        }
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut size = 0;
+        let success = unsafe {
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut size,
+            )
+        };
+        unsafe { CloseHandle(token) };
+        if success == 0 || size as usize != std::mem::size_of::<TOKEN_ELEVATION>() {
+            return Err("agent_proxy_controller_token_unavailable".into());
+        }
+        if elevation.TokenIsElevated == 0 {
+            return Err("agent_proxy_elevated_controller_required".into());
+        }
+        Ok(())
+    }
+
     pub(super) fn read_proxy() -> Result<String, String> {
-        let key: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
-        let name: Vec<u16> = "HTTPS_PROXY".encode_utf16().chain(Some(0)).collect();
-        let mut buffer = [0u16; 256];
+        // An explicit per-user setting retains precedence, including invalid
+        // values. Only absence permits using the enabled Windows system proxy.
+        if let Some(value) = registry_string("Environment", "HTTPS_PROXY")? {
+            validate_proxy(&value)?;
+            return Ok(value);
+        }
+        const INTERNET: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+        let key: Vec<u16> = INTERNET.encode_utf16().chain(Some(0)).collect();
+        let name: Vec<u16> = "ProxyEnable".encode_utf16().chain(Some(0)).collect();
+        let mut enabled: u32 = 0;
+        let mut size = std::mem::size_of_val(&enabled) as u32;
+        let code = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                key.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_DWORD,
+                null_mut(),
+                (&mut enabled as *mut u32).cast(),
+                &mut size,
+            )
+        };
+        if code != ERROR_SUCCESS {
+            return Err(format!("agent_proxy_registry_read_failed:{code}"));
+        }
+        let server = registry_string(INTERNET, "ProxyServer")?
+            .ok_or("agent_proxy_system_proxy_unavailable")?;
+        system_https_proxy(enabled == 1, &server)
+    }
+
+    fn registry_string(key: &str, name: &str) -> Result<Option<String>, String> {
+        let key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+        let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        let mut buffer = [0u16; 513];
         let mut size = std::mem::size_of_val(&buffer) as u32;
         let code = unsafe {
             RegGetValueW(
@@ -147,7 +253,10 @@ mod windows {
                 &mut size,
             )
         };
-        if code != 0 {
+        if code == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
+        }
+        if code != ERROR_SUCCESS {
             return Err(format!("agent_proxy_registry_read_failed:{code}"));
         }
         let end = buffer
@@ -155,8 +264,7 @@ mod windows {
             .position(|value| *value == 0)
             .ok_or("agent_proxy_value_invalid")?;
         let value = String::from_utf16(&buffer[..end]).map_err(|_| "agent_proxy_value_invalid")?;
-        validate_proxy(&value)?;
-        Ok(value)
+        Ok(Some(value))
     }
 
     fn sid_text(sid: PSID) -> Result<String, String> {
@@ -322,6 +430,69 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "operator-selected native process token check; no proxy mutation"]
+    #[cfg(windows)]
+    fn installed_proxy_controller_token_probe() {
+        let expected = std::env::var("WEBCODEX_EXPECT_ELEVATED_CONTROLLER").unwrap();
+        let actual = require_controller_privilege();
+        match expected.as_str() {
+            "0" => assert_eq!(
+                actual.unwrap_err(),
+                "agent_proxy_elevated_controller_required"
+            ),
+            "1" => actual.unwrap(),
+            _ => panic!("explicit expected token required"),
+        }
+        println!("controller_token_expectation_matched=true proxy_mutated=false");
+    }
+    #[test]
+    fn production_proxy_accepts_enabled_system_https_route() {
+        for server in [
+            "127.0.0.1:20081",
+            "http://127.0.0.1:20081",
+            "http=127.0.0.1:1;https=127.0.0.1:20081;socks=127.0.0.1:2",
+        ] {
+            assert_eq!(
+                system_https_proxy(true, server).unwrap(),
+                "http://127.0.0.1:20081"
+            );
+        }
+        assert_eq!(
+            system_https_proxy(true, "[::1]:20081").unwrap(),
+            "http://[::1]:20081"
+        );
+    }
+
+    #[test]
+    fn production_proxy_rejects_disabled_ambiguous_or_untrusted_system_routes() {
+        assert!(system_https_proxy(false, "127.0.0.1:20081").is_err());
+        for server in [
+            "",
+            "http=127.0.0.1:1",
+            "https=127.0.0.1:1;HTTPS=127.0.0.1:2",
+            "https=127.0.0.1:1;broken",
+            "127.0.0.1:0",
+            "localhost:20081",
+            "192.0.2.1:20081",
+            "user:secret@127.0.0.1:20081",
+            "socks5://127.0.0.1:20081",
+            "127.0.0.1:20081/path",
+            "127.0.0.1:20081?secret=private",
+        ] {
+            let error = system_https_proxy(true, server).unwrap_err();
+            assert!(!error.contains("secret"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "explicit operator read-only installed proxy check"]
+    fn installed_user_https_proxy_probe() {
+        let value = read_user_https_proxy().unwrap();
+        validate_proxy(&value).unwrap();
+        println!("validated_user_loopback_https_proxy=true");
+    }
     #[test]
     fn production_proxy_rejects_credential_or_nonloopback_routes() {
         for value in ["http://127.0.0.1:8080", "http://[::1]:8080/"] {

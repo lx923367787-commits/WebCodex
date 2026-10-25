@@ -57,6 +57,7 @@ pub struct AgentTeamReceiptPage {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentTeamPlanView {
     pub plan: TeamPlanRecord,
+    pub cli_rounds: Vec<serde_json::Value>,
     pub tasks: Vec<AgentTeamTask>,
     pub completion: crate::TeamCompletion,
     pub receipts: AgentTeamReceiptPage,
@@ -182,6 +183,7 @@ fn public_plan_on(
     let completion = crate::team_completion::completion_on(conn, principal, &plan)?;
     let receipts = receipts_on(conn, principal, project, Some(root), None, offset, limit)?;
     Ok(AgentTeamPlanView {
+        cli_rounds: cli_round::public_rounds_on(conn, root)?,
         plan,
         tasks,
         completion,
@@ -216,9 +218,12 @@ impl Database {
             AgentAssignmentOperation::Read,
         )
         .map_err(assignment_error)?;
+        let policy_project = crate::native_workspaces::team_target_on_connection(&tx, binding)
+            .map_err(assignment_error)?
+            .map_or_else(|| authority.project.clone(), |f| f.project);
         Ok(AgentTeamPolicy {
             project: authority.project.clone(),
-            policy: policy_on(&tx, &authority.communication_principal, &authority.project)?,
+            policy: policy_on(&tx, &authority.communication_principal, &policy_project)?,
             max_subagents: authority.policy.max_subagents,
             max_cli_calls: authority.policy.max_cli_calls,
         })
@@ -274,6 +279,9 @@ impl Database {
                 ));
             }
         }
+        let policy_project = crate::native_workspaces::team_target_on_connection(&tx, binding)
+            .map_err(assignment_error)?
+            .map_or_else(|| authority.project.clone(), |f| f.project);
         let result = register_team_plan_on_connection(
             &tx,
             &authority.communication_principal,
@@ -282,6 +290,7 @@ impl Database {
             expected_policy_revision,
             plan,
             key,
+            &policy_project,
         )?;
         tx.commit().map_err(store_error)?;
         Ok(result)

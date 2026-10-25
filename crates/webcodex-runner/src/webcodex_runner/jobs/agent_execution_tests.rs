@@ -44,6 +44,7 @@ fn fixture_with_provider(provider: Option<webcodex_core::agent_cli::AgentCliProv
             provider,
             reviewed_controls: None,
             user_https_proxy: false,
+            codebuddy_config_directory: None,
             executable: temporary.path().join("never-launched.exe"),
             executable_sha256: "a".repeat(64),
             files: Vec::new(),

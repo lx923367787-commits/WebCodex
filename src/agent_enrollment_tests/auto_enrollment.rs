@@ -26,6 +26,79 @@ fn config(f: &Fixture, host_id: &str) -> Value {
 }
 
 #[tokio::test]
+async fn named_workspaces_native_discovery_selection_and_folder_authority() {
+    let f = Fixture::new();
+    let host =
+        f.db.register_native_agent_host(&format!("tunnel_{}", "a".repeat(32)), &"b".repeat(64))
+            .unwrap();
+    let a = format!("wc_workspace_{}", "a".repeat(32));
+    let b = format!("wc_workspace_{}", "b".repeat(32));
+    let projects = json!([
+        {"id":a,"name":"EAS","enabled":true,"folders":[{"project":"agent:runner:code","name":"Code","path":"D:/code"},{"project":"agent:runner:docs","name":"Docs","path":"E:/docs"}]},
+        {"id":b,"name":"Web","enabled":true,"folders":[{"project":"agent:runner:web","name":"Web","path":"D:/web"}]}
+    ]);
+    let control = json!({"action":"native_workspaces_save","host_id":host.host_id,"owner_user":f.user.id,"expected_revision":0,"projects":projects});
+    assert_ne!(f.control(&f.oauth, control.clone()).await.0, StatusCode::OK);
+    assert_eq!(f.control(CONTROL, control).await.0, StatusCode::OK);
+    let token = host.into_secret();
+    let status = success(native_call(&f, &token, "fresh", "runtime_status", json!({})).await);
+    assert_eq!(status["agent_state"], "project_selection_required");
+    let list = success(native_call(&f, &token, "fresh", "agent_projects", json!({})).await);
+    assert_eq!(list["projects"].as_array().unwrap().len(), 2);
+    assert_eq!(list["state_changed"], false);
+    denied(
+        &native_call(
+            &f,
+            &token,
+            "fresh",
+            "agent_select_project",
+            json!({"project":a,"owner_user":"forged"}),
+        )
+        .await,
+    );
+    let selected = success(
+        native_call(
+            &f,
+            &token,
+            "fresh",
+            "agent_select_project",
+            json!({"project":a}),
+        )
+        .await,
+    );
+    assert_eq!(selected["agent_state"], "active");
+    let assignment = success(native_call(&f, &token, "fresh", "agent_assignment", json!({})).await);
+    assert_eq!(
+        assignment["named_project"]["folders"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    denied(
+        &native_call(
+            &f,
+            &token,
+            "fresh",
+            "agent_select_project",
+            json!({"project":b}),
+        )
+        .await,
+    );
+    denied(
+        &native_call(
+            &f,
+            &token,
+            "fresh",
+            "agent_project_files",
+            json!({"action":"read","folder":"agent:runner:web","path":"secret.txt"}),
+        )
+        .await,
+    );
+    denied(&native_call(&f,&token,"fresh","agent_project_files",json!({"action":"write","folder":"agent:runner:code","path":"x.txt","content":"x","owner_user":"forged"})).await);
+}
+
+#[tokio::test]
 async fn native_auto_enrollment_reports_connection_without_configuration_and_requires_control() {
     let f = Fixture::new();
     let host =

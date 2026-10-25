@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn codebuddy_node_metadata_keeps_the_dedicated_config_and_no_host_node_options() {
+    let directory = tempfile::tempdir().unwrap();
+    let node = directory.path().join("node.exe");
+    let entrypoint = directory.path().join("codebuddy");
+    std::fs::write(&entrypoint, "fixture").unwrap();
+    let context =
+        TrustedMetadataContext::for_codebuddy_node(&node, &entrypoint, directory.path()).unwrap();
+    assert_eq!(context.entrypoint.as_deref(), Some(entrypoint.as_path()));
+    assert_eq!(
+        context
+            .environment
+            .get(std::ffi::OsStr::new("CODEBUDDY_CONFIG_DIR"))
+            .map(OsString::as_os_str),
+        Some(directory.path().as_os_str())
+    );
+    assert!(!context
+        .environment
+        .contains_key(std::ffi::OsStr::new("NODE_OPTIONS")));
+    assert!(TrustedMetadataContext::for_codebuddy_node(
+        &node,
+        Path::new("relative-script"),
+        directory.path()
+    )
+    .is_err());
+    assert!(TrustedMetadataContext::for_codebuddy_node(
+        &node,
+        &entrypoint,
+        Path::new("relative-home")
+    )
+    .is_err());
+    assert!(context_from(Provider::WorkBuddy, &test_environment(), None)
+        .unwrap()
+        .entrypoint
+        .is_none());
+}
+
+#[test]
 fn only_the_two_supported_providers_can_select_an_executable() {
     assert_eq!(Provider::parse("workbuddy"), Ok(Provider::WorkBuddy));
     assert_eq!(Provider::parse("antigravity"), Ok(Provider::Antigravity));

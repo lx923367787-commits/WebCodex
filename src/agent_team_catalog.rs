@@ -83,7 +83,14 @@ impl RunnerAgentTeamAssets {
         if self.owner_access(caller)? != *access {
             return Err("agent_team_catalog_owner_changed".into());
         }
-        let client_id = project_client(caller.project())?;
+        let folder = self
+            .db
+            .agent_team_execution_folder(caller)
+            .map_err(|error| error.code().to_string())?;
+        let execution_project = folder
+            .as_ref()
+            .map_or_else(|| caller.project().to_owned(), |f| f.project.clone());
+        let client_id = project_client(&execution_project)?;
         let runner = self
             .registry
             .get_runner_semantic_view_checked_for_auth(client_id, Some(access))
@@ -91,6 +98,19 @@ impl RunnerAgentTeamAssets {
             .map_err(|_| "agent_team_catalog_runner_unavailable")?;
         if !runner.view.connected || !runner.view.capabilities.native_tool_plugins {
             return Err("agent_team_catalog_runner_unavailable".into());
+        }
+        if let Some(folder) = &folder {
+            let local_id = execution_project
+                .strip_prefix(&format!("agent:{client_id}:"))
+                .ok_or("agent_team_exact_project_required")?;
+            if !runner
+                .view
+                .projects
+                .iter()
+                .any(|p| p.id == local_id && !p.disabled && p.path == folder.path)
+            {
+                return Err("workspace_team_target_changed".into());
+            }
         }
         let target = AgentExecutionTarget {
             client_id: runner.view.client_id,
@@ -100,7 +120,14 @@ impl RunnerAgentTeamAssets {
             return Err("agent_team_catalog_runner_unavailable".into());
         }
         // Recheck the run and owner after the asynchronous Registry read.
-        if target.client_id != client_id || self.owner_access(caller)? != *access {
+        if target.client_id != client_id
+            || self.owner_access(caller)? != *access
+            || self
+                .db
+                .agent_team_execution_project(caller)
+                .map_err(|error| error.code().to_string())?
+                != execution_project
+        {
             return Err("agent_team_catalog_owner_changed".into());
         }
         Ok(target)
@@ -163,7 +190,20 @@ impl RunnerAgentTeamAssets {
         validate_response_for_request(&request, &response)
             .map_err(|_| "agent_team_host_catalog_invalid")?;
         if response.dispatch_state != PluginDispatchState::Completed || response.error.is_some() {
-            return Err("agent_team_host_catalog_unavailable".into());
+            let stage = match request {
+                PluginGatewayRequest::ProvidersList => "providers_list",
+                PluginGatewayRequest::ToolsList { .. } => "tools_list",
+                PluginGatewayRequest::ToolsCall { .. } => "profiles_read",
+                _ => "unknown",
+            };
+            let reason = response
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str())
+                .unwrap_or("");
+            return Err(format!(
+                "agent_team_host_catalog_unavailable:{stage}:{reason}"
+            ));
         }
         response
             .payload

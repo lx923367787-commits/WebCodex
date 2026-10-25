@@ -67,6 +67,7 @@ fn sources(
                 task_id: source.clone(),
                 cli_calls: (0..2)
                     .map(|_| TeamCliCall {
+                        inputs: vec![],
                         provider_id: "workbuddy".into(),
                         model: "explicit-model".into(),
                         effort: Some("high".into()),

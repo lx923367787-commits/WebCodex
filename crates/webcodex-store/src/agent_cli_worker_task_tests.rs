@@ -141,6 +141,7 @@ impl Fixture {
                 manager: TeamAgentPlan {
                     task_id: root.clone(),
                     cli_calls: vec![TeamCliCall {
+                        inputs: vec![],
                         provider_id: "workbuddy".into(),
                         model: "frozen-synthetic-model".into(),
                         effort: Some("high".into()),
@@ -332,14 +333,26 @@ fn observer_task_retained_permit_finishes_only_worker_after_runs_are_revoked() {
         .db
         .agent_cli_observation_permit(&f.requester, &f.binding.requester.cli_attempt_id)
         .is_err());
-    let forbidden_success = f.db.complete_agent_cli_worker_task(
-        &f.permit, f.started.execution.revision, AgentTaskState::Succeeded,
-        Some("Public bounded result"), None, "forbidden-success",
-    ).unwrap_err();
-    assert_eq!(forbidden_success.code(), "public_task_business_review_required");
+    let forbidden_success =
+        f.db.complete_agent_cli_worker_task(
+            &f.permit,
+            f.started.execution.revision,
+            AgentTaskState::Succeeded,
+            Some("Public bounded result"),
+            None,
+            "forbidden-success",
+        )
+        .unwrap_err();
+    assert_eq!(
+        forbidden_success.code(),
+        "public_task_business_review_required"
+    );
     assert_eq!(f.current_worker_execution(), f.started.execution);
     let pending = f.db.read_agent_cli_worker_task(&f.permit).unwrap().unwrap();
-    assert_eq!(pending.completion_expected_revision, f.started.execution.revision);
+    assert_eq!(
+        pending.completion_expected_revision,
+        f.started.execution.revision
+    );
     let complete =
         f.db.complete_agent_cli_worker_task(
             &f.permit,
@@ -363,11 +376,17 @@ fn observer_task_retained_permit_finishes_only_worker_after_runs_are_revoked() {
     assert!(complete.state_changed);
     assert!(!complete.replayed);
     let reopened = Database::open(&f._temp.path().join("observer-task-synthetic.db")).unwrap();
-    let terminal = reopened.read_agent_cli_worker_task(&f.permit).unwrap().unwrap();
+    let terminal = reopened
+        .read_agent_cli_worker_task(&f.permit)
+        .unwrap()
+        .unwrap();
     assert_eq!(terminal.execution, complete.execution);
-    assert_eq!(terminal.completion_expected_revision, f.started.execution.revision);
-    let replay =
-        reopened.complete_agent_cli_worker_task(
+    assert_eq!(
+        terminal.completion_expected_revision,
+        f.started.execution.revision
+    );
+    let replay = reopened
+        .complete_agent_cli_worker_task(
             &f.permit,
             terminal.completion_expected_revision,
             AgentTaskState::Failed,

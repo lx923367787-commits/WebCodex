@@ -3,6 +3,163 @@
 use super::*;
 use webcodex_core::agent_cli_controls::{ReviewedControlArg, ReviewedControlFile};
 
+#[test]
+fn antigravity_controls_bind_private_home_and_absolute_workspace() {
+    let root = path("isolated root");
+    let (settings, agent) = antigravity_control_bytes(&root).unwrap();
+    let settings: serde_json::Value = serde_json::from_slice(&settings).unwrap();
+    assert_eq!(
+        settings["permissions"]["deny"][0],
+        format!("read_file({})", absolute_path(&root.join("home")).unwrap())
+    );
+    let deny = settings["permissions"]["deny"].as_array().unwrap();
+    for rule in [
+        "command(*)",
+        "unsandboxed(*)",
+        "read_url(*)",
+        "execute_url(*)",
+        "mcp(*)",
+    ] {
+        assert!(deny.iter().any(|v| v == rule));
+    }
+    let agent = String::from_utf8(agent).unwrap();
+    assert!(agent.contains(&absolute_path(&root.join("workspace")).unwrap()));
+    assert!(!agent.contains("@WEBCODEX_"));
+    assert!(agent.contains("excludeDefaultComponents: true"));
+    assert!(agent.contains("inheritMcp: false"));
+    assert!(antigravity_control_bytes(Path::new("relative")).is_err());
+}
+
+#[test]
+fn codebuddy_node_launch_resolves_only_pinned_entry_and_private_state() {
+    use webcodex_core::agent_cli_controls::*;
+    // Synthetic records exercise transformation only, not trusted publication.
+    let mut profiles = validated(codebuddy_files_profile());
+    let profile = profiles.0.get_mut("worker-v1").unwrap();
+    profile.executable_identity = format!("sha256:{CODEBUDDY_NODE_EXE_SHA256}");
+    let control = profile.reviewed_controls.as_mut().unwrap();
+    control.cli_version = CODEBUDDY_NODE_FILES_VERSION.into();
+    control.executable_sha256 = CODEBUDDY_NODE_EXE_SHA256.into();
+    control.loading_method = CODEBUDDY_NODE_FILES_LOADING.into();
+    assert!(catalog_entrypoint(profile).is_err());
+    let entrypoint = path("installed-package/bin/codebuddy");
+    profile.files.push(ResourceFile {
+        source: absolute_path(&entrypoint).unwrap(),
+        destination: "bin/codebuddy/bin/codebuddy".into(),
+        sha256: "a".repeat(64),
+    });
+    assert_eq!(catalog_entrypoint(profile).unwrap(), Some(entrypoint));
+    profile.files.push(ResourceFile {
+        source: absolute_path(&path("other-package/product.json")).unwrap(),
+        destination: "bin/codebuddy/product.json".into(),
+        sha256: "b".repeat(64),
+    });
+    assert_eq!(
+        catalog_entrypoint(profile).unwrap_err(),
+        "agent_resources_codebuddy_package_layout"
+    );
+    profile.files.pop();
+    let request = codebuddy_files_start(&profiles);
+    let root = path("isolated-root");
+    let args = materialized_execution_args(&profiles.0["worker-v1"], &request, &root).unwrap();
+    assert_eq!(
+        &args[..2],
+        ["--preserve-symlinks", "--preserve-symlinks-main"]
+    );
+    assert_eq!(
+        args[2],
+        absolute_path(&root.join("bin/codebuddy/bin/codebuddy")).unwrap()
+    );
+    assert_eq!(args[3], "--model");
+    let mut env = BTreeMap::new();
+    codebuddy_node_environment(&root, &mut env).unwrap();
+    assert_eq!(
+        env["CODEBUDDY_CONFIG_DIR"],
+        absolute_path(&root.join("state/codebuddy")).unwrap()
+    );
+    assert_eq!(env["CODEBUDDY_DISABLE_SHELL_SNAPSHOT"], "1");
+    assert_eq!(env["CODEBUDDY_TEAM_MEMORY_ENABLED"], "false");
+    assert!(!env.contains_key("PATH"));
+    assert!(!env.contains_key("USERPROFILE"));
+    assert!(validate_codebuddy_node_package(&profiles.0["worker-v1"].files).is_err());
+}
+
+#[test]
+fn codebuddy_metadata_config_is_explicit_and_bound_to_the_reviewed_node_profile() {
+    use webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING;
+    let mut candidate = codebuddy_files_profile();
+    let native = candidate.reviewed_controls.clone();
+    candidate.reviewed_controls.as_mut().unwrap().loading_method =
+        CODEBUDDY_NODE_FILES_LOADING.into();
+    let config = path("custom-install/config");
+    let selected = codebuddy_config_directory(
+        candidate.provider,
+        candidate.reviewed_controls.as_ref(),
+        Some(&config),
+    )
+    .unwrap();
+    assert_eq!(selected, Some(absolute_path(&config).unwrap()));
+    assert_eq!(
+        codebuddy_config_directory(
+            candidate.provider,
+            candidate.reviewed_controls.as_ref(),
+            None
+        )
+        .unwrap_err(),
+        "agent_resources_codebuddy_config_required"
+    );
+    assert!(codebuddy_config_directory(
+        candidate.provider,
+        candidate.reviewed_controls.as_ref(),
+        Some(Path::new("relative-config")),
+    )
+    .is_err());
+    for (provider, controls) in [
+        (candidate.provider, native.as_ref()),
+        (candidate.provider, None),
+        (
+            Some(AgentCliProvider::Antigravity),
+            candidate.reviewed_controls.as_ref(),
+        ),
+    ] {
+        assert_eq!(
+            codebuddy_config_directory(provider, controls, Some(&config)).unwrap_err(),
+            "agent_resources_codebuddy_config_mapping_mismatch"
+        );
+    }
+    candidate.codebuddy_config_directory = Some(config);
+    candidate.reviewed_controls = native;
+    assert_eq!(
+        failure(candidate),
+        "agent_resources_codebuddy_config_mapping_mismatch"
+    );
+
+    let baseline = validated(codebuddy_files_profile());
+    let profile = &baseline.0["worker-v1"];
+    let payload = |directory| {
+        payload_manifest(
+            "worker-v1",
+            profile.provider,
+            &profile.files,
+            false,
+            directory,
+        )
+        .unwrap()
+    };
+    let original = payload(None);
+    assert_eq!(
+        original,
+        profile.reviewed_controls.as_ref().unwrap().payload_sha256
+    );
+    let first = payload(selected.as_deref());
+    let another = absolute_path(&path("another-install/config")).unwrap();
+    assert_ne!(first, original);
+    assert_ne!(first, payload(Some(&another)));
+    assert!(!serde_json::to_string(&baseline.descriptors())
+        .unwrap()
+        .contains("config_directory"));
+}
+
 fn codebuddy_files_profile() -> AgentExecutionResourceProfile {
     use webcodex_core::agent_cli_controls::*;
     let mut p = profile();
@@ -74,7 +231,7 @@ fn proxy_opt_in_requires_the_exact_reviewed_codebuddy_files_contract() {
         }
         assert_eq!(
             failure(p),
-            "agent_resources_proxy_requires_reviewed_codebuddy_files",
+            "agent_resources_proxy_requires_reviewed_file_worker",
             "accepted {mutation}"
         );
     }
@@ -82,7 +239,7 @@ fn proxy_opt_in_requires_the_exact_reviewed_codebuddy_files_contract() {
     legacy.user_https_proxy = true;
     assert_eq!(
         failure(legacy),
-        "agent_resources_proxy_requires_reviewed_codebuddy_files"
+        "agent_resources_proxy_requires_reviewed_file_worker"
     );
 }
 
@@ -106,6 +263,7 @@ fn proxy_payload_requires_a_matching_review_and_changes_the_frozen_manifest() {
         proxy.provider,
         &baseline.0[&proxy.id].files,
         true,
+        None,
     )
     .unwrap();
     let encoded = serde_json::to_vec(&(

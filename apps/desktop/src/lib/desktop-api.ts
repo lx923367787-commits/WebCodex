@@ -1,3 +1,4 @@
+import type { WorkspaceCatalog, WorkspaceDraft } from "../features/projects/NamedProjectsPanel";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActivityEntry,
@@ -9,6 +10,8 @@ import type {
 } from "../models/topology";
 
 export const desktopApi = {
+  listNamedProjects: () => invoke<WorkspaceCatalog>("list_named_workspaces"),
+  saveNamedProjects: (expectedRevision: number, projects: WorkspaceDraft[], expectedHostId: string, folderRevisions: Record<string, string>) => invoke<WorkspaceCatalog>("save_named_workspaces", { request: { expected_revision: expectedRevision, projects, expected_host_id: expectedHostId, folder_revisions: folderRevisions } }),
   listProjects: () => invoke<ProjectRegistrySnapshot>("list_desktop_projects"),
   addProject: (projectPath: string) => invoke<DesktopState>("add_desktop_project", { request: { projectPath } }),
   switchProject: (projectId: string, expectedRevision: string) => invoke<DesktopState>("switch_desktop_project", { request: { projectId, expectedRevision } }),

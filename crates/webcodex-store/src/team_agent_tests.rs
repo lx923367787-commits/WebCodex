@@ -39,13 +39,16 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_project(PROJECT)
+    }
+    fn with_project(project: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::open(&dir.path().join("state.db")).unwrap());
         crate::team_task::init_team_task_tables(&db.conn.lock().unwrap()).unwrap();
         init_team_agent_tables(&db.conn.lock().unwrap()).unwrap();
         let owner = principal('a');
-        let root = task(&db, &owner, PROJECT, "root");
-        let child = task(&db, &owner, PROJECT, "child");
+        let root = task(&db, &owner, project, "root");
+        let child = task(&db, &owner, project, "child");
         let plan = TeamPlanInput {
             manager: TeamAgentPlan {
                 task_id: root.clone(),
@@ -56,7 +59,7 @@ impl Fixture {
                 cli_calls: vec![],
             }],
         };
-        db.register_team_plan(&owner, PROJECT, &root, 0, plan, "plan")
+        db.register_team_plan(&owner, project, &root, 0, plan, "plan")
             .unwrap();
         Self {
             _dir: dir,
@@ -79,6 +82,53 @@ impl Fixture {
             .unwrap()
             .record
     }
+}
+
+#[test]
+fn team_agent_named_workspace_preserves_frozen_scope_and_owner() {
+    let project = "wc_workspace_0123456789abcdef0123456789abcdef";
+    let f = Fixture::with_project(project);
+    let reserve = |owner: &CommunicationPrincipal, scope: &str| {
+        f.db.reserve_team_agent_attempt(
+            owner,
+            scope,
+            &f.root,
+            &f.child,
+            "named-member",
+            "explicit-profile",
+        )
+    };
+    assert_eq!(
+        reserve(&principal('b'), project).unwrap_err().code(),
+        "team_agent_source_unavailable"
+    );
+    assert_eq!(
+        reserve(&f.owner, "wc_workspace_ffffffffffffffffffffffffffffffff")
+            .unwrap_err()
+            .code(),
+        "team_agent_source_unavailable"
+    );
+    for invalid in [
+        "wc_workspace_",
+        "wc_workspace_0123456789ABCDEF0123456789abcdef",
+        "wc_workspace_0123456789abcdef0123456789abcdef/other",
+    ] {
+        assert_eq!(
+            reserve(&f.owner, invalid).unwrap_err().code(),
+            "team_agent_invalid_source"
+        );
+    }
+    let first = reserve(&f.owner, project).unwrap();
+    assert!(first.created);
+    assert_eq!(first.record.project, project);
+    let replay = reserve(&f.owner, project).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.record, first.record);
+    let claimed =
+        f.db.claim_team_agent_attempt(&f.owner, &first.record.team_agent_attempt_id)
+            .unwrap();
+    assert!(claimed.dispatch_permitted);
+    assert_eq!(claimed.record.project, project);
 }
 
 #[test]

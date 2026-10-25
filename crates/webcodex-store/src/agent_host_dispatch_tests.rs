@@ -104,6 +104,7 @@ impl Fixture {
                     task_id: root.clone(),
                     cli_calls: (0..cli_calls)
                         .map(|i| TeamCliCall {
+                            inputs: vec![],
                             provider_id: "workbuddy".into(),
                             model: "frozen-model".into(),
                             effort: Some("high".into()),

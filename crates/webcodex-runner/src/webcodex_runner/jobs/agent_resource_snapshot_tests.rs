@@ -222,6 +222,7 @@ fn catalog_pins_only_the_mapped_verified_executable() {
         provider: Some(AgentCliProvider::WorkBuddy),
         reviewed_controls: None,
         user_https_proxy: false,
+        codebuddy_config_directory: None,
         executable: executable.clone(),
         executable_sha256: sha256(b"synthetic executable never launched"),
         files: vec![],
@@ -405,6 +406,7 @@ fn reviewed_catalog_rechecks_and_pins_the_entire_readonly_payload() {
         provider: Some(AgentCliProvider::WorkBuddy),
         reviewed_controls: None,
         user_https_proxy: false,
+        codebuddy_config_directory: None,
         executable,
         executable_sha256: sha256(b"never executed"),
         files: vec![
@@ -456,4 +458,19 @@ fn reviewed_catalog_rechecks_and_pins_the_entire_readonly_payload() {
     fs::write(&dependency, b"changed non-control payload").unwrap();
     assert!(profiles.verify_sources().is_err());
     assert!(pin_catalog_executable(&profiles, AgentCliProvider::WorkBuddy).is_err());
+}
+
+#[test]
+#[ignore = "explicit isolated Windows validation root; no provider or real auth access"]
+fn missing_manifest_has_a_publication_error_without_relaxing_collection() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.read().unwrap_err(),
+        "agent_cli_delivery_not_published"
+    );
+    fs::write(fixture.publish.join("manifest.json"), b"invalid").unwrap();
+    assert_eq!(
+        fixture.read().unwrap_err(),
+        "agent_cli_delivery_manifest_invalid"
+    );
 }

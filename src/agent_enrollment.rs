@@ -240,6 +240,15 @@ fn host_dispatch_control(db: &Database, auth: &AuthContext, body: &Value) -> Res
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Control {
+    NativeWorkspacesRead {
+        host_id: String,
+    },
+    NativeWorkspacesSave {
+        host_id: String,
+        owner_user: String,
+        expected_revision: i64,
+        projects: Vec<webcodex_store::NativeWorkspace>,
+    },
     ConfigureNativeHostAutoEnrollment {
         host_id: String,
         owner_user: String,
@@ -305,6 +314,8 @@ pub(crate) fn try_control(
         body.get("action").and_then(Value::as_str),
         Some(
             "configure_native_host_auto_enrollment"
+                | "native_workspaces_read"
+                | "native_workspaces_save"
                 | "agent_host_manager_binding_read"
                 | "agent_enrollment_reserve"
                 | "agent_enrollment_revoke"
@@ -320,6 +331,20 @@ pub(crate) fn try_control(
         let request: Control =
             serde_json::from_value(body.clone()).map_err(|_| "invalid_agent_enrollment_request")?;
         match request {
+            Control::NativeWorkspacesRead { host_id } => {
+                serde_json::to_value(db.read_native_workspaces(&host_id).map_err(|e| e.code())?)
+                    .map_err(|_| "workspace_unavailable".into())
+            }
+            Control::NativeWorkspacesSave {
+                host_id,
+                owner_user,
+                expected_revision,
+                projects,
+            } => serde_json::to_value(
+                db.configure_native_workspaces(&host_id, &owner_user, expected_revision, projects)
+                    .map_err(|e| e.code())?,
+            )
+            .map_err(|_| "workspace_unavailable".into()),
             Control::ConfigureNativeHostAutoEnrollment {
                 host_id,
                 owner_user,
@@ -538,7 +563,9 @@ pub(crate) fn assignment(db: &Database, binding: &VerifiedAgentRun, args: &Value
         return crate::agent_isolation::denial("agent_invalid_input");
     }
     match db.read_agent_enrollment(binding) {
-        Ok(projection) => ToolResult::ok(json!({"assignment":projection})),
+        Ok(projection) => ToolResult::ok(
+            json!({"assignment":projection,"named_project":db.agent_native_workspace(binding).ok()}),
+        ),
         Err(error) => crate::agent_isolation::denial(error.code()),
     }
 }

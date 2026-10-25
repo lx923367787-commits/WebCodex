@@ -2,6 +2,7 @@ use super::*;
 
 fn attempt(provider: &str) -> TeamCliAttemptRecord {
     TeamCliAttemptRecord {
+        inputs: vec![],
         attempt_id: "wc_team_cli_attempt_test".into(),
         project_id: "agent:runner:repo".into(),
         root_task_id: "wc_agent_task_root".into(),
@@ -51,6 +52,16 @@ fn team_cli_rejects_undeclared_provider_or_missing_reasoning_selection() {
     assert!(cli_process(&attempt("shell")).is_err());
     let mut request = attempt("workbuddy");
     request.effort = None;
+    assert!(cli_process(&request).is_err());
+    request.provider_id = "antigravity".into();
+    let (_, args, stdin) = cli_process(&request).unwrap();
+    assert_eq!(&args[..2], &["--model", "discovered-model"]);
+    assert!(!args.iter().any(|arg| arg == "--effort"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdin).unwrap()["message"]["content"],
+        request.instruction
+    );
+    request.effort = Some(" ".into());
     assert!(cli_process(&request).is_err());
 }
 

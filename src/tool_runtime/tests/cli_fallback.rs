@@ -162,6 +162,7 @@ fn create_candidate(
             subagents: vec![TeamAgentPlan {
                 task_id: source.clone(),
                 cli_calls: vec![TeamCliCall {
+                    inputs: vec![],
                     provider_id: "workbuddy".into(),
                     model: "explicit-model".into(),
                     effort: Some("high".into()),

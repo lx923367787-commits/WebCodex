@@ -56,6 +56,45 @@ fn request(db: &Database, task: &str, purpose: AgentEnrollmentPurpose) -> NewAge
         expires_at_unix_ms: now_ms() + 60_000,
     }
 }
+
+#[test]
+fn enrollment_briefs_preserve_text_bounds_and_identity_validation() {
+    let (_dir, db) = database();
+    for (name, purpose) in [
+        ("manager-text", AgentEnrollmentPurpose::Manager),
+        ("member-text", AgentEnrollmentPurpose::Member),
+        ("fallback-text", AgentEnrollmentPurpose::Fallback),
+        ("cli-text", AgentEnrollmentPurpose::CliWorker),
+    ] {
+        let original = request(&db, name, purpose);
+        let now = now_ms();
+        for text in [
+            "\n\t".to_owned(),
+            "a\0b".to_owned(),
+            "x".repeat(8193),
+            "中".repeat(2731),
+        ] {
+            let mut candidate = original.clone();
+            candidate.brief = text;
+            assert_eq!(
+                normalize(candidate, now).unwrap_err().code(),
+                "agent_enrollment_invalid_input"
+            );
+        }
+        let mut candidate = original.clone();
+        candidate.brief = format!("a\r\n\t{}", "x".repeat(8188));
+        assert_eq!(
+            normalize(candidate.clone(), now).unwrap().brief,
+            candidate.brief
+        );
+        candidate.owner_user = "owner\nother".into();
+        assert_eq!(
+            normalize(candidate, now).unwrap_err().code(),
+            "agent_enrollment_invalid_input"
+        );
+    }
+}
+
 fn issue(
     db: &Database,
     request: NewAgentEnrollment,

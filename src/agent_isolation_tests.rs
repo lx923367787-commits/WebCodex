@@ -527,6 +527,7 @@ async fn agent_isolation_http_inventory_exposes_only_broker_tools() {
                 "agent_identity",
                 "agent_meeting",
                 "agent_private",
+                "agent_project_files",
                 "goal_bootstrap",
                 "goal_checkpoint",
                 "goal_claim_node",
@@ -536,13 +537,24 @@ async fn agent_isolation_http_inventory_exposes_only_broker_tools() {
                 "goal_plan_save",
                 "goal_read",
                 "team_agent_start",
+                "team_cli_catalog",
+                "team_cli_close",
+                "team_cli_delivery_collect",
+                "team_cli_delivery_read",
+                "team_cli_delivery_reject_unpublished",
+                "team_cli_delivery_review",
+                "team_cli_observe",
                 "team_cli_start",
+                "team_member_create",
                 "team_plan_list",
                 "team_plan_read",
                 "team_plan_register",
                 "team_policy_get",
                 "team_receipt_list",
-                "team_task_read"
+                "team_task_complete",
+                "team_task_execution_read",
+                "team_task_read",
+                "team_task_start"
             ]
         );
     }

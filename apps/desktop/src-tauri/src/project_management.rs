@@ -176,7 +176,7 @@ impl DesktopCore {
             .await
     }
 
-    fn require_local_project_management(&self) -> DesktopResult<()> {
+    pub(super) fn require_local_project_management(&self) -> DesktopResult<()> {
         if !locally_managed(&self.config) || self.snapshot.quick_share.is_some() {
             return Err(project_error("unsupported_topology"));
         }

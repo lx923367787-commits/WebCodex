@@ -159,6 +159,7 @@ pub enum AgentAssignmentOperation {
     PlanManage,
     TaskStart,
     TaskComplete,
+    ProjectFiles,
 }
 
 #[derive(Debug, Clone)]
@@ -240,7 +241,12 @@ fn normalize(
     ] {
         key(value, 512)?;
     }
-    key(&request.brief, 8192)?;
+    // Every enrollment brief is task text, not an identity key. Preserve
+    // paragraphs verbatim while keeping the same byte and NUL bounds.
+    if request.brief.trim().is_empty() || request.brief.len() > 8192 || request.brief.contains('\0')
+    {
+        return Err(invalid());
+    }
     let parts = private_parts(&request.task_directory)?;
     if parts.len() < 2 || parts[0] != "workspace" {
         return Err(invalid());
@@ -577,6 +583,10 @@ pub(crate) fn authorize_agent_assignment_on_connection(
         }
         AgentAssignmentOperation::ManagePolicy => false,
         AgentAssignmentOperation::TaskStart | AgentAssignmentOperation::TaskComplete => true,
+        AgentAssignmentOperation::ProjectFiles => matches!(
+            auth.purpose,
+            AgentEnrollmentPurpose::Manager | AgentEnrollmentPurpose::Member
+        ),
     };
     if !allowed {
         return Err(AgentIsolationError::new("agent_role_denied"));
@@ -599,7 +609,10 @@ pub(crate) fn authorize_agent_delegated_task_on_connection(
     if own.purpose != AgentEnrollmentPurpose::Manager {
         return Err(AgentIsolationError::new("agent_role_denied"));
     }
-    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_agent_enrollments WHERE source_agent_id=?1 AND owner_user=?2 AND project=?3 AND task_id=?4 AND purpose='member' AND (state='claimed' OR (state='issued' AND (delivery_state='reserved' OR COALESCE(delivery_expires_at_unix_ms,expires_at_unix_ms)>?5))))",params![manager.agent_id(),manager.owner_user(),manager.project(),child_task_id,now_ms()],|r|r.get(0)).map_err(unavailable_enrollment)?;
+    // Expiry prevents claiming or admitting new work; it must not erase the
+    // manager's historical delegation when reading the original plan/receipts.
+    // Plan admission separately checks the live enrollment in the budget query.
+    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_agent_enrollments WHERE source_agent_id=?1 AND owner_user=?2 AND project=?3 AND task_id=?4 AND purpose='member' AND state IN ('claimed','issued'))",params![manager.agent_id(),manager.owner_user(),manager.project(),child_task_id],|r|r.get(0)).map_err(unavailable_enrollment)?;
     if exists {
         Ok(())
     } else {
@@ -1685,6 +1698,9 @@ pub(crate) fn issue_agent_enrollment_on_connection(
         created_at_unix_ms: now_after(now, started),
     };
     conn.execute("INSERT INTO wc_isolated_agents(agent_id,owner_user,project,parent_agent_id,created_at_unix_ms) VALUES(?1,?2,?3,?4,?5)",params![agent.agent_id,agent.owner_user,agent.project,agent.parent_agent_id,agent.created_at_unix_ms]).map_err(unavailable_enrollment)?;
+    if let Some(source) = source {
+        crate::native_workspaces::inherit_team_target_on_connection(conn, source, &agent.agent_id)?;
+    }
     let run = issue_run(conn, agent, 1, "pending", None)?;
     let secret = random_secret("wc_en_", b"webcodex.initial-enrollment.random.v1\0");
     let id = format!("wc_enrollment_{}", uuid::Uuid::new_v4().simple());

@@ -160,7 +160,7 @@ fn lowbox_token(sid: &AppContainerSid, network: LpacNetwork) -> Result<OwnedHand
         })
         .collect::<Vec<_>>();
     let mut internet_sid = [0usize; 16];
-    if network == LpacNetwork::CodeBuddyFilesInternetClient {
+    if network == LpacNetwork::ReviewedFileWorkerInternetClient {
         let mut length = std::mem::size_of_val(&internet_sid) as u32;
         if unsafe {
             CreateWellKnownSid(
@@ -395,13 +395,13 @@ fn quote(value: &OsStr) -> Result<Vec<u16>, SpawnFailure> {
 }
 
 /// Trusted native call-site policy, never deserialized from Agent arguments.
-/// The caller must pin the fixed CodeBuddy binary/control policy before opting
+/// The caller must pin a compiled, reviewed CLI binary/control policy before opting
 /// in; the default and all other launch paths retain no network capability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LpacNetwork {
     #[default]
     None,
-    CodeBuddyFilesInternetClient,
+    ReviewedFileWorkerInternetClient,
 }
 
 fn token_has_capability(token: HANDLE, kind: WELL_KNOWN_SID_TYPE) -> Result<bool, SpawnFailure> {
@@ -441,7 +441,7 @@ fn token_has_capability(token: HANDLE, kind: WELL_KNOWN_SID_TYPE) -> Result<bool
 
 fn verify_network_policy(token: HANDLE, network: LpacNetwork) -> Result<(), SpawnFailure> {
     if token_has_capability(token, WinCapabilityInternetClientSid)?
-        != (network == LpacNetwork::CodeBuddyFilesInternetClient)
+        != (network == LpacNetwork::ReviewedFileWorkerInternetClient)
         || token_has_capability(token, WinCapabilityInternetClientServerSid)?
         || token_has_capability(token, WinCapabilityPrivateNetworkClientServerSid)?
     {
@@ -1224,11 +1224,14 @@ mod codebuddy_network_tests {
     #[test]
     fn fixed_codebuddy_network_is_internet_client_only_and_default_is_off() {
         let sid = AppContainerSid::derive("codebuddy-network-unit").unwrap();
-        for policy in [LpacNetwork::None, LpacNetwork::CodeBuddyFilesInternetClient] {
+        for policy in [
+            LpacNetwork::None,
+            LpacNetwork::ReviewedFileWorkerInternetClient,
+        ] {
             let token = lowbox_token(&sid, policy).unwrap();
             verify_network_policy(token.as_raw_handle(), policy).unwrap();
             let other = if policy == LpacNetwork::None {
-                LpacNetwork::CodeBuddyFilesInternetClient
+                LpacNetwork::ReviewedFileWorkerInternetClient
             } else {
                 LpacNetwork::None
             };

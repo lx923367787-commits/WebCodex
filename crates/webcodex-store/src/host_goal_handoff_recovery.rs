@@ -76,7 +76,7 @@ impl Database {
         expected_source_run_id: &str,
         expected_source_generation: i64,
         expected_goal_revision: u64,
-        expected_attempt_id: &str,
+        expected_attempt_id: Option<&str>,
         idempotency_key: &str,
         now: i64,
     ) -> Result<(HostGoalHandoff, bool, u64, crate::VerifiedAgentRun), GoalStoreError> {
@@ -137,6 +137,13 @@ impl Database {
             return Ok((current, true, goal.revision, source));
         }
         let h = current(&tx, &owner, goal_id, handoff_id)?;
+        // The scheduler used to abort a valid blocked native checkpoint before
+        // allocating its first candidate. Recover only that exact prelaunch
+        // case; absence of an attempt is not proof for any other failure.
+        let prelaunch_blocked = h.attempt_count == 0
+            && h.attempt_id.is_none()
+            && expected_attempt_id.is_none()
+            && h.failure_reason.as_deref() == Some("goal_not_active");
         if goal.revision != expected_goal_revision
             || goal.phase != HostGoalPhase::Blocked
             || h.status != "failed"
@@ -145,7 +152,7 @@ impl Database {
             || h.source_agent_run_id.as_deref() != Some(source.run_id())
             || h.source_context_epoch != source.run_id()
             || h.execution_owner_epoch != source.run_id()
-            || h.attempt_id.as_deref() != Some(expected_attempt_id)
+            || h.attempt_id.as_deref() != expected_attempt_id
             || h.committed_at.is_some()
             || h.successor_agent_run_id.is_some()
             || h.pending_agent_run_id.is_some()
@@ -153,7 +160,7 @@ impl Database {
             || h.prepared_at.is_some()
             || h.prepared_package_sha256.is_some()
             || h.deadline_at.is_some()
-            || h.attempt_count == 0
+            || (h.attempt_count == 0 && !prelaunch_blocked)
             || h.attempt_count >= 4
             || goal.current_attempt_id.is_some()
             || unresolved(&tx, goal_id)?
@@ -236,6 +243,7 @@ impl Database {
             HostGoalPhase::Planning
             | HostGoalPhase::AwaitingConfirmation
             | HostGoalPhase::Ready => prior.goal.phase,
+            HostGoalPhase::Blocked if prelaunch_blocked => HostGoalPhase::Blocked,
             // A fenced node may already have caused effects. This narrow
             // recovery cannot infer whether repeating that step is safe.
             _ => return Err(denied()),

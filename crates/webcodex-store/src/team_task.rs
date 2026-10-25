@@ -90,6 +90,9 @@ pub struct TeamCliCall {
     /// A member with multiple calls must explicitly assign every call's work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
+    /// Explicit immutable text material; never a host path or filesystem grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<crate::AgentEnrollmentInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -178,6 +181,8 @@ pub struct TeamCliAttemptRecord {
     /// Frozen explicit CLI subtask, or the AgentTask instruction for a sole call.
     /// This text does not grant execution authority or supply native commands.
     pub instruction: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<crate::AgentEnrollmentInput>,
     pub fallback_thinking_profile_id: String,
     pub timeout_secs: Option<u64>,
     pub dispatch_state: TeamCliDispatchState,
@@ -246,6 +251,12 @@ pub(crate) fn init_team_task_tables(conn: &Connection) -> anyhow::Result<()> {
         UNIQUE(root_task_id,source_task_id,call_index),
         UNIQUE(owner_principal_kind,owner_principal_digest,request_key_hash));
         CREATE INDEX IF NOT EXISTS idx_wc_team_cli_scope ON wc_team_cli_attempts(owner_principal_kind,owner_principal_digest,project_id,created_at_unix_ms,attempt_id);")?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wc_team_cli_rounds (
+        root_task_id TEXT NOT NULL REFERENCES wc_team_plans(root_task_id), round INTEGER NOT NULL CHECK(round>0 AND round<=15),
+        request_key_hash TEXT NOT NULL, request_fingerprint TEXT NOT NULL, record_json TEXT NOT NULL,
+        PRIMARY KEY(root_task_id,round), UNIQUE(root_task_id,request_key_hash));
+        CREATE TRIGGER IF NOT EXISTS wc_team_round_immutable BEFORE UPDATE ON wc_team_cli_rounds BEGIN SELECT RAISE(ABORT,'CLI rounds are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS wc_team_round_preserved BEFORE DELETE ON wc_team_cli_rounds BEGIN SELECT RAISE(ABORT,'CLI round history is preserved'); END;")?;
     execution_factory::ensure_factory_schema(conn)?;
     Ok(())
 }
@@ -322,7 +333,9 @@ fn validate_policy(settings: &TeamPolicyInput) -> Result<()> {
             !provider(&p.provider_id)
                 || !ids.insert(&p.provider_id)
                 || p.model.as_deref().is_some_and(|m| !text(m, 256))
-                || p.effort.as_deref().is_some_and(|e| !text(e, 64))
+                || p.effort
+                    .as_deref()
+                    .is_some_and(|e| !text(e, 64) || e == "project_policy")
         })
     {
         return Err(invalid("Invalid or duplicate team provider preferences"));
@@ -341,6 +354,33 @@ fn validate_policy(settings: &TeamPolicyInput) -> Result<()> {
 fn members(plan: &TeamPlanInput) -> impl Iterator<Item = &TeamAgentPlan> {
     std::iter::once(&plan.manager).chain(&plan.subagents)
 }
+
+fn resolve_saved_policy_efforts(policy: &TeamPolicy, plan: &mut TeamPlanInput) -> Result<()> {
+    for member in std::iter::once(&mut plan.manager).chain(plan.subagents.iter_mut()) {
+        for call in &mut member.cli_calls {
+            if call.effort.as_deref() == Some("project_policy") {
+                let preference = policy
+                    .settings
+                    .providers
+                    .iter()
+                    .find(|p| {
+                        p.provider_id == call.provider_id
+                            && p.enabled
+                            && p.model.as_deref() == Some(call.model.as_str())
+                    })
+                    .ok_or_else(|| {
+                        error(
+                            "team_saved_selection_mismatch",
+                            "Saved effort requires an enabled provider and its exact saved model",
+                        )
+                    })?;
+                call.effort = preference.effort.clone();
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_plan(root: &str, policy: &TeamPolicy, plan: &TeamPlanInput) -> Result<()> {
     validate_policy(&policy.settings)?;
     if plan.manager.task_id != root
@@ -375,6 +415,22 @@ fn validate_plan(root: &str, policy: &TeamPolicy, plan: &TeamPlanInput) -> Resul
             ));
         }
         for call in &member.cli_calls {
+            let mut input_names = BTreeSet::new();
+            if call.inputs.len() > 8
+                || serde_json::to_vec(&call.inputs)
+                    .map_err(|_| invalid("Invalid CLI inputs"))?
+                    .len()
+                    > 32 * 1024
+                || call.inputs.iter().any(|input| {
+                    !text(&input.name, 128)
+                        || input.content.contains('\0')
+                        || !input_names.insert(&input.name)
+                })
+            {
+                return Err(invalid(
+                    "CLI inputs require unique bounded names and at most 32 KiB of JSON text",
+                ));
+            }
             if call.instruction.as_deref().is_some_and(|instruction| {
                 instruction.trim().is_empty()
                     || instruction.len() > 8192
@@ -387,10 +443,10 @@ fn validate_plan(root: &str, policy: &TeamPolicy, plan: &TeamPlanInput) -> Resul
             }
             if !provider(&call.provider_id)
                 || !text(&call.model, 256)
-                || !call.effort.as_deref().is_some_and(|v| text(v, 64))
+                || call.effort.as_deref().is_some_and(|v| !text(v, 64))
             {
                 return Err(invalid(
-                    "Each planned CLI call needs a supported provider and explicit model and effort",
+                    "Each planned CLI call needs a supported provider, explicit model and a nonblank effort when supplied",
                 ));
             }
             if custom {
@@ -443,7 +499,7 @@ fn require_live(task: &OwnedTask) -> Result<()> {
         )),
     }
 }
-fn policy_on(
+pub(crate) fn policy_on(
     conn: &Connection,
     principal: &CommunicationPrincipal,
     project: &str,
@@ -636,14 +692,18 @@ pub(crate) fn load_team_cli_attempt_for_fallback(
     let plan = live_plan(conn, principal, &record.root_task_id)?;
     let source = owned_task(conn, principal, &record.project_id, &record.source_task_id)?;
     require_live(&source)?;
-    let call = members(&plan.plan)
-        .find(|m| m.task_id == record.source_task_id)
-        .and_then(|m| m.cli_calls.get(record.call_index as usize))
-        .ok_or_else(not_found)?;
+    let call = planned_call_on(
+        conn,
+        principal,
+        &record.root_task_id,
+        &record.source_task_id,
+        record.call_index,
+    )?;
     if plan.project_id != record.project_id
         || call.provider_id != record.provider_id
         || call.model != record.model
         || call.effort != record.effort
+        || call.inputs != record.inputs
         || call.instruction.as_deref().unwrap_or(&source.instruction) != record.instruction
     {
         return Err(error(
@@ -660,8 +720,9 @@ fn register_team_plan_on_connection(
     project: &str,
     root_task_id: &str,
     expected_policy_revision: i64,
-    plan: TeamPlanInput,
+    mut plan: TeamPlanInput,
     idempotency_key: &str,
+    policy_project: &str,
 ) -> Result<TeamPlanMutation> {
     validate_communication_principal(principal)?;
     project_id(project)?;
@@ -700,13 +761,16 @@ fn register_team_plan_on_connection(
             "This root already has a frozen ordinary plan",
         ));
     }
-    let policy = policy_on(conn, principal, project)?;
+    let policy = policy_on(conn, principal, policy_project)?;
     if policy.revision != expected_policy_revision {
         return Err(error(
             "team_policy_revision_conflict",
             "Project team policy changed",
         ));
     }
+    // Resolve an explicit saved-policy selector only after the revision check.
+    // The request fingerprint above retains the original intent for replay.
+    resolve_saved_policy_efforts(&policy, &mut plan)?;
     validate_plan(root_task_id, &policy, &plan)?;
     for member in members(&plan) {
         require_live(&owned_task(conn, principal, project, &member.task_id)?)?;
@@ -815,6 +879,7 @@ impl Database {
             expected_policy_revision,
             plan,
             idempotency_key,
+            project,
         )?;
         tx.commit().map_err(store_error)?;
         Ok(result)
@@ -1190,15 +1255,7 @@ pub(crate) fn reserve_team_cli_attempt_on_connection(
         return Err(not_found());
     }
     require_live(&source)?;
-    let call = members(&plan.plan)
-        .find(|m| m.task_id == source_task_id)
-        .and_then(|m| m.cli_calls.get(call_index as usize))
-        .ok_or_else(|| {
-            error(
-                "team_cli_slot_not_planned",
-                "The CLI slot is absent from the frozen ordinary plan",
-            )
-        })?;
+    let call = planned_call_on(tx, principal, root_task_id, source_task_id, call_index)?;
     let occupied:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM wc_team_cli_attempts WHERE root_task_id=?1 AND source_task_id=?2 AND call_index=?3)",params![root_task_id,source_task_id,call_index],|r|r.get(0)).map_err(store_error)?;
     if occupied {
         return Err(error(
@@ -1218,6 +1275,7 @@ pub(crate) fn reserve_team_cli_attempt_on_connection(
         model: call.model.clone(),
         effort: call.effort.clone(),
         instruction: call.instruction.clone().unwrap_or(source.instruction),
+        inputs: call.inputs.clone(),
         fallback_thinking_profile_id: fallback_thinking_profile_id.into(),
         timeout_secs,
         dispatch_state: TeamCliDispatchState::Reserved,
@@ -1254,6 +1312,11 @@ pub(crate) fn reserve_team_cli_attempt_on_connection(
         replayed: false,
     })
 }
+
+#[path = "team_cli_round.rs"]
+pub(crate) mod cli_round;
+pub use cli_round::TeamCliRound;
+use cli_round::{cli_slot_budget_on, execution_plan_on, planned_call_on};
 
 #[path = "agent_execution_factory.rs"]
 mod execution_factory;

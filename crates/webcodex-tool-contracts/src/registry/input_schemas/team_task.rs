@@ -46,7 +46,8 @@ pub(crate) fn team_plan_schema() -> Value {
         json!({
             "task_id":task_id(),
             "cli_calls":{"type":"array","maxItems":32,"items":object(json!({
-                "provider_id":provider(),"model":text(256),"effort":text(64),
+                "provider_id":provider(),"model":text(256),"effort":{"anyOf":[text(64),{"type":"null"}],"description":"Explicit discovered effort, null for an effort-pinned Antigravity model slug or when unsupported, or project_policy to resolve the saved effort at expected_policy_revision. The selector requires an enabled provider and exact saved model; the frozen value is the actual effort or null."},
+                "inputs":{"type":"array","maxItems":8,"description":"Explicit immutable UTF-8 task material, at most 32 KiB serialized JSON total. Names are labels, not host paths; no filesystem access is granted.","items":object(json!({"name":text(128),"content":{"type":"string"}}), &["name","content"])},
                 "instruction":{"anyOf":[text(8192),{"type":"null"}],"description":"Manager-assigned CLI subtask text, not a command or authority grant. Must be nonblank, at most 8192 UTF-8 bytes and contain no NUL; newlines are allowed. Required and non-null for every call when this member has multiple calls. A sole call may omit it to inherit its AgentTask instruction."}
             }), &["provider_id","model","effort"])}
         }),

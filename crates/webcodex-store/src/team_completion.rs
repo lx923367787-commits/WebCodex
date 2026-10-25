@@ -64,12 +64,28 @@ pub(crate) fn completion_on(
     if plan.plan.manager.task_id != plan.root_task_id || plan.plan.subagents.len() > 32 {
         return Err(invariant());
     }
+    let original_plan = &plan.plan;
+    let rounds = crate::team_task::cli_round::rounds_on(conn, &plan.root_task_id)?;
+    let effective =
+        crate::team_task::cli_round::execution_plan_on(conn, principal, &plan.root_task_id)?;
+    let plan = &effective;
     let custom = plan.policy.settings.mode == TeamPolicyMode::Custom;
     let required_cli_calls = if custom {
         plan.policy.settings.cli_per_agent.min
     } else {
         0
     };
+    let required_cli_calls = required_cli_calls
+        + rounds
+            .iter()
+            .map(|r| {
+                if r.policy.settings.mode == TeamPolicyMode::Custom {
+                    r.policy.settings.cli_per_agent.min
+                } else {
+                    0
+                }
+            })
+            .sum::<u32>();
     let required_subagents = if custom {
         plan.policy.settings.subagents.min
     } else {
@@ -116,6 +132,37 @@ pub(crate) fn completion_on(
             params![plan.root_task_id, plan.project_id, member.task_id, principal.kind, principal.digest],
             |row| row.get::<_, bool>(0),
         ).map_err(store_error)?;
+        let original_calls = std::iter::once(&original_plan.manager)
+            .chain(&original_plan.subagents)
+            .find(|m| m.task_id == member.task_id)
+            .ok_or_else(invariant)?
+            .cli_calls
+            .len() as u32;
+        let confirmed_in = |first: u32, end: u32| -> Result<u32> {
+            conn.query_row("SELECT COUNT(*) FROM wc_team_cli_attempts WHERE root_task_id=?1 AND project_id=?2
+                AND source_task_id=?3 AND owner_principal_kind=?4 AND owner_principal_digest=?5
+                AND call_index>=?6 AND call_index<?7
+                AND json_extract(record_json,'$.dispatch_state')='terminal'
+                AND json_type(record_json,'$.job_id')='text' AND length(json_extract(record_json,'$.job_id'))>0
+                AND json_extract(record_json,'$.execution_state') IN ('completed','timed_out')",
+                params![plan.root_task_id,plan.project_id,member.task_id,principal.kind,principal.digest,first,end], |r| r.get(0)).map_err(store_error)
+        };
+        let mut minimum_met =
+            !custom || confirmed_in(0, original_calls)? >= plan.policy.settings.cli_per_agent.min;
+        for round in &rounds {
+            let first = *round
+                .first_call_indices
+                .get(&member.task_id)
+                .ok_or_else(invariant)?;
+            let count = std::iter::once(&round.plan.manager)
+                .chain(&round.plan.subagents)
+                .find(|m| m.task_id == member.task_id)
+                .ok_or_else(invariant)?
+                .cli_calls
+                .len() as u32;
+            minimum_met &= round.policy.settings.mode != TeamPolicyMode::Custom
+                || confirmed_in(first, first + count)? >= round.policy.settings.cli_per_agent.min;
+        }
         members.push(TeamMemberCompletion {
             task_id: member.task_id.clone(),
             role: if index == 0 { "manager" } else { "subagent" },
@@ -124,7 +171,7 @@ pub(crate) fn completion_on(
             confirmed_cli_calls: confirmed,
             required_cli_calls,
             dispatch_confirmed,
-            minimum_met: confirmed >= required_cli_calls,
+            minimum_met,
         });
     }
     let confirmed_subagents = members

@@ -132,6 +132,17 @@ fn team_nested_authority_fields_and_invalid_call_bounds_are_rejected() {
 }
 
 #[test]
+fn team_plan_effort_contract_accepts_null_and_saved_policy_selector() {
+    for effort in [json!(null), json!("project_policy"), json!("high")] {
+        let mut args = sample_tool_args("team_plan_register");
+        args["plan"]["manager"]["cli_calls"] = json!([{
+            "provider_id":"antigravity", "model":"discovered-model", "effort":effort
+        }]);
+        assert!(ToolCall::from_tool_name("team_plan_register", args).is_ok());
+    }
+}
+
+#[test]
 fn team_audit_omits_provider_payloads_replay_keys_and_profile_values() {
     let mut args = sample_tool_args("team_cli_start");
     args["idempotency_key"] = json!("private-replay-key");

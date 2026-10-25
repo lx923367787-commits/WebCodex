@@ -112,6 +112,7 @@ enum CliAction {
     ProjectActivate(ProjectActivateOptions),
     ProjectManagement(webcodex_cli::project_management::Options),
     Office(webcodex_cli::office::Options),
+    Workspaces(webcodex_cli::workspaces::Options),
     Connect(ConnectOptions),
     Disconnect(DisconnectOptions),
     HostedLogWriter(PathBuf),
@@ -338,6 +339,7 @@ where
         "connect" => parse_connect(&args[1..]),
         "disconnect" => parse_disconnect(&args[1..]),
         "project" => parse_project_subcommand(&args[1..]),
+        "workspaces" => match webcodex_cli::workspaces::parse(&args[1..]) { Ok(opts) => CliAction::Workspaces(opts), Err(error) => cli_parse_error(error) },
         "office" => {
             if args[1..]
                 .iter()
@@ -2676,6 +2678,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         CliAction::ProjectManagement(opts) => {
             match webcodex_cli::project_management::run(opts).await {
+                Ok(output) => {
+                    println!("{output}");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        CliAction::Workspaces(opts) => {
+            let input = webcodex_cli::workspaces::read_input(std::io::stdin().lock());
+            let result = match input {
+                Ok(input) => webcodex_cli::workspaces::run(opts, input).await,
+                Err(error) => Err(error),
+            };
+            match result {
                 Ok(output) => {
                     println!("{output}");
                     std::process::exit(0);

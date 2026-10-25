@@ -170,6 +170,8 @@ pub fn run() {
             commands::inspect_project,
             commands::configure_local_setup,
             commands::activate_local_project,
+            commands::list_named_workspaces,
+            commands::save_named_workspaces,
             commands::list_desktop_projects,
             commands::add_desktop_project,
             commands::switch_desktop_project,

@@ -20,6 +20,10 @@ pub const CODEBUDDY_FILES_LOADING: &str = "codebuddy-2.162.0-files-v1";
 pub const CODEBUDDY_FILES_VERSION: &str = "2.162.0";
 pub const CODEBUDDY_FILES_EXE_SHA256: &str =
     "5d06f03f55fe07aa2748a1b02d6898fca5932c52cd85db05487765851282f94a";
+pub const CODEBUDDY_NODE_FILES_LOADING: &str = "codebuddy-2.175.0-node-files-v1";
+pub const CODEBUDDY_NODE_FILES_VERSION: &str = "2.175.0";
+pub const CODEBUDDY_NODE_EXE_SHA256: &str =
+    "ae1a50511be58e987483fdbc12125407443926d2d394669ade2352776e920dd3";
 pub const CODEBUDDY_FILES_TOOLS: &str = "Read,Glob,Grep,Edit,Write";
 pub const CODEBUDDY_FILES_MCP_PATH: &str = "input/empty-mcp.json";
 pub const CODEBUDDY_FILES_SETTINGS_PATH: &str = "input/worker-settings.json";
@@ -28,6 +32,45 @@ pub const CODEBUDDY_FILES_SETTINGS_BYTES: &[u8] =
     b"{\"disableWorkflows\":true,\"disableAllHooks\":true,\"permissions\":{\"deny\":[\"Read(~/AppData/Local/CodeBuddyExtension/Data/Public/auth/**)\",\"Edit(~/AppData/Local/CodeBuddyExtension/Data/Public/auth/**)\"]}}\n";
 pub const CODEBUDDY_NATIVE_AUTH_RELATIVE: &str =
     "AppData/Local/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info";
+pub const ANTIGRAVITY_FILES_LOADING: &str = "antigravity-1.4.7-files-v1";
+pub const ANTIGRAVITY_FILES_VERSION: &str = "1.4.7";
+pub const ANTIGRAVITY_FILES_EXE_SHA256: &str =
+    "22588b6d5a6f6d2d66091c73dfb9255edc7bdafe9aff9dd20d958ce116496695";
+pub const ANTIGRAVITY_NATIVE_AUTH_RELATIVE: &str =
+    ".gemini/antigravity-cli/antigravity-oauth-token";
+pub const ANTIGRAVITY_SETTINGS_PATH: &str = "input/antigravity-settings.json";
+pub const ANTIGRAVITY_AGENT_PATH: &str = "input/antigravity-agent.md";
+// These reviewed templates are materialized only by the compiled loader. The
+// two substitutions are execution-root paths, never business prompt content.
+pub const ANTIGRAVITY_SETTINGS_BYTES: &[u8] = br#"{"agentMode":"accept-edits","permissions":{"deny":["read_file(@WEBCODEX_HOME@)","command(*)","unsandboxed(*)","read_url(*)","execute_url(*)","mcp(*)","write_file(.agents)","write_file(.gemini)"]}}"#;
+pub const ANTIGRAVITY_AGENT_BYTES: &[u8] = b"---\nname: webcodex-file-worker\ndescription: Isolated WebCodex file worker\nexcludeDefaultComponents: true\ninheritMcp: false\ntools:\n  - view_file\n  - list_dir\n  - find_by_name\n  - grep_search\n  - write_to_file\n  - replace_file_content\n  - multi_replace_file_content\nmainAgent: true\nsubagent: false\nmodel: inherit\ncommandExecutionPolicy: off\nmcpServers: []\nskills: []\nplugins: []\n---\n# Instructions\nComplete the supplied task using the available file tools. The workspace absolute path is @WEBCODEX_WORKSPACE@. File tools require absolute paths. Follow the supplied delivery contract and return a final response when finished.\n";
+
+pub fn antigravity_file_worker_control_files() -> Vec<ReviewedControlFile> {
+    [
+        (ANTIGRAVITY_AGENT_PATH, ANTIGRAVITY_AGENT_BYTES),
+        (ANTIGRAVITY_SETTINGS_PATH, ANTIGRAVITY_SETTINGS_BYTES),
+    ]
+    .into_iter()
+    .map(|(path, bytes)| ReviewedControlFile {
+        path: path.into(),
+        sha256: crate::agent_cli::sha256(bytes),
+    })
+    .collect()
+}
+
+pub fn antigravity_file_worker_args() -> Vec<ReviewedControlArg> {
+    [
+        ("--agent", Some("webcodex-file-worker")),
+        ("--mode", Some("accept-edits")),
+        ("--disable-slash-commands", None),
+    ]
+    .into_iter()
+    .map(|(flag, value)| ReviewedControlArg {
+        flag: flag.into(),
+        value: value.map(str::to_owned),
+    })
+    .collect()
+}
 
 /// Fixed operator-only diagnostic argv, not a production Agent start request.
 pub fn codebuddy_file_probe_args() -> Vec<String> {
@@ -293,7 +336,10 @@ impl ReviewedAgentCliControls {
                 }
                 text(value, 512)?;
                 let fixed_file_tools = self.provider == AgentCliProvider::WorkBuddy
-                    && self.loading_method == CODEBUDDY_FILES_LOADING
+                    && matches!(
+                        self.loading_method.as_str(),
+                        CODEBUDDY_FILES_LOADING | CODEBUDDY_NODE_FILES_LOADING
+                    )
                     && arg.flag == "--tools"
                     && value == CODEBUDDY_FILES_TOOLS;
                 if value.starts_with(['-', '@', '/'])
@@ -355,11 +401,27 @@ impl ReviewedAgentCliControls {
     /// obtain the record through the trusted configuration boundary.
     pub fn require_supported_loading(&self) -> Result<(), String> {
         self.validate_shape()?;
-        if self.provider != AgentCliProvider::WorkBuddy
-            || self.cli_version != CODEBUDDY_FILES_VERSION
-            || self.executable_sha256 != CODEBUDDY_FILES_EXE_SHA256
-            || self.loading_method != CODEBUDDY_FILES_LOADING
-        {
+        if self.provider == AgentCliProvider::Antigravity {
+            if self.cli_version != ANTIGRAVITY_FILES_VERSION
+                || self.executable_sha256 != ANTIGRAVITY_FILES_EXE_SHA256
+                || self.loading_method != ANTIGRAVITY_FILES_LOADING
+            {
+                return Err("agent_cli_controls_mechanism_unverified".into());
+            }
+            if self.fixed_args != antigravity_file_worker_args()
+                || self.control_files != antigravity_file_worker_control_files()
+            {
+                return Err("agent_cli_controls_fixed_policy_mismatch".into());
+            }
+            return Ok(());
+        }
+        let native = self.cli_version == CODEBUDDY_FILES_VERSION
+            && self.executable_sha256 == CODEBUDDY_FILES_EXE_SHA256
+            && self.loading_method == CODEBUDDY_FILES_LOADING;
+        let node = self.cli_version == CODEBUDDY_NODE_FILES_VERSION
+            && self.executable_sha256 == CODEBUDDY_NODE_EXE_SHA256
+            && self.loading_method == CODEBUDDY_NODE_FILES_LOADING;
+        if self.provider != AgentCliProvider::WorkBuddy || !(native || node) {
             return Err("agent_cli_controls_mechanism_unverified".into());
         }
         if self.fixed_args != codebuddy_file_worker_args()
@@ -371,17 +433,23 @@ impl ReviewedAgentCliControls {
     }
 }
 
-fn base_len(provider: AgentCliProvider) -> usize {
+fn base_len(provider: AgentCliProvider, args: &[String]) -> usize {
     match provider {
         AgentCliProvider::WorkBuddy => 9,
+        AgentCliProvider::Antigravity if args.get(2).map(String::as_str) != Some("--effort") => 6,
         AgentCliProvider::Antigravity => 8,
     }
 }
 fn validate_base(provider: AgentCliProvider, args: &[String]) -> Result<(), String> {
-    if args.len() != base_len(provider) || args[0] != "--model" || args[2] != "--effort" {
+    if args.len() != base_len(provider, args) || args[0] != "--model" {
         return Err("agent_cli_controls_invalid_business_argv".into());
     }
-    for (value, max) in [(&args[1], 128), (&args[3], 64)] {
+    let explicit_effort = args[2] == "--effort";
+    if !explicit_effort && provider != AgentCliProvider::Antigravity {
+        return Err("agent_cli_controls_invalid_business_argv".into());
+    }
+    let values = std::iter::once((&args[1], 128)).chain(explicit_effort.then_some((&args[3], 64)));
+    for (value, max) in values {
         text(value, max)?;
         if value.starts_with(['-', '@']) {
             return Err("agent_cli_controls_invalid_business_value".into());
@@ -402,7 +470,7 @@ fn validate_base(provider: AgentCliProvider, args: &[String]) -> Result<(), Stri
             "stream-json",
         ],
     };
-    if !args[4..]
+    if !args[if explicit_effort { 4 } else { 2 }..]
         .iter()
         .map(String::as_str)
         .eq(expected.iter().copied())
@@ -452,7 +520,7 @@ pub fn validate_reviewed_cli_argv(
     record: &ReviewedAgentCliControls,
     actual_argv: &[String],
 ) -> Result<(), String> {
-    let count = base_len(record.provider);
+    let count = base_len(record.provider, actual_argv);
     if actual_argv.len() < count || compose_shape(record, &actual_argv[..count])? != actual_argv {
         return Err("agent_cli_controls_argument_override".into());
     }

@@ -329,3 +329,17 @@ pub async fn get_bounded_activity(
 ) -> Result<Vec<ActivityEntry>, DesktopError> {
     Ok(state.activity())
 }
+
+#[tauri::command]
+pub async fn list_named_workspaces(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, DesktopError> {
+    state.named_workspaces(None).await
+}
+#[tauri::command]
+pub async fn save_named_workspaces(
+    state: State<'_, AppState>,
+    request: crate::state::workspaces::WorkspaceSave,
+) -> Result<serde_json::Value, DesktopError> {
+    state.named_workspaces(Some(request)).await
+}

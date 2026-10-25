@@ -10,7 +10,7 @@ import type {
 } from "./models/topology";
 import { FirstRun } from "./features/onboarding/FirstRun";
 import { Dashboard } from "./features/dashboard/Dashboard";
-import { ProjectsPanel } from "./features/projects/ProjectsPanel";
+import { NamedProjectsPanel } from "./features/projects/NamedProjectsPanel";
 import { ConnectionPanel } from "./features/connection/ConnectionPanel";
 import { ActivityPanel } from "./features/activity/ActivityPanel";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
@@ -458,7 +458,7 @@ export default function App() {
           />
         ))}
         {navigation === "projects" && (
-          <ProjectsPanel state={state} onState={commitState} onChooseProject={() => void chooseLocalProject()} />
+          <NamedProjectsPanel state={state} onState={commitState} onChooseProject={() => void chooseLocalProject()} />
         )}
         {navigation === "connection" && <ConnectionPanel state={state} onState={commitState} />}
         {navigation === "activity" && <ActivityPanel activity={activity} />}

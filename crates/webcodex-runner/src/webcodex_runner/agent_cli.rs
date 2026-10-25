@@ -126,6 +126,8 @@ pub(crate) fn query_catalog(
     query: &AgentCliCatalogQuery,
     resource: &AgentExecutionResourceDescriptor,
     program: &Path,
+    entrypoint: Option<&Path>,
+    codebuddy_config_directory: Option<&Path>,
     deadline: &ControlDeadline,
 ) -> Result<AgentCliCatalog, String> {
     query.validate()?;
@@ -138,8 +140,28 @@ pub(crate) fn query_catalog(
     deadline.require(Duration::from_secs(33))?;
     let provider = provider(query.provider);
     let proxy = super::shell::native_metadata_system_proxy();
-    let context = TrustedMetadataContext::for_current_user(provider, program, proxy.as_deref())
-        .map_err(|_| "agent_cli_metadata_context_unavailable")?;
+    let node_mapping = resource.reviewed_controls.as_ref().is_some_and(|control| {
+        control.loading_method == webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING
+    });
+    if node_mapping != entrypoint.is_some() || node_mapping != codebuddy_config_directory.is_some()
+    {
+        return Err("agent_cli_metadata_entrypoint_mismatch".into());
+    }
+    let context = if let Some(entrypoint) = entrypoint {
+        if provider != Provider::WorkBuddy
+            || !resource.reviewed_controls.as_ref().is_some_and(|control| {
+                control.loading_method
+                    == webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING
+            })
+        {
+            return Err("agent_cli_metadata_entrypoint_mismatch".into());
+        }
+        let config = codebuddy_config_directory.ok_or("agent_cli_metadata_entrypoint_mismatch")?;
+        TrustedMetadataContext::for_codebuddy_node(program, entrypoint, config)
+    } else {
+        TrustedMetadataContext::for_current_user(provider, program, proxy.as_deref())
+    }
+    .map_err(|_| "agent_cli_metadata_context_unavailable")?;
     deadline.require(Duration::from_secs(33))?;
     let raw = std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()

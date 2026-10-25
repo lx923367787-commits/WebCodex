@@ -187,3 +187,5 @@ pub(crate) use surface::registered_tool_categories;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) mod named_project_files;

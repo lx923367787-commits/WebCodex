@@ -1,6 +1,39 @@
 use super::*;
 use crate::runner_protocol::AgentExecutionResourceDescriptor;
 
+#[test]
+fn antigravity_mapping_binds_binary_templates_and_tool_policy() {
+    let mut value = record(AgentCliProvider::Antigravity);
+    value.cli_version = ANTIGRAVITY_FILES_VERSION.into();
+    value.executable_sha256 = ANTIGRAVITY_FILES_EXE_SHA256.into();
+    value.loading_method = ANTIGRAVITY_FILES_LOADING.into();
+    value.fixed_args = antigravity_file_worker_args();
+    value.control_files = antigravity_file_worker_control_files();
+    value.require_supported_loading().unwrap();
+    let args = compose_reviewed_cli_argv(&value, &base(value.provider)).unwrap();
+    validate_reviewed_cli_argv(&value, &args).unwrap();
+    let mut pinned_model = base(value.provider);
+    pinned_model[1] = "gemini-3.8-flash-high".into();
+    pinned_model.drain(2..4);
+    let pinned = compose_reviewed_cli_argv(&value, &pinned_model).unwrap();
+    validate_reviewed_cli_argv(&value, &pinned).unwrap();
+    assert!(!pinned.iter().any(|arg| arg == "--effort"));
+    let mut override_args = pinned.clone();
+    override_args.extend(["--effort".into(), "low".into()]);
+    assert!(validate_reviewed_cli_argv(&value, &override_args).is_err());
+    for field in ["version", "binary", "agent", "controls", "provider"] {
+        let mut changed = value.clone();
+        match field {
+            "version" => changed.cli_version = "1.4.8".into(),
+            "binary" => changed.executable_sha256 = "f".repeat(64),
+            "agent" => changed.fixed_args[0].value = Some("default".into()),
+            "controls" => changed.control_files[0].sha256 = "f".repeat(64),
+            _ => changed.provider = AgentCliProvider::WorkBuddy,
+        }
+        assert!(changed.require_supported_loading().is_err(), "{field}");
+    }
+}
+
 fn record(provider: AgentCliProvider) -> ReviewedAgentCliControls {
     ReviewedAgentCliControls {
         version: 1,
@@ -86,6 +119,26 @@ fn codebuddy_files_mapping_is_exact_version_binary_and_policy() {
             _ => changed.fixed_args[6].value = Some("bypassPermissions".into()),
         }
         assert!(changed.require_supported_loading().is_err(), "{field}");
+    }
+}
+
+#[test]
+fn codebuddy_node_mapping_binds_version_runtime_and_fixed_controls() {
+    let mut value = codebuddy_files_record();
+    value.cli_version = CODEBUDDY_NODE_FILES_VERSION.into();
+    value.executable_sha256 = CODEBUDDY_NODE_EXE_SHA256.into();
+    value.loading_method = CODEBUDDY_NODE_FILES_LOADING.into();
+    let argv = compose_reviewed_cli_argv(&value, &base(value.provider)).unwrap();
+    validate_reviewed_cli_argv(&value, &argv).unwrap();
+    for mutation in ["version", "binary", "loader", "tools"] {
+        let mut changed = value.clone();
+        match mutation {
+            "version" => changed.cli_version = CODEBUDDY_FILES_VERSION.into(),
+            "binary" => changed.executable_sha256 = CODEBUDDY_FILES_EXE_SHA256.into(),
+            "loader" => changed.loading_method = CODEBUDDY_FILES_LOADING.into(),
+            _ => changed.fixed_args[0].value = Some("Read,Write,Bash".into()),
+        }
+        assert!(changed.require_supported_loading().is_err(), "{mutation}");
     }
 }
 

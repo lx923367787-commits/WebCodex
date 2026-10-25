@@ -19,7 +19,7 @@ enum Request {
         expected_source_run_id: String,
         expected_source_generation: i64,
         expected_goal_revision: u64,
-        expected_attempt_id: String,
+        expected_attempt_id: Option<String>,
         idempotency_key: String,
     },
     HandoffList {
@@ -210,7 +210,7 @@ pub(crate) fn try_control(
                             &expected_source_run_id,
                             expected_source_generation,
                             expected_goal_revision,
-                            &expected_attempt_id,
+                            expected_attempt_id.as_deref(),
                             &idempotency_key,
                             chrono::Utc::now().timestamp_millis(),
                         )

@@ -859,3 +859,44 @@ async fn agent_cli_generic_queue_cannot_bypass_fixed_read_fence() {
     .is_err());
     assert!(inner.pending_by_id.is_empty());
 }
+
+#[tokio::test]
+async fn agent_cli_delivery_returns_only_allowlisted_errors_from_exact_runner() {
+    for (error, expected) in [
+        (
+            "agent_cli_delivery_not_published",
+            "agent_cli_delivery_not_published",
+        ),
+        ("private-path-or-secret", "agent_cli_query_response_invalid"),
+    ] {
+        let (registry, binding) = stopped_fixture(Some(true)).await;
+        let reader = registry.clone();
+        let task = tokio::spawn(async move {
+            reader
+                .read_agent_cli_delivery_snapshot(
+                    &execution::access(),
+                    &binding,
+                    "controller".into(),
+                )
+                .await
+        });
+        let request = next(&registry).await;
+        let instance = registry.inner.lock().await.runners["runner"]
+            .runner_instance_id
+            .clone();
+        registry
+            .complete(RunnerResultRequest {
+                client_id: "runner".into(),
+                runner_instance_id: instance,
+                request_id: request.request_id,
+                exit_code: None,
+                stdout: None,
+                stderr: None,
+                duration_ms: Some(0),
+                error: Some(error.into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().unwrap_err(), expected);
+    }
+}

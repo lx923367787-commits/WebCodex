@@ -399,12 +399,31 @@ impl PendingRead {
             .map_err(|_| "agent_cli_query_response_unavailable")?;
         if response.request_id != self.request_id
             || response.client_id != target(&self.operation)?.client_id
-            || !response.success
-            || response.exit_code != Some(0)
-            || response.error.is_some()
             || response.request_dispatched != Some(true)
             || response.command_execution_state.is_some()
         {
+            return Err("agent_cli_query_response_invalid".into());
+        }
+        // Only finite delivery codes from the exact authenticated response may
+        // cross this boundary. Never expose arbitrary Runner errors/logs.
+        if !response.success || response.exit_code != Some(0) || response.error.is_some() {
+            if matches!(self.operation, RunnerOperation::AgentCliDelivery(_))
+                && !response.success
+                && response.exit_code.is_none()
+                && response.stdout.is_none()
+            {
+                if let Some(
+                    code @ ("agent_cli_delivery_not_published"
+                    | "agent_cli_delivery_manifest_invalid"
+                    | "agent_cli_delivery_manifest_limit"
+                    | "agent_cli_delivery_text_required"
+                    | "agent_cli_delivery_file_limit"
+                    | "agent_cli_delivery_invalid_path"),
+                ) = response.error.as_deref()
+                {
+                    return Err(code.into());
+                }
+            }
             return Err("agent_cli_query_response_invalid".into());
         }
         let content = response.stdout.ok_or("agent_cli_query_response_missing")?;

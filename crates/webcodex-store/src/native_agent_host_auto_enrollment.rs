@@ -76,6 +76,16 @@ impl Database {
         window_key: &str,
         now: i64,
     ) -> Result<VerifiedAgentRun, AgentIsolationError> {
+        self.select_native_host_workspace(host, window_key, None, now)
+    }
+
+    pub fn select_native_host_workspace(
+        &self,
+        host: &VerifiedNativeAgentHost,
+        window_key: &str,
+        selected_project: Option<&str>,
+        now: i64,
+    ) -> Result<VerifiedAgentRun, AgentIsolationError> {
         if !hex(window_key, 64) {
             return Err(AgentIsolationError::new("invalid_host_window_key"));
         }
@@ -111,6 +121,9 @@ impl Database {
             }
             let (run_id, project, agent_id, owner) =
                 existing.ok_or_else(|| AgentIsolationError::new("agent_host_window_not_active"))?;
+            if selected_project.is_some_and(|selected| selected != project) {
+                return Err(AgentIsolationError::new("workspace_new_chat_required"));
+            }
             owner_enabled(&tx, &owner)?;
             return crate::agent_isolation::verify_agent_run_context_on_connection(
                 &tx,
@@ -118,12 +131,48 @@ impl Database {
                 &run_id,
             );
         }
-        let config: Option<(String,String,u32,u32)> = tx.query_row(
+        let legacy: Option<(String,String,u32,u32)> = tx.query_row(
             "SELECT owner_user,project,max_subagents,max_cli_calls FROM wc_native_host_auto_enrollment WHERE host_id=?1",
             [&host.host_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
         ).optional().map_err(unavailable)?;
-        let (owner, project, max_subagents, max_cli_calls) =
-            config.ok_or_else(|| AgentIsolationError::new("agent_host_enrollment_required"))?;
+        let mut team_target = None;
+        let (owner, project, max_subagents, max_cli_calls) = if let Some((owner, catalog)) =
+            crate::native_workspaces::read_on_connection(&tx, &host.host_id)?
+        {
+            let choices: Vec<_> = catalog.projects.iter().filter(|p| p.enabled).collect();
+            let selected = match selected_project {
+                Some(id) => choices
+                    .iter()
+                    .find(|p| p.id == id)
+                    .copied()
+                    .ok_or_else(|| AgentIsolationError::new("workspace_not_authorized"))?,
+                None if choices.len() == 1 => choices[0],
+                None => return Err(AgentIsolationError::new("workspace_selection_required")),
+            };
+            let policy = match crate::native_workspaces::initial_team_on_connection(
+                &tx, &owner, selected,
+            )? {
+                Some((folder, policy)) => {
+                    team_target = Some(folder);
+                    policy
+                }
+                None => AgentEnrollmentPolicy {
+                    max_subagents: 0,
+                    max_cli_calls: 0,
+                },
+            };
+            (
+                owner,
+                selected.id.clone(),
+                policy.max_subagents,
+                policy.max_cli_calls,
+            )
+        } else {
+            if selected_project.is_some() {
+                return Err(AgentIsolationError::new("workspace_not_authorized"));
+            }
+            legacy.ok_or_else(|| AgentIsolationError::new("agent_host_enrollment_required"))?
+        };
         owner_enabled(&tx, &owner)?;
         let now = now.max(chrono::Utc::now().timestamp_millis());
         let key = format!(
@@ -170,6 +219,9 @@ impl Database {
             now,
             false,
         )?;
+        if let Some(folder) = team_target {
+            tx.execute("INSERT INTO wc_native_workspace_team_targets(agent_id,host_id,folder_json) VALUES(?1,?2,?3)", params![issued.agent_id,host.host_id,serde_json::to_string(&folder).map_err(unavailable)?]).map_err(unavailable)?;
+        }
         let secret = issued
             .grant
             .take()

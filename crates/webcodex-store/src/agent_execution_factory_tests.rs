@@ -9,6 +9,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_instruction("Independent CLI task")
+    }
+    fn with_instruction(instruction: &str) -> Self {
+        Self::with_inputs(instruction, vec![])
+    }
+    fn with_inputs(instruction: &str, inputs: Vec<crate::AgentEnrollmentInput>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("synthetic.db")).unwrap();
         let root = db
@@ -69,10 +75,11 @@ impl Fixture {
                 manager: TeamAgentPlan {
                     task_id: root.clone(),
                     cli_calls: vec![TeamCliCall {
+                        inputs,
                         provider_id: "workbuddy".into(),
                         model: "frozen-model".into(),
                         effort: Some("high".into()),
-                        instruction: Some("Independent CLI task".into()),
+                        instruction: Some(instruction.into()),
                     }],
                 },
                 subagents: vec![],
@@ -199,6 +206,39 @@ fn factory_member_is_atomic_bounded_and_grant_starts_at_delivery() {
         )
         .unwrap();
     assert_eq!(claim.binding.agent_id(), receipt.agent_id);
+}
+
+#[test]
+fn factory_cli_preserves_multiline_frozen_instruction_and_identity_on_replay() {
+    let instruction = format!(
+        "Review architecture.\r\n\tKeep every byte.\n{}",
+        "x".repeat(8000)
+    );
+    let f = Fixture::with_instruction(&instruction);
+    let first =
+        f.db.prepare_agent_cli_worker(&f.manager, f.request())
+            .unwrap();
+    let worker = first.preparation.unwrap();
+    let own = f.db.read_agent_enrollment(worker.worker()).unwrap();
+    assert_eq!(own.brief, instruction);
+    assert_eq!(own.purpose, AgentEnrollmentPurpose::CliWorker);
+    assert_eq!(own.policy.max_subagents, 0);
+    assert_eq!(own.policy.max_cli_calls, 0);
+    let replay =
+        f.db.prepare_agent_cli_worker(&f.manager, f.request())
+            .unwrap();
+    assert_eq!(
+        worker.binding_identity(),
+        replay.preparation.unwrap().binding_identity()
+    );
+    let mut member = Fixture::member();
+    member.brief = "A label\0with a NUL".into();
+    assert_eq!(
+        f.db.create_agent_member(&f.manager, member, "invalid-member")
+            .unwrap_err()
+            .code(),
+        "agent_enrollment_invalid_input"
+    );
 }
 
 #[test]
@@ -1127,5 +1167,38 @@ fn factory_delivery_recovery_preserves_historical_worker_close_after_resume_and_
             .unwrap()
             .execution,
         worker_started.execution
+    );
+}
+
+#[test]
+fn factory_cli_carries_exact_frozen_input_snapshot_without_host_file_access() {
+    let f = Fixture::with_inputs(
+        "Review supplied data",
+        vec![crate::AgentEnrollmentInput {
+            name: "source.js".into(),
+            content: "export const answer = 42;\n".into(),
+        }],
+    );
+    let first =
+        f.db.prepare_agent_cli_worker(&f.manager, f.request())
+            .unwrap()
+            .preparation
+            .unwrap();
+    let own = f.db.read_agent_enrollment(first.worker()).unwrap();
+    assert_eq!(own.inputs.len(), 1);
+    assert_eq!(own.inputs[0].name, "source.js");
+    assert_eq!(own.inputs[0].content, "export const answer = 42;\n");
+    assert_eq!(
+        own.inputs[0].sha256,
+        webcodex_core::agent_cli::sha256(own.inputs[0].content.as_bytes())
+    );
+    let replay =
+        f.db.prepare_agent_cli_worker(&f.manager, f.request())
+            .unwrap()
+            .preparation
+            .unwrap();
+    assert_eq!(
+        f.db.read_agent_enrollment(replay.worker()).unwrap().inputs,
+        own.inputs
     );
 }

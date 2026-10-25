@@ -3,6 +3,162 @@ const TUNNEL: &str = "tunnel_0123456789abcdef0123456789abcdef";
 const DIGEST: &str = "ee9d4a75bc0b42f36f345aa96231e0db1ab00488122f34ebc99d6db055b6603e";
 
 #[test]
+fn named_workspace_files_survive_real_task_handoff_without_extending_authority() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let workspace = workspace('a');
+    db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![workspace.clone()])
+        .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let source = db
+        .ensure_native_host_window(&host, &"d".repeat(64), now)
+        .unwrap();
+    let assignment = db.read_agent_enrollment(&source).unwrap();
+    assert!(db.agent_native_workspace_for_files(&source, true).is_ok());
+    let context = db.ensure_agent_host_context(&source, None).unwrap();
+    let owner = source.host_goal_owner_key();
+    let goal = db
+        .create_host_goal_in_task_directory_in_context(
+            &owner,
+            source.project(),
+            "/private",
+            &assignment.task_directory,
+            "Continue same assignment",
+            "native-files-goal",
+            now,
+            Some(&context),
+        )
+        .unwrap()
+        .goal;
+    db.bind_host_goal_window_in_context(
+        &owner,
+        source.run_id(),
+        &crate::HostGoalWindowBinding {
+            goal_id: goal.goal_id.clone(),
+            project: goal.project.clone(),
+            project_root: goal.project_root.clone(),
+            context_epoch: source.run_id().into(),
+        },
+        Some(&context),
+    )
+    .unwrap();
+    db.checkpoint_host_goal_with_request_in_context(
+        &owner,
+        &goal.goal_id,
+        goal.revision,
+        None,
+        &goal.state,
+        crate::HostGoalCheckpointAction::Handoff,
+        "continue",
+        "native-files-handoff",
+        "native-files-request",
+        &[],
+        now,
+        Some(&context),
+        &[],
+    )
+    .unwrap();
+    let waiting = db
+        .read_host_goal_handoff(&owner, &goal.goal_id)
+        .unwrap()
+        .unwrap();
+    let handoff = db
+        .begin_host_goal_handoff_attempt(
+            &owner,
+            &goal.goal_id,
+            &waiting.handoff_id,
+            waiting.attempt_id.as_deref(),
+            now,
+            120,
+        )
+        .unwrap();
+    let window = "e".repeat(64);
+    let attempt = handoff.attempt_id.as_deref().unwrap();
+    let digest = "f".repeat(64);
+    db.bind_handoff_host_window(
+        host.principal_key(),
+        &window,
+        &goal.goal_id,
+        &handoff.handoff_id,
+        attempt,
+        now,
+    )
+    .unwrap();
+    db.prepare_agent_handoff_for_host_window(
+        host.principal_key(),
+        &window,
+        &goal.goal_id,
+        &handoff.handoff_id,
+        attempt,
+        handoff.checkpoint_sequence,
+        &digest,
+        now,
+    )
+    .unwrap();
+    db.commit_agent_handoff_for_host_window(
+        host.principal_key(),
+        &window,
+        &goal.goal_id,
+        &handoff.handoff_id,
+        attempt,
+        handoff.checkpoint_sequence,
+        &digest,
+        now,
+    )
+    .unwrap();
+    let Some(crate::AgentHostWindowBinding::Active(successor)) = db
+        .resolve_agent_host_window(host.principal_key(), &window, now)
+        .unwrap()
+    else {
+        panic!("committed successor must be active")
+    };
+    assert_eq!(successor.agent_id(), source.agent_id());
+    assert_eq!(
+        db.agent_run_task_goal(&successor).unwrap(),
+        Some(goal.goal_id)
+    );
+    for write in [false, true] {
+        assert_eq!(
+            db.agent_native_workspace_for_files(&successor, write)
+                .unwrap(),
+            workspace
+        );
+        assert!(db.agent_native_workspace_for_files(&source, write).is_err());
+    }
+    // The immutable scope also rejects attempts to substitute another Goal.
+    assert!(db
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE wc_agent_runs SET task_goal_id='hgoal_unrelated' WHERE run_id=?1",
+            [successor.run_id()],
+        )
+        .is_err());
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE wc_agent_enrollment_assignments SET state='released' WHERE agent_id=?1",
+            [successor.agent_id()],
+        )
+        .unwrap();
+    assert_eq!(
+        db.agent_native_workspace_for_files(&successor, true)
+            .unwrap_err()
+            .code(),
+        "agent_assignment_released"
+    );
+    db.configure_native_workspaces(host.host_id(), "native-owner", 1, vec![])
+        .unwrap();
+    assert_eq!(
+        db.agent_native_workspace_for_files(&successor, false)
+            .unwrap_err()
+            .code(),
+        "workspace_not_authorized"
+    );
+}
+
+#[test]
 fn native_host_rotation_reopen_and_revocation_keep_stable_principal() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.db");
@@ -115,6 +271,311 @@ fn configure_auto(db: &Database, host: &VerifiedNativeAgentHost) {
         },
     )
     .unwrap();
+}
+
+fn workspace(n: char) -> crate::NativeWorkspace {
+    crate::NativeWorkspace {
+        id: format!("wc_workspace_{}", n.to_string().repeat(32)),
+        name: format!("Project {n}"),
+        enabled: true,
+        folders: vec![
+            crate::NativeWorkspaceFolder {
+                project: format!("agent:runner:{n}"),
+                name: "Code".into(),
+                path: format!("D:/{n}"),
+            },
+            crate::NativeWorkspaceFolder {
+                project: format!("agent:runner:{n}-docs"),
+                name: "Documents".into(),
+                path: format!("E:/{n}"),
+            },
+        ],
+    }
+}
+
+#[test]
+fn named_workspace_team_uses_saved_policy_without_upgrading_existing_chats() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let mut project = workspace('a');
+    project.folders.truncate(1);
+    db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![project.clone()])
+        .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let old = db
+        .ensure_native_host_window(&host, &"a".repeat(64), now)
+        .unwrap();
+    let principal = crate::agent_isolation::enrollment_principal_for_execution("native-owner");
+    let mut settings = crate::TeamPolicyInput::default();
+    settings.mode = crate::TeamPolicyMode::Custom;
+    settings.subagents = crate::TeamCountRange { min: 2, max: 4 };
+    settings.cli_per_agent = crate::TeamCountRange { min: 2, max: 2 };
+    settings.providers[0].model = Some("explicit-model".into());
+    settings.providers[0].effort = Some("high".into());
+    let saved = db
+        .save_team_policy(&principal, &project.folders[0].project, 0, settings)
+        .unwrap();
+    let old_again = db
+        .ensure_native_host_window(&host, &"a".repeat(64), now)
+        .unwrap();
+    assert_eq!(old, old_again);
+    assert_eq!(
+        db.read_agent_enrollment(&old).unwrap().policy.max_subagents,
+        0
+    );
+    assert_eq!(
+        db.agent_team_execution_project(&old).unwrap_err().code(),
+        "workspace_team_new_chat_required"
+    );
+    let manager = db
+        .ensure_native_host_window(&host, &"b".repeat(64), now)
+        .unwrap();
+    let assignment = db.read_agent_enrollment(&manager).unwrap();
+    assert_eq!(assignment.policy.max_subagents, 4);
+    assert_eq!(assignment.policy.max_cli_calls, 10);
+    assert_eq!(
+        db.agent_team_execution_project(&manager).unwrap(),
+        project.folders[0].project
+    );
+    let observed = db.agent_team_policy(&manager, &assignment.task_id).unwrap();
+    assert_eq!(observed.policy, saved);
+    let mut children = vec![];
+    for name in ["frontend", "backend"] {
+        let child = db
+            .create_agent_member(
+                &manager,
+                crate::AgentMemberRequest {
+                    title: name.into(),
+                    brief: format!("Implement the {name} assignment"),
+                    task_directory: format!("workspace/{name}"),
+                    inputs: vec![],
+                    room_ids: vec![],
+                    policy: crate::AgentEnrollmentPolicy {
+                        max_subagents: 0,
+                        max_cli_calls: 2,
+                    },
+                },
+                name,
+            )
+            .unwrap();
+        let inherited: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT folder_json FROM wc_native_workspace_team_targets WHERE agent_id=?1",
+                [&child.agent_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::NativeWorkspaceFolder>(&inherited).unwrap(),
+            project.folders[0]
+        );
+        children.push(child.task_id);
+    }
+    let member = |id: &str| crate::TeamAgentPlan {
+        task_id: id.into(),
+        cli_calls: (0..2)
+            .map(|_| crate::TeamCliCall {
+                inputs: vec![],
+                provider_id: "workbuddy".into(),
+                model: "explicit-model".into(),
+                effort: Some("high".into()),
+                instruction: Some("Review this member's assigned implementation".into()),
+            })
+            .collect(),
+    };
+    let plan = crate::TeamPlanInput {
+        manager: member(&assignment.task_id),
+        subagents: children.iter().map(|id| member(id)).collect(),
+    };
+    let frozen = db
+        .register_agent_team_plan(
+            &manager,
+            &assignment.task_id,
+            saved.revision,
+            plan,
+            "named-plan",
+        )
+        .unwrap();
+    assert_eq!(frozen.plan.policy, saved);
+    // An operator edit may revoke the target, but must not retarget this task.
+    project.folders[0].path = "D:/replacement".into();
+    db.configure_native_workspaces(host.host_id(), "native-owner", 1, vec![project])
+        .unwrap();
+    assert_eq!(
+        db.agent_team_execution_project(&manager)
+            .unwrap_err()
+            .code(),
+        "workspace_team_target_changed"
+    );
+}
+
+#[test]
+fn named_workspace_team_does_not_guess_a_folder_or_borrow_another_owners_policy() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let project = workspace('a');
+    let principal = crate::agent_isolation::enrollment_principal_for_execution("native-owner");
+    db.save_team_policy(
+        &principal,
+        &project.folders[0].project,
+        0,
+        crate::TeamPolicyInput::default(),
+    )
+    .unwrap();
+    db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![project.clone()])
+        .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let ambiguous = db
+        .ensure_native_host_window(&host, &"a".repeat(64), now)
+        .unwrap();
+    assert_eq!(
+        db.read_agent_enrollment(&ambiguous)
+            .unwrap()
+            .policy
+            .max_subagents,
+        0
+    );
+    let mut other = workspace('b');
+    other.folders.truncate(1);
+    let foreign = crate::agent_isolation::enrollment_principal_for_execution("different-owner");
+    db.save_team_policy(
+        &foreign,
+        &other.folders[0].project,
+        0,
+        crate::TeamPolicyInput::default(),
+    )
+    .unwrap();
+    db.configure_native_workspaces(host.host_id(), "native-owner", 1, vec![other])
+        .unwrap();
+    let fresh = db
+        .ensure_native_host_window(&host, &"b".repeat(64), now)
+        .unwrap();
+    assert_eq!(
+        db.read_agent_enrollment(&fresh)
+            .unwrap()
+            .policy
+            .max_cli_calls,
+        0
+    );
+}
+
+#[test]
+fn named_workspaces_require_selection_keep_binding_and_revoke_folders() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let a = workspace('a');
+    let b = workspace('b');
+    let catalog = db
+        .configure_native_workspaces(
+            host.host_id(),
+            "native-owner",
+            0,
+            vec![a.clone(), b.clone()],
+        )
+        .unwrap();
+    assert_eq!(catalog.revision, 1);
+    let now = chrono::Utc::now().timestamp_millis();
+    let window = "a".repeat(64);
+    assert_eq!(
+        db.ensure_native_host_window(&host, &window, now)
+            .unwrap_err()
+            .code(),
+        "workspace_selection_required"
+    );
+    let run = db
+        .select_native_host_workspace(&host, &window, Some(&a.id), now)
+        .unwrap();
+    assert_eq!(db.agent_native_workspace(&run).unwrap().folders.len(), 2);
+    assert_eq!(
+        db.select_native_host_workspace(&host, &window, Some(&a.id), now)
+            .unwrap(),
+        run
+    );
+    assert_eq!(
+        db.select_native_host_workspace(&host, &window, Some(&b.id), now)
+            .unwrap_err()
+            .code(),
+        "workspace_new_chat_required"
+    );
+    let mut updated = a.clone();
+    updated.folders.pop();
+    db.configure_native_workspaces(
+        host.host_id(),
+        "native-owner",
+        1,
+        vec![updated.clone(), b.clone()],
+    )
+    .unwrap();
+    assert_eq!(
+        db.agent_native_workspace(&run).unwrap().folders,
+        updated.folders
+    );
+    updated.enabled = false;
+    db.configure_native_workspaces(host.host_id(), "native-owner", 2, vec![updated, b.clone()])
+        .unwrap();
+    assert_eq!(
+        db.agent_native_workspace(&run).unwrap_err().code(),
+        "workspace_not_authorized"
+    );
+    let second = db
+        .ensure_native_host_window(&host, &"b".repeat(64), now)
+        .unwrap();
+    assert_eq!(second.project(), b.id);
+    assert_ne!(second.agent_id(), run.agent_id());
+}
+
+#[test]
+fn named_workspaces_bound_revisions_names_and_exact_host() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let a = workspace('a');
+    db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![a.clone()])
+        .unwrap();
+    assert_eq!(
+        db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![a.clone()])
+            .unwrap()
+            .revision,
+        1
+    );
+    assert_eq!(
+        db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![])
+            .unwrap_err()
+            .code(),
+        "workspace_revision_conflict"
+    );
+    let mut duplicate = workspace('b');
+    duplicate.name = a.name.to_uppercase();
+    assert_eq!(
+        db.configure_native_workspaces(
+            host.host_id(),
+            "native-owner",
+            1,
+            vec![a.clone(), duplicate]
+        )
+        .unwrap_err()
+        .code(),
+        "workspace_invalid_input"
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+    let run = db
+        .ensure_native_host_window(&host, &"a".repeat(64), now)
+        .unwrap();
+    let other = db
+        .register_native_agent_host(&format!("tunnel_{}", "c".repeat(32)), DIGEST)
+        .unwrap();
+    db.configure_native_workspaces(&other.host_id, "native-owner", 0, vec![a])
+        .unwrap();
+    db.configure_native_workspaces(host.host_id(), "native-owner", 1, vec![])
+        .unwrap();
+    assert_eq!(
+        db.agent_native_workspace(&run).unwrap_err().code(),
+        "workspace_not_authorized"
+    );
+    assert_eq!(
+        db.ensure_native_host_window(&host, &"b".repeat(64), now)
+            .unwrap_err()
+            .code(),
+        "workspace_selection_required"
+    );
 }
 
 #[test]

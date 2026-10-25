@@ -150,3 +150,5 @@ mod shell_command_tests {
         assert_eq!(shell_quote_arg("one;two"), "'one;two'");
     }
 }
+
+pub(crate) mod workspaces;

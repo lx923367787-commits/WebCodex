@@ -31,6 +31,7 @@ struct Source {
     binary: PathBuf,
     connection: RuntimeConnection,
     client_id: String,
+    native_host_id: Option<String>,
     env_file: PathBuf,
     control_path: PathBuf,
     desktop_state: PathBuf,
@@ -239,6 +240,58 @@ fn scope_from_inventory(
     Ok((owner, enabled))
 }
 
+fn append_named_scopes(
+    projects: &mut Vec<String>,
+    catalog: &Value,
+    expected_host: &str,
+    folders: &[crate::models::RegisteredProject],
+) -> DesktopResult<()> {
+    if catalog.get("host_id").and_then(Value::as_str) != Some(expected_host) {
+        return Err(error("project_connection_changed"));
+    }
+    let named = catalog
+        .get("projects")
+        .and_then(Value::as_array)
+        .filter(|rows| rows.len() <= 32)
+        .ok_or_else(|| error("host_control_inventory_invalid"))?;
+    for workspace in named {
+        if workspace.get("enabled").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let id = workspace
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| {
+                id.strip_prefix("wc_workspace_").is_some_and(|s| {
+                    s.len() == 32
+                        && s.bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+            })
+            .ok_or_else(|| error("host_control_inventory_invalid"))?;
+        let granted = workspace
+            .get("folders")
+            .and_then(Value::as_array)
+            .ok_or_else(|| error("host_control_inventory_invalid"))?;
+        // A team must have one unambiguous, currently registered execution root.
+        if granted.len() == 1
+            && folders.iter().any(|folder| {
+                folder.enabled
+                    && granted[0].get("project").and_then(Value::as_str) == Some(folder.id.as_str())
+                    && granted[0].get("path").and_then(Value::as_str) == Some(folder.path.as_str())
+            })
+        {
+            projects.push(id.to_owned());
+        }
+    }
+    projects.sort();
+    projects.dedup();
+    if projects.len() > 128 {
+        return Err(error("host_control_inventory_limit"));
+    }
+    Ok(())
+}
+
 impl AppState {
     async fn host_control_source(&self) -> DesktopResult<Source> {
         if self.operations.current().is_some() {
@@ -293,6 +346,11 @@ impl AppState {
             binary: core.adapter.binaries()?.webcodex.clone(),
             connection,
             client_id,
+            native_host_id: core
+                .config
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.native_host_id.clone()),
             env_file,
             control_path: carrier_path(&core.data_dir),
             desktop_state: core.config_path.clone(),
@@ -382,8 +440,8 @@ impl AppState {
     async fn refresh_host_control(&self, cancellation: &CancellationContext) -> DesktopResult<()> {
         cancellation.check()?;
         let source = self.host_control_source().await?;
-        // One exact Human project-list response supplies both actor and the
-        // entire scope. No policy reads, UI selection, or connected filtering.
+        // One exact Human project-list response supplies the actor and registered
+        // roots. Named scopes below must match this same host and inventory.
         let inventory = WebCodexAdapter::list_registry_inventory_with_binary(
             &source.binary,
             &source.connection,
@@ -396,11 +454,18 @@ impl AppState {
             return Err(error("project_connection_changed"));
         }
         inventory.require_complete()?;
-        let (owner, projects) = scope_from_inventory(
+        let (owner, mut projects) = scope_from_inventory(
             inventory.operator_user_id,
             &source.client_id,
-            inventory.projects,
+            inventory.projects.clone(),
         )?;
+        if let Some(host) = &source.native_host_id {
+            let catalog = self.named_workspaces(None).await?;
+            append_named_scopes(&mut projects, &catalog, host, &inventory.projects)?;
+            if self.host_control_source().await? != source {
+                return Err(error("project_connection_changed"));
+            }
+        }
         let mut state = self.host_control.lock().await;
         cancellation.check()?;
         if state.publication.as_ref().is_some_and(|existing| {
@@ -483,6 +548,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn named_team_scopes_require_the_exact_host_and_registered_folder() {
+        let id = format!("wc_workspace_{}", "a".repeat(32));
+        let catalog = serde_json::json!({"host_id":"host", "projects":[
+            {"id":id,"enabled":true,"folders":[{"project":"agent:runner:code","path":"/project"}]}
+        ]});
+        let folders = vec![project("agent:runner:code", true)];
+        let mut scopes = vec![];
+        append_named_scopes(&mut scopes, &catalog, "host", &folders).unwrap();
+        assert_eq!(scopes, vec![id]);
+        assert!(append_named_scopes(&mut vec![], &catalog, "other-host", &folders).is_err());
+        let mut moved = folders.clone();
+        moved[0].path = "/replacement".into();
+        let mut rejected = vec![];
+        append_named_scopes(&mut rejected, &catalog, "host", &moved).unwrap();
+        assert!(rejected.is_empty());
+        moved[0] = project("agent:runner:code", false);
+        append_named_scopes(&mut rejected, &catalog, "host", &moved).unwrap();
+        assert!(rejected.is_empty());
+    }
+
     fn fixture() -> (PathBuf, Source) {
         let root = std::env::temp_dir().join(format!(
             "webcodex-host-control-{}-{}",
@@ -503,6 +589,7 @@ mod tests {
                 server_url: "http://127.0.0.1:19500".into(),
             },
             client_id: "runner".into(),
+            native_host_id: None,
             env_file: env_file.canonicalize().unwrap(),
             control_path: carrier_path(&root),
             desktop_state: root.join("desktop-state.json"),

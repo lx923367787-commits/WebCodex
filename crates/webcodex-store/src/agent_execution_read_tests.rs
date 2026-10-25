@@ -14,6 +14,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_member_effort(Some("medium".into()))
+    }
+    fn with_member_effort(member_effort: Option<String>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(&temp.path().join("read-synthetic.db")).unwrap();
         let root = db
@@ -104,6 +107,7 @@ impl Fixture {
                 manager: TeamAgentPlan {
                     task_id: root.clone(),
                     cli_calls: vec![TeamCliCall {
+                        inputs: vec![],
                         provider_id: "workbuddy".into(),
                         model: "manager-model".into(),
                         effort: Some("high".into()),
@@ -113,9 +117,10 @@ impl Fixture {
                 subagents: vec![TeamAgentPlan {
                     task_id: child.task_id.clone(),
                     cli_calls: vec![TeamCliCall {
+                        inputs: vec![],
                         provider_id: "workbuddy".into(),
                         model: "member-model".into(),
-                        effort: Some("medium".into()),
+                        effort: member_effort,
                         instruction: Some("Approved member instruction".into()),
                     }],
                 }],
@@ -176,14 +181,14 @@ fn cli_read_slot_exposes_only_own_frozen_call_and_rechecks_current_run() {
         f.db.read_agent_cli_planned_slot(&f.member, &f.root, &f.child, 0)
             .unwrap();
     assert_eq!(member.model, "member-model");
-    assert_eq!(member.effort, "medium");
+    assert_eq!(member.effort.as_deref(), Some("medium"));
     assert_eq!(member.instruction, "Approved member instruction");
     assert_eq!(member.source_task_id, f.child);
     let manager =
         f.db.read_agent_cli_planned_slot(&f.manager, &f.root, &f.root, 0)
             .unwrap();
     assert_eq!(manager.model, "manager-model");
-    assert_eq!(manager.effort, "high");
+    assert_eq!(manager.effort.as_deref(), Some("high"));
     assert!(f
         .db
         .read_agent_cli_planned_slot(&f.member, &f.root, &f.root, 0)
@@ -213,6 +218,17 @@ fn cli_read_slot_exposes_only_own_frozen_call_and_rechecks_current_run() {
         .db
         .read_agent_cli_planned_slot(&f.member, &f.root, &f.child, 0)
         .is_err());
+}
+
+#[test]
+fn cli_read_slot_preserves_explicit_no_effort_without_defaulting() {
+    let f = Fixture::with_member_effort(None);
+    let slot =
+        f.db.read_agent_cli_planned_slot(&f.member, &f.root, &f.child, 0)
+            .unwrap();
+    assert_eq!(slot.effort, None);
+    assert_eq!(slot.model, "member-model");
+    assert_eq!(slot.instruction, "Approved member instruction");
 }
 
 #[test]

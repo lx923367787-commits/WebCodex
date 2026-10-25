@@ -132,6 +132,7 @@ impl Fixture {
                 provider,
                 reviewed_controls: None,
                 user_https_proxy: false,
+                codebuddy_config_directory: None,
                 executable: program.clone(),
                 executable_sha256: format!("{:x}", Sha256::digest(fs::read(&program).unwrap())),
                 files: ["input/authorized.txt", "input/nested/authorized.txt"]

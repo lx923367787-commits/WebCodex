@@ -20,6 +20,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(attempts: u32) -> Self {
+        Self::with_prelaunch_block(attempts, false)
+    }
+
+    fn with_prelaunch_block(attempts: u32, blocked: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let db = Database::open(&directory.path().join("state.db")).unwrap();
         let native = db
@@ -117,6 +121,27 @@ impl Fixture {
             Some(&context),
         )
         .unwrap();
+        let goal = if blocked {
+            db.checkpoint_host_goal_with_request_in_context(
+                &owner,
+                &goal.goal_id,
+                goal.revision,
+                None,
+                &goal.state,
+                HostGoalCheckpointAction::Block,
+                "await operator recovery",
+                "block",
+                "block-request",
+                &[],
+                now(),
+                Some(&context),
+                &[],
+            )
+            .unwrap()
+            .goal
+        } else {
+            goal
+        };
         let mut state = goal.state.clone();
         state.next_step = "Continue the preserved task".into();
         db.checkpoint_host_goal_with_request_in_context(
@@ -172,6 +197,18 @@ impl Fixture {
                 .unwrap()
             };
         }
+        if attempts == 0 {
+            h = db
+                .abort_host_goal_handoff_attempt(
+                    &owner,
+                    &goal.goal_id,
+                    &h.handoff_id,
+                    None,
+                    "goal_not_active",
+                    now(),
+                )
+                .unwrap();
+        }
         let revision = read(&db.conn_for_tests(), &owner, &goal.goal_id)
             .unwrap()
             .unwrap()
@@ -203,7 +240,7 @@ impl Fixture {
             self.source.run_id(),
             self.source.generation(),
             self.revision,
-            self.failed.attempt_id.as_deref().unwrap(),
+            self.failed.attempt_id.as_deref(),
             key,
             now(),
         )
@@ -421,7 +458,7 @@ fn failed_handoff_recovery_rejects_stale_cancelled_and_live_candidates_without_w
                 &source,
                 generation,
                 revision,
-                &attempt,
+                Some(&attempt),
                 "recovery",
                 now()
             )
@@ -444,5 +481,65 @@ fn failed_handoff_recovery_rolls_back_atomically_and_never_refills_retry_budget(
     let f = Fixture::new(4);
     let before = snapshot(&f.db);
     assert!(f.recover_on(&f.db, "cannot-refill-budget").is_err());
+    assert_eq!(snapshot(&f.db), before);
+}
+
+#[test]
+fn operator_recovers_exact_prelaunch_blocked_handoff_without_clearing_blocker() {
+    let f = Fixture::with_prelaunch_block(0, true);
+    let (next, replayed, _, _) = f.recover_on(&f.db, "prelaunch-recovery").unwrap();
+    assert!(!replayed);
+    assert_eq!(next.attempt_count, 0);
+    assert_eq!(next.goal_id, f.failed.goal_id);
+    assert_eq!(next.source_agent_run_id, f.failed.source_agent_run_id);
+    let owner = f.source.host_goal_owner_key();
+    assert_eq!(
+        read(&f.db.conn_for_tests(), &owner, &next.goal_id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        HostGoalPhase::Blocked
+    );
+    assert_eq!(
+        f.db.read_host_context_state(&owner, f.source.run_id())
+            .unwrap()
+            .unwrap()
+            .state,
+        "draining"
+    );
+    assert!(f
+        .db
+        .with_agent_run_for_path(&f.source, "private_write", "memory/notes.txt", true, || Ok(
+            ()
+        ))
+        .is_err());
+    let (same, replayed, _, _) = f.recover_on(&f.db, "prelaunch-recovery").unwrap();
+    assert!(replayed);
+    assert_eq!(same.handoff_id, next.handoff_id);
+    assert_eq!(f.begin(&next).attempt_count, 1);
+}
+
+#[test]
+fn prelaunch_recovery_rejects_other_failure_reasons_and_mismatched_attempt() {
+    let f = Fixture::with_prelaunch_block(0, true);
+    assert!(f
+        .db
+        .recover_failed_agent_handoff(
+            USER,
+            PROJECT,
+            f.source.agent_id(),
+            &f.failed.goal_id,
+            &f.failed.handoff_id,
+            f.source.run_id(),
+            f.source.generation(),
+            f.revision,
+            Some("not-the-attempt"),
+            "wrong-attempt",
+            now()
+        )
+        .is_err());
+    f.db.conn_for_tests().execute("UPDATE wc_host_goal_handoffs SET snapshot_json=json_set(snapshot_json,'$.failure_reason','unsafe_old_execution') WHERE goal_id=?1", [&f.failed.goal_id]).unwrap();
+    let before = snapshot(&f.db);
+    assert!(f.recover_on(&f.db, "wrong-reason").is_err());
     assert_eq!(snapshot(&f.db), before);
 }

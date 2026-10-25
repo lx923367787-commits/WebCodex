@@ -1328,3 +1328,6 @@ mod tests {
         }
     }
 }
+
+#[path = "workspaces.rs"]
+mod workspaces;

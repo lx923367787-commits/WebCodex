@@ -219,7 +219,7 @@ pub(crate) fn tool_specs() -> Vec<Value> {
         }),
         json!({
             "name":"team_cli_delivery_review",
-            "description":"Review the exact published artifact version for an authorized original CLI attempt. Choose accept or reject and record concrete acceptance grounds with the current worker revision and a stable completion key. The Store records the review and task completion atomically only after original identity, publication and stopped-execution checks. Reuse a key only for the identical decision; this cannot stop a worker, read its private state or bypass completion evidence.",
+            "description":"Review the exact published artifact version for an authorized original CLI attempt. Choose accept or reject and record concrete acceptance grounds with the current worker revision and a stable completion key. Original identity, publication and stopped-execution checks are required. An active worker is completed atomically with review. If the worker already failed, only the artifact review is recorded: its failed state, revision, timeout/error and original completion remain unchanged. Accepting such an artifact is not successful execution. Reuse a key only for the identical decision; this cannot stop a worker, read private state or bypass completion evidence.",
             "inputSchema":review
         }),
         json!({

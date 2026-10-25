@@ -5419,3 +5419,6 @@ mod tests {
         );
     }
 }
+
+#[path = "workspaces.rs"]
+pub(crate) mod workspaces;

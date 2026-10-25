@@ -217,7 +217,8 @@ fn source_on(
         || !identifier(source)
         || root == source
         || project.len() > 256
-        || !project.starts_with("agent:")
+        || !(project.starts_with("agent:")
+            || crate::native_workspaces::is_native_workspace_id(project))
         || project.chars().any(char::is_control)
     {
         return Err(error("team_agent_invalid_source"));

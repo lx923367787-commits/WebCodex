@@ -266,6 +266,7 @@ fn public_task_success_keeps_real_quota_gate_and_auto_does_not_replace_stop_proo
         manager: crate::TeamAgentPlan {
             task_id: task.clone(),
             cli_calls: vec![crate::TeamCliCall {
+                inputs: vec![],
                 provider_id: "workbuddy".into(),
                 model: "observed-model".into(),
                 effort: Some("high".into()),

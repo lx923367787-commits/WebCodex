@@ -262,6 +262,10 @@ fn plan_on_connection(
     }
     let runs = descendants(conn, owner, project, source)?;
     let principal = crate::agent_isolation::enrollment_principal_for_execution(owner);
+    let run_ids = runs
+        .iter()
+        .map(|r| r.agent_run_id.as_str())
+        .collect::<Vec<_>>();
     let tasks = {
         let mut tasks = BTreeSet::new();
         for run in &runs {
@@ -294,16 +298,48 @@ fn plan_on_connection(
     for task in &tasks {
         for (label,query) in [
             ("legacy_coding", "SELECT EXISTS(SELECT 1 FROM wc_agent_task_coding_runs WHERE task_id=?1)"),
-            ("delegated_agent", "SELECT EXISTS(SELECT 1 FROM wc_team_agent_attempts WHERE source_task_id=?1 AND state<>'confirmed_not_started')"),
             ("fallback", "SELECT EXISTS(SELECT 1 FROM wc_cli_fallbacks WHERE source_task_id=?1 AND state<>'confirmed_not_started')"),
         ] {
             if conn.query_row(query,[&task],|r|r.get::<_,bool>(0)).map_err(sql)? { blocked.push(format!("{label}:{task}")); }
         }
+        // A claimed native member is already a concrete descendant in this
+        // closure, not an opaque legacy process. Close its admission and all
+        // frozen CLI executors below; retain its task/enrollment and history.
+        // Unknown/unbound delegations remain blockers. A queue state alone is
+        // never either a native identity or physical stop evidence.
+        let opaque: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM wc_team_agent_attempts q
+             WHERE q.source_task_id=?1 AND q.state<>'confirmed_not_started' AND NOT EXISTS(
+               SELECT 1 FROM wc_agent_host_dispatch_bindings b
+               JOIN wc_agent_enrollments e ON e.enrollment_id=b.enrollment_id
+               JOIN wc_agent_runs r ON r.agent_id=e.agent_id
+               JOIN wc_agent_enrollment_assignments a ON a.agent_id=e.agent_id
+               WHERE b.queue_kind='member' AND b.queue_id=q.team_agent_attempt_id
+                 AND b.owner_user=?2 AND b.project=?3 AND q.project=b.project
+                 AND q.owner_principal_kind=?4 AND q.owner_principal_digest=?5
+                 AND b.root_task_id=q.root_task_id AND b.source_task_id=q.source_task_id
+                 AND b.task_id=q.source_task_id AND e.task_id=b.task_id
+                 AND e.owner_user=b.owner_user AND e.project=b.project
+                 AND e.agent_id=b.agent_id AND e.source_agent_id=b.manager_agent_id
+                 AND e.purpose='member' AND e.state='claimed'
+                 AND a.owner_user=e.owner_user AND a.project=e.project AND a.task_id=e.task_id
+                 AND r.run_id IN (SELECT value FROM json_each(?6))))",
+                params![
+                    task,
+                    owner,
+                    project,
+                    principal.kind,
+                    principal.digest,
+                    encode(&run_ids)?
+                ],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        if opaque {
+            blocked.push(format!("delegated_agent:{task}"));
+        }
     }
-    let run_ids = runs
-        .iter()
-        .map(|r| r.agent_run_id.as_str())
-        .collect::<Vec<_>>();
     let (projection, extra) = if preparations {
         ("execution_preparation_json,execution_preparation_state"," OR json_extract(execution_preparation_json,'$.executor.run.agent_run_id') IN (SELECT value FROM json_each(?5))")
     } else {
