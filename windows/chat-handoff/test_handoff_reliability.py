@@ -402,6 +402,28 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual("failed", self.status())
         self.assertEqual([], self.calls)
 
+    def test_blocked_native_checkpoint_can_transfer_without_clearing_blocker(self):
+        self.api.raw["goal"]["phase"] = "blocked"
+        self.api.raw["handoff"]["agent_id"] = "wc_iagent_test"
+        self.api.raw["source_context"]["identity_source"] = "agent_run"
+        self.poll()
+        self.assertEqual(1, len(self.calls))
+        self.assertEqual("blocked", self.api.raw["goal"]["phase"])
+        self.assertEqual("waiting_ready", self.status())
+
+    def test_paused_native_still_does_not_launch(self):
+        self.api.raw["goal"]["phase"] = "paused"
+        self.api.raw["handoff"]["agent_id"] = "wc_iagent_test"
+        self.poll()
+        self.assertEqual([], self.calls)
+        self.assertEqual("failed", self.status())
+
+    def test_blocked_legacy_still_does_not_launch(self):
+        self.api.raw["goal"]["phase"] = "blocked"
+        self.poll()
+        self.assertEqual([], self.calls)
+        self.assertEqual("failed", self.status())
+
 
 if __name__ == "__main__":
     unittest.main()

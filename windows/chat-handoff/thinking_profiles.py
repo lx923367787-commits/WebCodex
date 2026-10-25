@@ -113,7 +113,7 @@ def _open(browser, request, deadline):
     else:
         raise ThinkingProfileError("thinking_composer_not_ready")
     composer = handoff.composer(browser)
-    if composer.get("user_count") or (composer.get("text") or "").strip():
+    if not handoff.empty_app_composer(composer):
         raise ThinkingProfileError("thinking_chat_not_empty")
     if state["chat"].get("pressed") != "true":
         handoff.click_control(browser, "chat", request, deadline)

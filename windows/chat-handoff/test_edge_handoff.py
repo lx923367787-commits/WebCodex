@@ -25,9 +25,18 @@ def input_state(text=None, **changes):
 
 class InputTests(unittest.TestCase):
     def test_exact_prompt_with_selected_webcodex_mention_is_accepted(self):
-        for prefix in ("", "webcodex ", "@webcodex "):
+        for prefix in ("", "webcodex ", "@webcodex ", "WebCodex ", "@WEBCODEX "):
             with self.subTest(prefix=prefix):
                 self.assertTrue(direct.exact_recovery_input(input_state(prefix + PROMPT), PROMPT))
+
+    def test_empty_draft_accepts_only_verified_app_chip(self):
+        for text in ('', 'WebCodex', '@WEBCODEX'):
+            self.assertTrue(direct.empty_app_composer(input_state(text)))
+        for state in (input_state('@webcodex', mention=False),
+                      input_state('@webcodex', user_count=1),
+                      input_state('@webcodex existing draft'),
+                      input_state('@webcodex-hom'), input_state('@other')):
+            self.assertFalse(direct.empty_app_composer(state))
 
     def test_each_required_identity_must_be_complete(self):
         for field in ("project", "goal_id", "source_context_epoch", "launch_id"):
@@ -49,6 +58,11 @@ class InputTests(unittest.TestCase):
             with self.subTest(prefix=prefix[:30]):
                 self.assertFalse(direct.exact_recovery_input(input_state(prefix + PROMPT), PROMPT))
 
+    def test_other_plugin_prefix_is_rejected(self):
+        for prefix in ('WebCodex-Hom ', '@WebCodex-Hom ', 'WebCodex-Company ', '@webcodex-extra '):
+            with self.subTest(prefix=prefix):
+                self.assertFalse(direct.exact_recovery_input(input_state(prefix + PROMPT), PROMPT))
+
     def test_extra_trailing_text_is_not_sent(self):
         self.assertFalse(direct.exact_recovery_input(input_state("webcodex " + PROMPT + " extra draft"), PROMPT))
 
@@ -65,6 +79,29 @@ class InputTests(unittest.TestCase):
 
     def test_direct_module_is_python_37_syntax_compatible(self):
         ast.parse(Path(direct.__file__).read_text(encoding="utf-8"), feature_version=(3, 7))
+
+
+@unittest.skipUnless(os.environ.get('WEBCODEX_TEST_CHROMIUM'), 'Offline DOM requires Chromium')
+class AppMentionDomTests(unittest.TestCase):
+    def test_case_variants_keep_app_uri_and_unique_chip_checks(self):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as driver:
+            browser = driver.chromium.launch(headless=True, executable_path=os.environ['WEBCODEX_TEST_CHROMIUM'])
+            page = browser.new_page()
+            page.route('**/*', lambda route: route.abort())
+            for name, label, href, copies, accepted in (
+                ('webcodex', 'WebCodex', 'app://home', 1, True),
+                ('WEBCODEX', 'webcodex', 'app://home', 1, True),
+                ('webcodex-hom', 'webcodex-hom', 'app://home', 1, False),
+                ('webcodex', 'webcodex', 'app://other', 1, False),
+                ('webcodex', 'webcodex', 'app://home', 2, False),
+            ):
+                chip = (f'<span contenteditable="false" app-mention-name="{name}" '
+                        f'app-mention-path="app://home" data-prompt-link-href="{href}">{label}</span>')
+                page.set_content('<div id="prompt-textarea" contenteditable="true">' + chip * copies + '</div>')
+                with self.subTest(name=name, href=href, copies=copies):
+                    self.assertEqual(accepted, page.evaluate('(' + direct.COMPOSER_JS + ')()')['mention'])
+            browser.close()
 
 
 class IndependenceTests(unittest.TestCase):
@@ -316,6 +353,14 @@ class ComposerDomTests(unittest.TestCase):
     def test_plain_text_webcodex_is_not_a_selected_mention(self):
         self.page.locator("#prompt-textarea").evaluate("e => e.textContent='@webcodex test'")
         self.assertFalse(self.probe()["mention"])
+
+    def test_other_plugin_token_is_rejected(self):
+        for name in ('WebCodex-Hom', 'WebCodex-Company', 'webcodex-extra'):
+            with self.subTest(name=name):
+                self.page.locator('[app-mention-name]').evaluate("""(e, name) => {
+                    e.setAttribute('app-mention-name', name); e.textContent = name;
+                }""", name)
+                self.assertFalse(self.probe()['mention'])
 
     def test_generic_data_type_and_plain_noneditable_text_are_not_app_mentions(self):
         for markup in ('<p data-type="paragraph">@webcodex</p>',

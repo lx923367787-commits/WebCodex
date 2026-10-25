@@ -33,10 +33,10 @@ COMPOSER_JS = r'''function() {
       && send[0].getAttribute('aria-disabled') !== 'true',
     send_xpath:send.length === 1 ? `(//button)[${allButtons.indexOf(send[0])+1}]` : null,
     mention:!!e && [...e.querySelectorAll('[contenteditable="false"][app-mention-name]')]
-      .filter(n => n.getAttribute('app-mention-name') === 'webcodex'
+      .filter(n => (n.getAttribute('app-mention-name') || '').toLowerCase() === 'webcodex'
         && /^app:\/\/[A-Za-z0-9_-]+$/.test(n.getAttribute('app-mention-path') || '')
         && n.getAttribute('app-mention-path') === n.getAttribute('data-prompt-link-href')
-        && (n.textContent || '').replace(/\s+/g,' ').trim() === 'webcodex').length === 1};
+        && (n.textContent || '').replace(/\s+/g,' ').trim().toLowerCase() === 'webcodex').length === 1};
 }'''
 
 SETUP_JS = r'''function(){
@@ -139,13 +139,20 @@ def wait_composer(browser, request, deadline):
     raise FlowError('composer_not_ready')
 
 
+def empty_app_composer(state):
+    """An empty draft may already contain the one verified app chip."""
+    text = (state.get('text') or '').strip().casefold()
+    return not state.get('user_count') and (not text or (
+        state.get('mention') is True and text in ('webcodex', '@webcodex')))
+
+
 def exact_recovery_input(state, message):
     norm = lambda value: re.sub(r'\s+', ' ', value or '').strip()
     actual, expected = norm(state.get('text')), norm(message)
     if not expected or not actual.endswith(expected):
         return False
     prefix = actual[:-len(expected)].strip()
-    return prefix in ('', 'webcodex', '@webcodex') and state.get('mention') and not state.get('user_count')
+    return prefix.casefold() in ('', 'webcodex', '@webcodex') and state.get('mention') and not state.get('user_count')
 
 
 def run(browser, request, should_stop=lambda **_: False, *, launch_claim=None):
@@ -168,7 +175,7 @@ def run(browser, request, should_stop=lambda **_: False, *, launch_claim=None):
         step = 'select_webcodex'
         deadline = time.monotonic() + 30
         state = wait_composer(browser, request, deadline)
-        if state['user_count'] or (state['text'] or '').strip():
+        if not empty_app_composer(state):
             raise FlowError('new_chat_not_empty')
         editor = browser.find_by_xpath(state['xpath'], timeout=3)
         editor.click(simulative=True, move_mouse=True, delay_after=0,
@@ -177,9 +184,10 @@ def run(browser, request, should_stop=lambda **_: False, *, launch_claim=None):
         if not state.get('focused') or not state.get('document_focused') or not state.get('document_visible'):
             raise FlowError('composer_focus_not_confirmed')
         check()
-        browser.keys('@webcodex', contains_hotkey=False, force_ime_eng=True, delay_after=0.5)
-        check()
-        browser.keys('{SPACE}', contains_hotkey=True, delay_after=0.5)
+        if not state.get('mention'):
+            browser.keys('@webcodex', contains_hotkey=False, force_ime_eng=True, delay_after=0.5)
+            check()
+            browser.keys('{SPACE}', contains_hotkey=True, delay_after=0.5)
         state = wait_composer(browser, request, deadline)
         # Do not silently send an unbound ordinary text @mention.
         if not state.get('mention'):

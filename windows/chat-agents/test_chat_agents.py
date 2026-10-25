@@ -852,6 +852,97 @@ class ChatAgentServiceTests(unittest.TestCase):
         first["enrollment_binding"]["agent_id"] = "changed-output"
         self.assertEqual(self.service.read_chat_task(first["request_id"])["enrollment_binding"], frozen)
 
+    def test_enrolled_unissued_preflight_retry_preserves_failure_and_blocks_evidence(self):
+        first = self.enrolled()
+        request = first["request_id"]
+        directory = self.service.directory(request)
+        config = self.service.prepared(request)["config"]
+        result = {key: config[key] for key in ("launch_id", "task_id", "parent_session_id")}
+        result.update(status="blocked", failure_stage="preflight", send_boundary_reached=False)
+        old = directory / "outcomes" / (self.job(request)["job_id"] + ".json")
+        chat.write_json(old, {"state":"finished", "result":result})
+        self.threads[-1].alive = False
+        before = old.read_bytes()
+        retry = self.enrolled()
+        self.assertEqual(retry["request_id"], request)
+        self.assertEqual(len(self.threads), 2)
+        self.assertEqual(old.read_bytes(), before)
+        chat.write_json(directory / "outcomes" / (self.job(request)["job_id"] + ".json"),
+                        {"state":"finished", "result":result})
+        self.threads[-1].alive = False
+        (self.root / "evidence" / request).mkdir(parents=True)
+        self.enrolled()
+        self.assertEqual(len(self.threads), 2)
+
+    def test_real_preflight_result_allows_bounded_retry_without_browser_or_delivery(self):
+        # Exercise the actual transport refusal, not a hand-written outcome.
+        pilot_path = str(Path(__file__).resolve().parent.parent / "subagent-pilot")
+        with patch.object(sys, "path", [pilot_path, *sys.path]):
+            import pilot_transport as pilot
+        provider = Mock(return_value=self.delivery())
+        session = Mock(side_effect=AssertionError("preflight must not open a browser"))
+
+        def send(config, evidence_root, cancelled, **options):
+            return pilot.run(config, evidence_root, external_stop=cancelled,
+                session_factory=session, state_reader=lambda: {"mode": "paused", "generation": 1},
+                lock_factory=lambda _: contextlib.nullcontext(),
+                enrollment_delivery_provider=options["enrollment_delivery_provider"])
+
+        self.transport.send.side_effect = send
+        first = self.enrolled(provider=provider)
+        self.threads[-1].run()
+        request = first["request_id"]
+        directory = self.service.directory(request)
+        original = directory / "outcomes" / (self.job(request)["job_id"] + ".json")
+        before = original.read_bytes()
+        retry = self.enrolled(provider=provider)
+        self.assertEqual(retry["request_id"], request)
+        self.assertEqual(len(self.threads), 2)
+        self.assertEqual(original.read_bytes(), before)
+        self.assertFalse((self.root / "evidence" / request).exists())
+        provider.assert_not_called()
+        session.assert_not_called()
+
+    def test_unissued_preflight_retry_renews_only_deadline_and_is_bounded(self):
+        first = self.enrolled()
+        request = first["request_id"]
+        directory = self.service.directory(request)
+        prepared = self.service.prepared(request)
+        prepared["config"]["expires_at"] = "2000-01-01T00:00:00+00:00"
+        chat.write_json(directory / "request.json", prepared)
+        original = json.loads(json.dumps(prepared))
+        for attempt in range(4):
+            job = self.job(request)
+            result = {key: prepared["config"][key]
+                      for key in ("launch_id", "task_id", "parent_session_id")}
+            result.update(status="blocked", failure_stage="preflight", send_boundary_reached=False)
+            chat.write_json(directory / "outcomes" / (job["job_id"] + ".json"),
+                            {"state": "finished", "result": result})
+            self.threads[-1].alive = False
+            self.enrolled()
+            self.assertEqual(len(self.threads), min(attempt + 2, 4))
+        current = self.service.prepared(request)
+        self.assertNotEqual(current["config"]["expires_at"], original["config"]["expires_at"])
+        current["config"]["expires_at"] = original["config"]["expires_at"]
+        self.assertEqual(current, original)
+        self.assertEqual(len(list((directory / "preflight-requests").glob("*.json"))), 3)
+        self.assertEqual(len(list((directory / "outcomes").glob("*.json"))), 4)
+
+    def test_unissued_preflight_retry_preserves_cancel(self):
+        first = self.enrolled()
+        request = first["request_id"]
+        directory = self.service.directory(request)
+        config = self.service.prepared(request)["config"]
+        result = {key: config[key] for key in ("launch_id", "task_id", "parent_session_id")}
+        result.update(status="blocked", failure_stage="preflight", send_boundary_reached=False)
+        chat.write_json(directory / "outcomes" / (self.job(request)["job_id"] + ".json"),
+                        {"state": "finished", "result": result})
+        self.threads[-1].alive = False
+        chat.write_json(directory / "cancel.json", {"requested": True})
+        self.enrolled()
+        self.assertEqual(len(self.threads), 1)
+        self.assertFalse((directory / "preflight-requests").exists())
+
     def test_enrolled_replay_and_restart_never_call_a_new_provider(self):
         original = Mock(return_value=self.delivery())
         first = self.enrolled(provider=original)

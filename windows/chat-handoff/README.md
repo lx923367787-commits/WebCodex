@@ -2,6 +2,12 @@
 
 账号与外部工具遵循[项目分发规则](../../docs/EXTERNAL_TOOLS.md#简体中文)。下列通用聊天依赖安装不包括 Goal 模型执行器；需要时在目标机按 [Goal ACP 说明](../goal-provider/README.md) 单独安装和登录。浏览器账号、profile、扩展 token 与 Host carrier 不随包迁移。
 
+应用标记名称兼容大小写，仍验证唯一标记及一致的应用 URI。空白新对话可复用已有的单独应用标记，不接受普通文字冒充标记或已有草稿正文。授权卡兼容中英文标题、空白和问号变化；描述型授权卡仍须通过精确应用、唯一会话和按钮检查。共享源码保留原 `@webcodex` 目标，不将本机 Home/公司连接名称替换成其他机器的默认目标。独立只读 pilot 保留 Runtime Status 工具白名单，无法识别工具的描述卡不会获准。
+
+派发异常记录固定的 `failure_stage`，不记录原始异常内容。原生已登记成员在发送前的 preflight 被拒绝时，只有旧结果明确未跨发送边界、尚无 evidence 目录、身份和任务完全一致且未取消，才允许恢复同一请求。恢复保留旧结果及请求快照，仅续本地准备期限，包含首次在内最多四次；交付前仍重新验证 Host 队列和当前任务授权。已发出、证据不完整或结果未知的请求只读观察，不自动重发。
+
+显式 native Agent handoff checkpoint 可在保留 `blocked` Goal 状态的前提下接续，供继任运行排障；它不解除阻塞或扩大业务执行权限。`paused`、终态 Goal 和旧版非 Agent 的 blocked 交接仍不启动。
+
 本目录与相邻 `chat-agents`、`subagent-pilot`、`goal-provider` 保存 2026-10-24 Windows 正在使用的仓库外工具源码。它们补充仓库内的 Server、Runner、Desktop、`plugins/mycodex-tools` 和 `plugins/safe-delete`。保持这四个目录相邻。
 
 | 目录 | 当前作用 |
@@ -41,12 +47,16 @@ Python 锁文件记录当前可用 Windows Python 3.11 环境中 `mcp==1.27.2`�
 $python = (Resolve-Path windows/.venv/Scripts/python.exe).Path
 $entry = (Resolve-Path windows/chat-handoff/run_auto_handoff.py).Path
 & $python $entry status
+# 仅首次安装、状态为 not_initialized 且无旧数据库/身份文件时执行：
+& $python $entry initialize --control-config $controlConfig
 & $python $entry run --control-config $controlConfig
 ```
 
 `run` 是持续运行命令，只应在实际启用自动接续时执行。持久 STOP/PAUSE 继续有效；`resume` 明确解除停止，但不会启动进程或重发未知请求。后台启动可使用同一参数和 `Start-Process -WindowStyle Hidden`，需正确引用含空格的路径。另一条显式控制接口支持 `WEBCODEX_HANDOFF_CONTROL_ENDPOINT`、`WEBCODEX_HANDOFF_CONTROL_TOKEN_FILE`、`WEBCODEX_HANDOFF_OWNER_USER`、`WEBCODEX_HANDOFF_PROJECT`（可选 `WEBCODEX_HANDOFF_AGENT_ID`）；控制凭据必须来自本机正式授权，不能拿普通模型/用户令牌替代。
 
 可选路径设置：`WEBCODEX_NODE` 指向 Node 可执行文件；`WEBCODEX_DESKTOP_STATE` 指向 Desktop state；`WEBCODEX_CODEBUDDY`/`WEBCODEX_CODEX` 指向已安装 CLI。默认状态与凭据路径由当前 Windows 用户解析。应优先保持随附目录布局和默认 runtime 位置；迁移已有 runtime 时保留数据库、身份与未知发送证据，不删除状态来重试。
+
+`initialize` 验证本机 carrier 并独占创建新的调度数据库及连接身份，不启动浏览器或发送任务；已有数据库、身份或中断残留时拒绝，不重置 STOP/PAUSE 或任务历史。失败留下的状态需检查，不能删除后盲目重试。
 
 ## 离线验证
 

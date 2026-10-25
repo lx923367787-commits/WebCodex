@@ -114,6 +114,22 @@ class TransportTests(unittest.TestCase):
         self.assertEqual("launch_id_already_used", value["reason"])
         self.assertEqual(1, self.sessions)
 
+    def test_setup_failure_records_stage_without_exception_text_or_retry_claim(self):
+        pilot.edge_handoff.configure_chat.side_effect = pilot.edge_handoff.FlowError("private diagnostic")
+        value = self.run_pilot()
+        self.assertEqual("configure_chat", value["failure_stage"])
+        self.assertEqual("unknown", value["status"])
+        self.assertFalse(value["send_boundary_reached"])
+        self.assertEqual(0, self.browser.sends)
+        self.assertNotIn("private diagnostic", json.dumps(value))
+
+    def test_preselected_app_chip_is_reused_without_duplicate_typing(self):
+        self.browser.text = 'webcodex '
+        self.browser.mention = True
+        with patch.object(self.browser, 'keys', side_effect=AssertionError('duplicate mention')):
+            self.assertEqual('sent', self.run_pilot()['status'])
+        self.assertEqual(1, self.browser.sends)
+
     def test_unknown_send_never_retries(self):
         self.browser.fail_send = True
         self.assertEqual("unknown", self.run_pilot()["status"])
@@ -124,7 +140,10 @@ class TransportTests(unittest.TestCase):
     def test_paused_and_stopped_do_not_reserve_or_open(self):
         for mode in ("paused", "stopped"):
             self.state["mode"] = mode
-            self.assertEqual("scheduler_not_running", self.run_pilot()["reason"])
+            value = self.run_pilot()
+            self.assertEqual("scheduler_not_running", value["reason"])
+            self.assertEqual("preflight", value["failure_stage"])
+            self.assertIs(value["send_boundary_reached"], False)
         self.assertEqual(0, self.sessions)
         self.assertFalse((self.root / self.config["launch_id"]).exists())
 
@@ -155,11 +174,16 @@ class TransportTests(unittest.TestCase):
 
     def test_expiry_prevents_launch(self):
         self.config["expires_at"] = "2000-01-01T00:00:00Z"
-        self.assertEqual("stopped_before_launch", self.run_pilot()["reason"])
+        value = self.run_pilot()
+        self.assertEqual("stopped_before_launch", value["reason"])
+        self.assertEqual("preflight", value["failure_stage"])
+        self.assertIs(value["send_boundary_reached"], False)
         self.assertEqual(0, self.sessions)
+        self.assertFalse((self.root / self.config["launch_id"]).exists())
 
     def test_only_runtime_status_approval_titles_allowed(self):
-        for title, allowed in (("Runtime Status", True), ("runtime_status", True), ("Call Runtime Tool", False)):
+        for title, allowed in (("Runtime Status", True), ("runtime_status", True),
+                               ("Call Runtime Tool", False), (None, False)):
             browser = Mock()
             browser.execute_javascript.return_value = {"cards": [{"tool": title, "exact_app": True}]}
             value = pilot.RestrictedApprovals(browser).execute_javascript(pilot.approval_guard.PROBE_JS)

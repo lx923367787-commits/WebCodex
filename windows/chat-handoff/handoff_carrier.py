@@ -11,6 +11,7 @@ from contextlib import closing
 from pathlib import Path
 import sqlite3
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent / "chat-agents"))
@@ -74,6 +75,38 @@ class CarrierControl:
         if loaded_origin != origin or self._context()[3] != projects:
             raise ValueError("handoff_carrier_changed")
         return origin, token, identity
+
+    def initialize_new(self):
+        """Explicit first installation only; never repair/reset existing state."""
+        import auto_handoff as ah
+        from run_auto_handoff import sidecar
+        origin, identity, environ, projects, pinned = self._context()
+        self._pinned = pinned
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = ah.ROOT / "runtime" / "desktop-dispatch"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        path = sidecar(self.db_path, "identity.json")
+        with hc.watcher_lock(lock_path), hc.watcher_lock(path):
+            existing = [self.db_path, path, sidecar(self.db_path, "runner.json"),
+                        path.with_name(path.name + ".legacy-before-carrier.json")]
+            existing += [Path(str(self.db_path) + suffix) for suffix in ("-wal", "-shm", "-journal")]
+            if any(os.path.lexists(item) for item in existing):
+                raise ValueError("scheduler_already_exists")
+            loaded_origin, token, _ = self.credential_loader(
+                environ={**environ, "WEBCODEX_HANDOFF_PROJECT": projects[0]})
+            del token
+            if loaded_origin != origin or self._context()[3] != projects:
+                raise ValueError("handoff_carrier_changed")
+            # Exclusive creation fences competing initializers. Partial failures
+            # remain visible and fail closed; no history is deleted on retry.
+            with self.db_path.open("xb"):
+                pass
+            with closing(ah.Store(self.db_path)) as store:
+                store.initialize(origin, armed_at=int(time.time()))
+            with path.open("x", encoding="utf-8") as output:
+                json.dump({"endpoint": origin, "token_file": identity}, output)
+                output.flush()
+                os.fsync(output.fileno())
 
     def bind_connection(self, db_path, origin, identity):
         from run_auto_handoff import sidecar, write_json

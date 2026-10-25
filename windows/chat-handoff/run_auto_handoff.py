@@ -293,7 +293,7 @@ def emit(value):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", nargs="?", default="run", choices=("run", "status", "stop", "pause", "resume"))
+    parser.add_argument("command", nargs="?", default="run", choices=("initialize", "run", "status", "stop", "pause", "resume"))
     parser.add_argument("--db", type=Path, default=ah.DEFAULT_DB)
     parser.add_argument("--desktop-state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--control-config", type=Path)
@@ -301,6 +301,13 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "initialize":
+            if args.control_config is None:
+                raise ValueError("control_config_required")
+            from handoff_carrier import CarrierControl
+            CarrierControl(args.control_config, args.desktop_state, args.db).initialize_new()
+            emit(status(args.db))
+            return 0
         if args.command == "run":
             if args.control_config is not None:
                 from handoff_carrier import CarrierControl

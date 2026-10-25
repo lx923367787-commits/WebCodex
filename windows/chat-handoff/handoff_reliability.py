@@ -195,7 +195,11 @@ def poll_candidate(store, api, launcher, candidate, value, clock, request_dir, *
     value, entry = refresh(store, api, candidate, value)
     if entry["status"] in ("resumed", "failed", "cancelled"):
         return False
-    if value["goal_phase"] not in ah.ACTIVE_PHASES:
+    # An explicit native handoff checkpoint can preserve a blocked Goal so its
+    # successor can inspect/reconcile the blocker. Transfer does not clear that
+    # phase or authorize a new node. Paused/terminal Goals still do not launch.
+    blocked_native = value["goal_phase"] == "blocked" and bool(value["handoff"].get("agent_id"))
+    if value["goal_phase"] not in ah.ACTIVE_PHASES and not blocked_native:
         refresh(store, api, candidate, value, "abort", "goal_not_active")
         return False
     if store.status()["mode"] != "running" or store.status()["generation"] != generation:

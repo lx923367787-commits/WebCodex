@@ -29,15 +29,17 @@ PROBE_JS = r'''function(_element, argument) {
     && (e.textContent || '').includes(args.goal_id));
   const bound = matchingUsers.length === 1 && users.length === 1 && matchingUsers[0] === users[users.length - 1];
   const surfaces = [...document.querySelectorAll('[data-codex-approval-surface="true"]')].filter(visible);
-  const titles = ['允许 ChatGPT 使用 webcodex 吗？', 'Allow ChatGPT to use webcodex?'];
+  const titleMatches = s => /^(?:允许\s*ChatGPT\s*使用\s*webcodex\s*(?:吗)?|Allow\s+ChatGPT\s+to\s+use\s+webcodex)\s*[?？]?$/i.test(norm(s));
   const cards = surfaces.map(card => {
     const alert = card.querySelector('[role="alert"]');
     const text = norm(alert ? alert.textContent : '');
-    const exactApp = !!alert && [...alert.querySelectorAll('span')].some(e => norm(e.textContent).toLowerCase() === 'webcodex');
-    const exactTitle = !!alert && [...alert.querySelectorAll('div')].some(e => titles.includes(norm(e.textContent)));
-    const toolMatch = text.match(/ChatGPT 将调用 webcodex 的 (.+?) 工具[。.]/)
+    const exactTitle = !!alert && [alert, ...alert.querySelectorAll('div,span,p')]
+      .some(e => visible(e) && titleMatches(e.textContent));
+    // Current cards show a description rather than a tool name. The user's
+    // app-level Always allow authorization does not depend on that copy.
+    const toolMatch = text.match(/ChatGPT 将调用 webcodex 的 (.+?) 工具[。.]/i)
       || text.match(/ChatGPT will (?:call|use) webcodex['’]s (.+?) tool\./i);
-    const buttons = [...card.querySelectorAll('button')].filter(b => visible(b) && ['始终允许','Always allow'].includes(norm(b.textContent)));
+    const buttons = [...card.querySelectorAll('button')].filter(b => visible(b) && /^(?:始终允许|always allow)$/i.test(norm(b.textContent)));
     const b = buttons.length === 1 ? buttons[0] : null;
     const host = card.closest('[data-chatgpt-search-message-ids]');
     const owner = host ? host.getAttribute('data-chatgpt-search-message-ids') : '';
@@ -58,7 +60,7 @@ PROBE_JS = r'''function(_element, argument) {
     if (args.scroll_signature && args.scroll_signature === signature && b && !inView) {
       b.scrollIntoView({block:'center', inline:'nearest', behavior:'instant'});
     }
-    return {exact_app:exactApp && exactTitle, tool, owner, button_count:buttons.length,
+    return {exact_app:exactTitle, tool, owner, button_count:buttons.length,
       enabled, in_view:inView, unobscured:clear, center, signature, xpath};
   });
   const dialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(visible);
@@ -101,7 +103,7 @@ def candidate(snapshot):
     if len(cards) != 1:
         return None, 'ambiguous_approval_cards'
     card = cards[0]
-    if not card.get('exact_app') or not card.get('tool'):
+    if not card.get('exact_app'):
         return None, 'unrecognized_approval'
     if card.get('button_count') != 1 or not card.get('owner'):
         return None, 'ambiguous_approval_button'
@@ -170,7 +172,8 @@ def run(browser, request, should_stop=lambda: False, timeout=180, clock=time.mon
         if pending:
             current_signatures = [c.get('signature') for c in snapshot['cards']]
             if pending['signature'] not in current_signatures:
-                confirmed.append(pending['tool'])
+                if pending.get('tool'):
+                    confirmed.append(pending['tool'])
                 pending = None
                 previous = None
             elif clock() - pending['clicked_at'] >= 15:

@@ -316,7 +316,39 @@ class Service:
                 intent["thinking_profile"] = selected
                 if prepared["intent_sha256"] != fingerprint(intent):
                     raise ValueError("idempotency_key_conflict")
-                # Even an incomplete request/launch record is never blindly resent.
+                # A persisted preflight refusal with no evidence directory proves
+                # no browser creation or delivery capability was reached. Keep
+                # that failed outcome and retry only this same bounded intent.
+                previous = self.latest_job(directory)
+                evidence = self.runtime / "evidence" / request_id
+                if enrollment_binding is not None and previous and not evidence.exists():
+                    outcome_path = directory / "outcomes" / (previous["job_id"] + ".json")
+                    outcome = read_json(outcome_path) if outcome_path.exists() else {}
+                    result = outcome.get("result", {})
+                    unissued = (previous.get("operation") == "send"
+                        and outcome.get("state") == "finished"
+                        and result.get("status") == "blocked"
+                        and result.get("failure_stage") == "preflight"
+                        and result.get("send_boundary_reached") is False
+                        and all(result.get(key) == prepared["config"].get(key)
+                            for key in ("launch_id", "task_id", "parent_session_id")))
+                    if (unissued and not self._stopping.is_set()
+                            and not any(i >= 3 for i, _ in enumerate((directory / "outcomes").glob("*.json")))
+                            and not (directory / "cancel.json").exists()
+                            and not self.browser_worker_busy()):
+                        # No enrollment capability has been acquired. Preserve
+                        # the old request alongside its failed job fingerprint;
+                        # renew only the local browser setup deadline. The Host
+                        # revalidates the live queue/assignment before delivery.
+                        history = directory / "preflight-requests" / (previous["job_id"] + ".json")
+                        if history.exists():
+                            raise ValueError("preflight_retry_snapshot_exists")
+                        write_json(history, prepared)
+                        prepared["config"]["expires_at"] = (dt.datetime.now(dt.timezone.utc)
+                            + dt.timedelta(minutes=10)).isoformat()
+                        write_json(directory / "request.json", prepared)
+                        self.start_worker(directory, "send", enrollment_delivery_provider)
+                # All other incomplete/issued records remain observations only.
                 return self.read_chat_task(request_id)
             if self._stopping.is_set():
                 return {"state": "blocked", "reason": "service_stopping", "launched": False}

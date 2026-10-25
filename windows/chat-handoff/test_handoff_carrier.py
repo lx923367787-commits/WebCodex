@@ -1,5 +1,6 @@
 """Only temporary SQLite, synthetic carrier files and fake control responses."""
 import json
+from contextlib import closing
 import os
 from pathlib import Path
 import sys
@@ -259,6 +260,50 @@ class CarrierTests(unittest.TestCase):
         self.assertIs(run.call_args.kwargs["api_factory"].__self__, control)
         self.assertIs(run.call_args.kwargs["launcher"].__self__, control)
         self.assertEqual(self.identity.read_bytes(), self.old_identity)
+
+    def test_explicit_first_install_binds_carrier_without_discovery_or_launch(self):
+        fresh = self.root / "fresh.sqlite3"
+        control = CarrierControl(self.carrier, self.state, fresh)
+        with patch.object(ah, "ROOT", self.root):
+            control.initialize_new()
+        with closing(ah.Store(fresh)) as store:
+            self.assertEqual(store.status()["endpoint"], ORIGIN)
+            self.assertEqual(store.status()["mode"], "running")
+            self.assertGreater(store.status()["armed_at"], 0)
+            self.assertEqual(store.entries(), [])
+        origin, _, identity = control.load_credentials()
+        control.bind_connection(fresh, origin, identity)
+        self.assertNotIn("synthetic-bootstrap", runner.sidecar(fresh, "identity.json").read_text())
+        self.assertEqual(self.posts, [])
+
+    def test_initialize_rejects_existing_stopped_state_and_partial_install(self):
+        self.store.set_mode("stopped")
+        before = self.snapshot()
+        with patch.object(ah, "ROOT", self.root):
+            with self.assertRaisesRegex(ValueError, "already_exists"):
+                self.control().initialize_new()
+            for suffix in ("identity.json", "runner.json", "-wal"):
+                fresh = self.root / (suffix.replace(".", "_") + ".sqlite3")
+                marker = Path(str(fresh) + suffix) if suffix == "-wal" else runner.sidecar(fresh, suffix)
+                marker.write_bytes(b"existing evidence")
+                with self.assertRaisesRegex(ValueError, "already_exists"):
+                    CarrierControl(self.carrier, self.state, fresh).initialize_new()
+                self.assertEqual(marker.read_bytes(), b"existing evidence")
+                self.assertFalse(fresh.exists())
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.identity.read_bytes(), self.old_identity)
+
+    def test_initialize_rejects_changed_scope_before_creating_database(self):
+        fresh = self.root / "changed.sqlite3"
+        def changed_loader(**kwargs):
+            self.carrier_value["projects"] = [PROJECTS[0]]
+            self.save()
+            return ORIGIN, "synthetic-bootstrap", "unused"
+        control = CarrierControl(self.carrier, self.state, fresh, credential_loader=changed_loader)
+        with patch.object(ah, "ROOT", self.root):
+            with self.assertRaisesRegex(ValueError, "carrier_changed"):
+                control.initialize_new()
+        self.assertFalse(fresh.exists())
 
 
 if __name__ == "__main__":

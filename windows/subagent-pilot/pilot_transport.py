@@ -149,6 +149,7 @@ def run(config, evidence_root=ROOT / "evidence", *, collect_response=False,
     deadline = time.monotonic() + 240
     boundary = False
     issued = False
+    failure_stage = "preflight"
     prior_stop = handoff_flow._SHOULD_STOP
 
     def result(status, reason, **extra):
@@ -164,7 +165,8 @@ def run(config, evidence_root=ROOT / "evidence", *, collect_response=False,
                 return result("unknown", "launch_id_already_used")
             initial = state_reader()
             if initial.get("mode") != "running" or type(initial.get("generation")) is not int:
-                return result("blocked", "scheduler_not_running", launched=False)
+                return result("blocked", "scheduler_not_running", launched=False,
+                              failure_stage="preflight", send_boundary_reached=False)
 
             def should_stop():
                 try:
@@ -176,7 +178,8 @@ def run(config, evidence_root=ROOT / "evidence", *, collect_response=False,
                     return True
 
             if should_stop():
-                return result("blocked", "stopped_before_launch", launched=False)
+                return result("blocked", "stopped_before_launch", launched=False,
+                              failure_stage="preflight", send_boundary_reached=False)
             folder.parent.mkdir(parents=True, exist_ok=True)
             folder.mkdir()  # atomic reservation; even a partial issued file forbids replay
             issued = True
@@ -190,27 +193,32 @@ def run(config, evidence_root=ROOT / "evidence", *, collect_response=False,
                 raise RuntimeError("stopped_before_page")
             browser = edge.create("https://chatgpt.com/")
             browser.activate()
+            failure_stage = "configure_chat"
             setup = edge_handoff.configure_chat(browser, config, browser.keys)
             create_record(folder / "browser.json", {**identity, **setup, **browser.identity()})
+            failure_stage = "prepare_composer"
             state = edge_handoff.wait_composer(browser, config, min(deadline, time.monotonic() + 30))
-            if state.get("user_count") or (state.get("text") or "").strip():
+            if not edge_handoff.empty_app_composer(state):
                 raise RuntimeError("new_chat_not_empty")
             editor = browser.find_by_xpath(state["xpath"], timeout=3)
             editor.click(delay_after=0, before_actual=lambda: not should_stop())
             state = edge_handoff.composer(browser)
             if not all(state.get(key) for key in ("focused", "document_focused", "document_visible")) or should_stop():
                 raise RuntimeError("composer_not_ready")
-            browser.keys("@webcodex", contains_hotkey=False, force_ime_eng=True, delay_after=0.5)
-            if should_stop():
-                raise RuntimeError("stopped_before_mention")
-            browser.keys("{SPACE}", contains_hotkey=True, delay_after=0.5)
+            failure_stage = "select_app_mention"
+            if not state.get("mention"):
+                browser.keys("@webcodex", contains_hotkey=False, force_ime_eng=True, delay_after=0.5)
+                if should_stop():
+                    raise RuntimeError("stopped_before_mention")
+                browser.keys("{SPACE}", contains_hotkey=True, delay_after=0.5)
             state = edge_handoff.composer(browser)
             if not state.get("mention") or should_stop():
                 raise RuntimeError("mention_not_selected")
+            failure_stage = "prepare_message"
             if enrollment_delivery_provider is not None:
                 def enrollment_target_ready(snapshot):
                     return (snapshot.get("user_count") == 0 and snapshot.get("mention") is True
-                            and (snapshot.get("text") or "").strip() in ("", "webcodex", "@webcodex")
+                            and edge_handoff.empty_app_composer(snapshot)
                             and all(snapshot.get(key) is True for key in
                                     ("focused", "document_focused", "document_visible")))
                 if not enrollment_target_ready(state):
@@ -225,12 +233,14 @@ def run(config, evidence_root=ROOT / "evidence", *, collect_response=False,
             browser.find_by_xpath(state["xpath"], timeout=3).clipboard_input(message, append=True, delay_after=0.5)
             state = edge_handoff.composer(browser)
             send = browser.find_by_xpath(state["send_xpath"], timeout=3)
+            failure_stage = "verify_send_target"
             fresh = edge_handoff.composer(browser)
             if (not edge_handoff.exact_recovery_input(fresh, message)
                     or not all(fresh.get(key) for key in ("focused", "document_focused", "document_visible", "send_enabled"))
                     or fresh.get("send_xpath") != state["send_xpath"] or should_stop()):
                 raise RuntimeError("send_target_changed")
             create_record(folder / "send-intent.json", result("issued", "before_send_boundary"))
+            failure_stage = "send"
 
             def before_send():
                 nonlocal boundary
@@ -242,6 +252,7 @@ def run(config, evidence_root=ROOT / "evidence", *, collect_response=False,
             send.click(delay_after=0, before_actual=before_send)
             if not boundary:
                 raise RuntimeError("send_not_started")
+            failure_stage = "observe_approval"
             # Legacy goal_id is only a DOM correlation token in approval_guard.
             # task_id is NOT a Server Goal, Todo, attempt, binding, or resume.
             receipt = sanitize_candidate_response(approval_runner(approval_adapter(browser),
@@ -265,7 +276,8 @@ def run(config, evidence_root=ROOT / "evidence", *, collect_response=False,
             return outcome
     except Exception as error:
         outcome = result("unknown" if boundary or issued else "blocked",
-                         "pilot_" + type(error).__name__, send_boundary_reached=boundary)
+                         "pilot_" + type(error).__name__, send_boundary_reached=boundary,
+                         failure_stage=failure_stage)
         if issued:
             try:
                 create_record(folder / "result.json", outcome)

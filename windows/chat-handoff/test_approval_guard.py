@@ -137,12 +137,20 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self.run_guard()["reason"], "target_message_changed")
         self.assertEqual(self.browser.clicks, [])
 
-    def test_other_app_and_missing_tool_are_rejected(self):
-        for value in (card(exact_app=False), card(tool=None)):
+    def test_other_app_is_rejected_with_or_without_tool(self):
+        for value in (card(exact_app=False), card(exact_app=False, tool=None)):
             with self.subTest(card=value):
                 self.browser.current = observation([value])
                 self.assertEqual(self.run_guard()["reason"], "unrecognized_approval")
                 self.assertEqual(self.browser.clicks, [])
+
+    def test_description_only_app_approval_clicks_without_inventing_tool_name(self):
+        self.browser.current = observation([card(tool=None)])
+        result = self.run_guard()
+        self.assertEqual(result['status'], 'sent')
+        self.assertEqual(result['approval_click_count'], 1)
+        self.assertEqual(result['approved_tools'], [])
+        self.assertFalse(result['business_verified'])
 
     def test_multiple_cards_and_multiple_buttons_are_rejected(self):
         for cards, reason in (([card(), card(signature="other")], "ambiguous_approval_cards"),
@@ -278,6 +286,70 @@ class GuardTests(unittest.TestCase):
         self.browser.elements[0].enabled = False
         self.run_guard()
         self.assertEqual(len(self.browser.clicks), 1)
+
+
+@unittest.skipUnless(os.environ.get("WEBCODEX_TEST_CHROMIUM"), "Offline DOM test requires a Chromium executable")
+class DescriptionCardDomTests(unittest.TestCase):
+    """Synthetic, credential-free cards based on the observed bilingual UI."""
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+        cls.driver = sync_playwright().start()
+        cls.browser = cls.driver.chromium.launch(headless=True,
+            executable_path=os.environ['WEBCODEX_TEST_CHROMIUM'])
+        cls.context = cls.browser.new_context(viewport={"width": 1200, "height": 900})
+        cls.context.route('**/*', lambda route: route.abort())
+        cls.page = cls.context.new_page()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.context.close()
+        cls.browser.close()
+        cls.driver.stop()
+
+    def probe(self, title, button='始终允许'):
+        self.page.set_content('''<div data-markdown-text-tone="user-message"></div>
+            <section data-chatgpt-search-message-ids="offline-assistant-1">
+            <div data-codex-approval-surface="true"><div role="alert">
+            <span>webcodex</span><p id="title"></p>
+            <div>Attaches a trusted host window using a one-time enrollment grant.</div>
+            <button id="always"></button><button>拒绝</button><button>允许一次</button>
+            </div></div></section>''')
+        self.page.locator('[data-markdown-text-tone]').evaluate(
+            '(e, text) => e.textContent=text', REQUEST['launch_id'] + ' ' + REQUEST['goal_id'])
+        self.page.locator('#title').evaluate('(e, text) => e.textContent=text', title)
+        self.page.locator('#always').evaluate('(e, text) => e.textContent=text', button)
+        return self.read_probe()
+
+    def read_probe(self):
+        return self.page.evaluate('arg => (' + guard.PROBE_JS + ')(null, arg)', json.dumps(REQUEST))
+
+    def test_bilingual_description_cards_accept_case_spacing_and_punctuation(self):
+        for title in ('允许 ChatGPT 使用 webcodex?', '允许 ChatGPT 使用 webcodex 吗？',
+                '允许ChatGPT使用WEBCODEX', 'Allow ChatGPT to use webcodex?',
+                'ALLOW  ChatGPT TO USE webcodex？'):
+            for button in ('始终允许', 'Always allow', '\u200bAlways\u00a0Allow '):
+                with self.subTest(title=title, button=button):
+                    snapshot = self.probe(title, button)
+                    actual, reason = guard.candidate(snapshot)
+                    self.assertIsNone(reason)
+                    self.assertIsNotNone(actual)
+                    self.assertIsNone(actual['tool'])
+                    self.assertEqual(self.page.locator('xpath=' + actual['xpath']).count(), 1)
+
+    def test_other_apps_and_unrelated_titles_do_not_authorize(self):
+        for title in ('Allow ChatGPT to use WebCodex-Hom?', 'Allow ChatGPT to use webcodex-extra?',
+                '允许 ChatGPT 使用 other-app?', 'Quoted: Allow ChatGPT to use webcodex?'):
+            with self.subTest(title=title):
+                self.assertEqual(guard.candidate(self.probe(title))[1], 'unrecognized_approval')
+
+    def test_hidden_matching_title_and_non_always_buttons_do_not_authorize(self):
+        for button in ('允许一次', 'Allow once', 'Do not always allow'):
+            self.assertEqual(guard.candidate(self.probe('允许 ChatGPT 使用 webcodex?', button))[1],
+                'ambiguous_approval_button')
+        self.probe('允许 ChatGPT 使用 webcodex?')
+        self.page.locator('#title').evaluate("e => e.style.display='none'")
+        self.assertEqual(guard.candidate(self.read_probe())[1], 'unrecognized_approval')
 
 
 @unittest.skipUnless(os.environ.get("WEBCODEX_APPROVAL_HTML"), "Saved HTML DOM probe is opt-in and offline")
