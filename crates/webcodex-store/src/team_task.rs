@@ -351,6 +351,21 @@ fn validate_policy(settings: &TeamPolicyInput) -> Result<()> {
     Ok(())
 }
 
+fn validate_policy_for_admission(settings: &TeamPolicyInput) -> Result<()> {
+    validate_policy(settings)?;
+    // New execution constraints must not prevent reading or revising policies
+    // that were valid when persisted by an earlier version.
+    if settings.mode == TeamPolicyMode::Custom
+        && (settings.subagents.min + 1) * settings.cli_per_agent.min > 32
+    {
+        return Err(error(
+            "team_cli_budget_unsatisfiable",
+            "The minimum team, including the manager, requires more than 32 total CLI calls",
+        ));
+    }
+    Ok(())
+}
+
 fn members(plan: &TeamPlanInput) -> impl Iterator<Item = &TeamAgentPlan> {
     std::iter::once(&plan.manager).chain(&plan.subagents)
 }
@@ -382,7 +397,7 @@ fn resolve_saved_policy_efforts(policy: &TeamPolicy, plan: &mut TeamPlanInput) -
 }
 
 fn validate_plan(root: &str, policy: &TeamPolicy, plan: &TeamPlanInput) -> Result<()> {
-    validate_policy(&policy.settings)?;
+    validate_policy_for_admission(&policy.settings)?;
     if plan.manager.task_id != root
         || plan.subagents.len() > MAX_SUBAGENTS
         || members(plan).any(|m| m.cli_calls.len() > MAX_CLI_CALLS)
@@ -831,7 +846,7 @@ impl Database {
     ) -> Result<TeamPolicy> {
         validate_communication_principal(principal)?;
         project_id(project)?;
-        validate_policy(&settings)?;
+        validate_policy_for_admission(&settings)?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)

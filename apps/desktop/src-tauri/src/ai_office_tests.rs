@@ -185,6 +185,47 @@ fn auto_leaves_plan_choice_free_but_requires_explicit_model() {
 }
 
 #[test]
+fn plan_preview_respects_new_chat_assignment_caps_in_both_modes() {
+    let mut policy = OfficePolicy::default();
+    let mut plan = OfficePlan {
+        manager: agent("manager", vec![]),
+        subagents: (0..5)
+            .map(|i| agent(&format!("child-{i}"), vec![]))
+            .collect(),
+    };
+    let result = evaluate_plan(&policy, &plan).unwrap();
+    assert!(!result.admitted);
+    assert!(result.violations.iter().any(|v| v.code == "subagent_count"));
+    plan.subagents.clear();
+    plan.manager.cli_calls = (0..11).map(|_| call("model-a")).collect();
+    assert!(evaluate_plan(&policy, &plan)
+        .unwrap()
+        .violations
+        .iter()
+        .any(|v| v.code == "cli_total_budget"));
+
+    policy.settings.mode = PolicyMode::Custom;
+    policy.settings.subagents.max = 32;
+    policy.settings.cli_per_agent.max = 32;
+    plan.manager.cli_calls = (0..3).map(|_| call("model-a")).collect();
+    plan.subagents = (0..15)
+        .map(|i| {
+            agent(
+                &format!("child-{i}"),
+                (0..3).map(|_| call("model-a")).collect(),
+            )
+        })
+        .collect();
+    let result = evaluate_plan(&policy, &plan).unwrap();
+    assert_eq!(result.cli_call_count, 48);
+    assert!(!result.admitted);
+    assert!(result
+        .violations
+        .iter()
+        .any(|v| v.code == "cli_total_budget"));
+}
+
+#[test]
 fn invalid_policy_ranges_and_duplicate_provider_ids_fail_before_save() {
     let mut policy = OfficePolicyInput::default();
     policy.subagents.min = 10;
@@ -197,6 +238,75 @@ fn invalid_policy_ranges_and_duplicate_provider_ids_fail_before_save() {
     assert!(validate_policy(&policy).is_ok());
     policy.cli_per_agent.max = 33;
     assert!(validate_policy(&policy).is_err());
+}
+
+#[test]
+fn minimum_cli_budget_includes_manager_and_accepts_feasible_maxima() {
+    let mut policy = OfficePolicyInput::default();
+    policy.mode = PolicyMode::Custom;
+    policy.subagents = CountRange { min: 16, max: 32 };
+    policy.cli_per_agent = CountRange { min: 2, max: 32 };
+    assert!(validate_policy_for_save(&policy).is_err());
+    policy.subagents.min = 15;
+    assert!(validate_policy_for_save(&policy).is_ok());
+}
+
+#[test]
+fn legacy_over_budget_policy_remains_readable_and_can_be_revised() {
+    let path = temporary_path("legacy-budget");
+    let scope = "server-a\nrunner";
+    let mut legacy = custom_policy();
+    legacy.settings.subagents = CountRange { min: 2, max: 2 };
+    legacy.settings.cli_per_agent = CountRange { min: 11, max: 11 };
+    let mut legacy_project = project("legacy");
+    legacy_project.policy = legacy.clone();
+    let mut store = PolicyStore::default();
+    store.projects.insert(
+        store_key(scope, "legacy"),
+        SavedProject {
+            scope: scope.into(),
+            project: legacy_project,
+        },
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
+    assert_eq!(
+        read_store(&path).unwrap().projects[&store_key(scope, "legacy")]
+            .project
+            .policy,
+        legacy
+    );
+    assert_eq!(
+        server_policy_from_result(serde_json::json!({"success":true,"output":legacy})).unwrap(),
+        legacy
+    );
+    let before = std::fs::read(&path).unwrap();
+    assert!(save_policy(
+        &path,
+        scope,
+        project("legacy"),
+        legacy.revision,
+        legacy.settings.clone()
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let revised = save_policy(
+        &path,
+        scope,
+        project("legacy"),
+        legacy.revision,
+        OfficePolicyInput::default(),
+    )
+    .unwrap();
+    assert_eq!(revised.revision, legacy.revision + 1);
+    assert_eq!(
+        read_store(&path).unwrap().projects[&store_key(scope, "legacy")]
+            .project
+            .policy,
+        revised
+    );
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_dir(path.parent().unwrap()).unwrap();
 }
 
 #[test]

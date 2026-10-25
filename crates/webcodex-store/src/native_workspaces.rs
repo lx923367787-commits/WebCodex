@@ -19,6 +19,10 @@ pub struct NativeWorkspace {
     pub name: String,
     pub enabled: bool,
     pub folders: Vec<NativeWorkspaceFolder>,
+    /// Exact registered folder used for team policy and new team executions.
+    /// Older single-folder projects have an unambiguous implicit target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_project: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,8 +76,16 @@ pub(crate) fn initial_team_on_connection(
     owner: &str,
     workspace: &NativeWorkspace,
 ) -> Result<Option<(NativeWorkspaceFolder, crate::AgentEnrollmentPolicy)>, AgentIsolationError> {
-    let [folder] = workspace.folders.as_slice() else {
-        return Ok(None);
+    let folder = match workspace.team_project.as_deref() {
+        Some(project) => workspace
+            .folders
+            .iter()
+            .find(|folder| folder.project == project)
+            .ok_or_else(|| error("workspace_team_target_invalid"))?,
+        None => match workspace.folders.as_slice() {
+            [folder] => folder,
+            _ => return Ok(None),
+        },
     };
     let policy = crate::team_task::policy_on(
         conn,
@@ -91,10 +103,8 @@ pub(crate) fn initial_team_on_connection(
         .max
         .checked_add(1)
         .and_then(|members| members.checked_mul(policy.settings.cli_per_agent.max))
-        .ok_or_else(|| error("workspace_team_budget_invalid"))?;
-    if max_cli_calls > 32 {
-        return Err(error("workspace_team_budget_invalid"));
-    }
+        .ok_or_else(|| error("workspace_team_budget_invalid"))?
+        .min(32);
     Ok(Some((
         folder.clone(),
         crate::AgentEnrollmentPolicy {
@@ -206,6 +216,13 @@ impl Database {
                 {
                     return Err(error("workspace_invalid_input"));
                 }
+            }
+            if project
+                .team_project
+                .as_ref()
+                .is_some_and(|target| !folders.contains(target))
+            {
+                return Err(error("workspace_team_target_invalid"));
             }
         }
         let encoded = serde_json::to_string(&projects).map_err(unavailable)?;

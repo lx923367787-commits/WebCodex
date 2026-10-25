@@ -68,8 +68,11 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
     }
   }
   const invalidRange = draft.mode === "custom" && (draft.subagents.min > draft.subagents.max || draft.cli_per_agent.min > draft.cli_per_agent.max);
+  const minimumCliCalls = (draft.subagents.min + 1) * draft.cli_per_agent.min;
+  const invalidBudget = draft.mode === "custom" && minimumCliCalls > 32;
+  const maximumCliCalls = Math.min((draft.subagents.max + 1) * draft.cli_per_agent.max, 32);
   async function save() {
-    if (invalidRange) return;
+    if (invalidRange || invalidBudget || saving) return;
     setSaving(true); setError(""); setMessage("");
     try {
       const policy = await api.savePolicy(project.id, revision, draft);
@@ -92,6 +95,7 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
     finally { setReloading(false); }
   }
   async function evaluate() {
+    if (revision === 0 || dirty || evaluating) return;
     setEvaluating(true); setEvaluation(null); setEvaluationError("");
     const calls = Array.from({ length: planCliCalls }, () => ({ provider_id: planProvider, model: planModel, ...(planEffort ? { effort: planEffort } : {}) }));
     const plan: OfficePlan = {
@@ -119,6 +123,8 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
           <RangeFields title="每个 Agent 的 CLI 调用" caption="包含总经理；最少次数按已核实调用检查。" name="cli" value={draft.cli_per_agent} max={32} disabled={draft.mode === "auto" || saving} onChange={(value) => change({ ...draft, cli_per_agent: value })} />
         </div>
         {invalidRange && <p role="alert" className="ao-error">最少数量不能大于最多数量。</p>}
+        {invalidBudget && <p role="alert" className="ao-error">最低分工需要 {minimumCliCalls} 次 CLI，超过每轮团队总预算 32 次。请减少最少人数或每人最少调用次数。</p>}
+        <p className="ao-inline-note">新聊天最多可委派 {draft.subagents.max} 位子 Agent，{draft.mode === "custom" ? `每人最多 ${draft.cli_per_agent.max} 次 CLI；` : "CLI 次数由总经理分配；"}包含总经理，每轮团队总预算最多 {maximumCliCalls} 次，不要求用满。</p>
         {draft.mode === "auto" && <p className="ao-inline-note">自主模式不设置自定义最低执行门槛，人数与工具由总经理安排；已冻结的调用预算和运行权限仍有效。</p>}
       </section>
       <section className="ao-card ao-policy-card">
@@ -138,7 +144,7 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
           </div>;
         })}</div>
       </section>
-      <div className="ao-save-bar"><div><strong>{dirty ? "有尚未保存的修改" : "没有待保存修改"}</strong><span>当前版本 {revision} · {project.name}</span></div><button type="button" className="ao-button ao-button-primary" disabled={saving || reloading || invalidRange || !dirty} onClick={() => void save()}>{saving ? "保存中…" : "保存团队策略"}</button></div>
+      <div className="ao-save-bar"><div><strong>{dirty ? "有尚未保存的修改" : revision === 0 ? "首次使用请保存团队策略" : "没有待保存修改"}</strong><span>当前版本 {revision} · {project.name}</span></div><button type="button" className="ao-button ao-button-primary" disabled={saving || reloading || invalidRange || invalidBudget || (!dirty && revision > 0)} onClick={() => void save()}>{saving ? "保存中…" : "保存团队策略"}</button></div>
       {message && <p className="ao-success" role="status">{message}</p>}
       {(error || policyChangedElsewhere) && <div className="ao-policy-error" role="alert"><p>{error || "策略已在其他位置更新。当前草稿保留，请载入最新策略后再编辑。"}</p><button type="button" className="ao-button ao-button-subtle" disabled={reloading || saving} onClick={() => void reload()}>{reloading ? "载入中…" : "载入最新策略（替换草稿）"}</button></div>}
     </div>
@@ -146,8 +152,8 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
       <section className="ao-policy-summary"><span className="ao-small-kicker">YOUR TEAM, YOUR RULES</span><h3>你定方向。<br />总经理来组织。</h3><p>简单任务，一个 AI 就够了；复杂项目，再把合适的工作交给合适的成员。</p><div className="ao-summary-tree"><span>你 · 大老板</span><i /><strong>总经理 Agent</strong><i /><div><span>子 Agent</span><span>CLI 工具</span></div></div><p className="ao-policy-boundary">这些规则仅约束经 Server 登记的当前项目团队计划。上限在冻结计划和占用调用预算时限制；自定义下限在标记成功时按已核实派发与调用证据检查。现有任务不会自动重排。</p></section>
       <section className="ao-card ao-plan-card"><span className="ao-small-kicker">PLAN CHECK</span><h3>试一下这套分工</h3><p className="ao-muted">使用已保存的策略验证计划，不执行 CLI。</p><label>总任务<input aria-label="验证计划的总任务" disabled={evaluating} value={planTask} onChange={(event) => { setPlanTask(event.target.value); setEvaluation(null); }} /></label><div className="ao-plan-counts"><label>子 Agent 数量<input type="number" aria-label="计划子 Agent 数量" disabled={evaluating} min={0} max={32} value={planAgents} onChange={(event) => { setPlanAgents(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label><label>每位 CLI 次数<input type="number" aria-label="计划每个 Agent CLI 次数" disabled={evaluating} min={0} max={32} value={planCliCalls} onChange={(event) => { setPlanCliCalls(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label></div>
         {planCliCalls > 0 && <div className="ao-plan-cli"><label>CLI 工具<select aria-label="验证计划 CLI 工具" value={planProvider} onChange={(event) => { setPlanProvider(event.target.value as CliProviderId); setPlanModel(""); setPlanEffort(""); setEvaluation(null); }}><option value="workbuddy">WorkBuddy</option><option value="antigravity">Antigravity</option></select></label><label>实际调用模型<select aria-label="验证计划模型" value={planModel} onChange={(event) => { setPlanModel(event.target.value); setEvaluation(null); }}><option value="">先刷新并选择模型</option>{planCatalog?.models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>{Boolean(planCatalog?.efforts.length) && <label>实际调用强度<select aria-label="验证计划思考强度" value={planEffort} onChange={(event) => { setPlanEffort(event.target.value); setEvaluation(null); }}><option value="">请选择</option>{planCatalog?.efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label>}</div>}
-        <button type="button" className="ao-button ao-button-primary" onClick={() => void evaluate()} disabled={evaluating || dirty || !planTask.trim() || (planCliCalls > 0 && (!planModel || (Boolean(planCatalog?.efforts.length) && !planEffort)))}>{evaluating ? "验证中…" : "验证委派计划"}<span>↗</span></button>
-        {dirty && <p className="ao-inline-note">先保存策略，再验证委派计划。</p>}
+        <button type="button" className="ao-button ao-button-primary" onClick={() => void evaluate()} disabled={evaluating || dirty || revision === 0 || !planTask.trim() || (planCliCalls > 0 && (!planModel || (Boolean(planCatalog?.efforts.length) && !planEffort)))}>{evaluating ? "验证中…" : "验证委派计划"}<span>↗</span></button>
+        {(dirty || revision === 0) && <p className="ao-inline-note">先保存策略，再验证委派计划。</p>}
         {evaluation && <div className={`ao-evaluation ${evaluation.admitted ? "is-admitted" : "is-rejected"}`} role="status"><strong>{evaluation.admitted ? "✓ 计划符合已保存策略" : "计划未通过策略检查"}</strong><span>{evaluation.subagent_count} 位子 Agent · {evaluation.cli_call_count} 次 CLI · 策略 v{evaluation.policy_revision}</span>{evaluation.violations.length > 0 && <ul>{evaluation.violations.map((violation, index) => <li key={`${violation.code}-${index}`}>{violation.agent_id ? `${violation.agent_id}：` : ""}{violation.message}</li>)}</ul>}<small>仅验证，没有启动 Agent 或 CLI 进程。</small><small>计划通过不代表实际执行下限已满足，成功状态仍需 Server 核实执行证据。</small></div>}
         {evaluationError && <p className="ao-error" role="alert">{evaluationError}</p>}
       </section>

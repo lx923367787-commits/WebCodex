@@ -99,6 +99,103 @@ async fn named_workspaces_native_discovery_selection_and_folder_authority() {
 }
 
 #[tokio::test]
+async fn named_workspace_explicit_team_policy_reaches_new_native_chat() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new();
+    let host =
+        f.db.register_native_agent_host(&format!("tunnel_{}", "a".repeat(32)), &"b".repeat(64))
+            .unwrap();
+    let project = format!("wc_workspace_{}", "a".repeat(32));
+    let code = "agent:runner:code";
+    let docs = "agent:runner:docs";
+    let control = json!({
+        "action":"native_workspaces_save","host_id":host.host_id,"owner_user":f.user.id,
+        "expected_revision":0,"projects":[{
+            "id":project,"name":"EAS","enabled":true,"team_project":docs,
+            "folders":[
+                {"project":code,"name":"Code","path":"D:/code"},
+                {"project":docs,"name":"Docs","path":"E:/docs"}
+            ]
+        }]
+    });
+    assert_eq!(f.control(CONTROL, control).await.0, StatusCode::OK);
+    let token = host.into_secret();
+    let old = success(
+        native_call(
+            &f,
+            &token,
+            "before-save",
+            "agent_select_project",
+            json!({"project":project}),
+        )
+        .await,
+    );
+    assert_eq!(old["assignment"]["policy"]["max_subagents"], 0);
+    assert_eq!(old["assignment"]["policy"]["max_cli_calls"], 0);
+
+    // Seed operator policies under the same managed-user principal as real saves.
+    let mut hash = Sha256::new();
+    hash.update(b"webcodex.communication.principal.v1\0managed-user\0");
+    hash.update(f.user.id.as_bytes());
+    let principal = webcodex_store::CommunicationPrincipal {
+        kind: "managed-user".into(),
+        digest: format!("wc_commprincipal_{:x}", hash.finalize()),
+    };
+    f.db.save_team_policy(
+        &principal,
+        code,
+        0,
+        webcodex_store::TeamPolicyInput::default(),
+    )
+    .unwrap();
+    let mut settings = webcodex_store::TeamPolicyInput::default();
+    settings.mode = webcodex_store::TeamPolicyMode::Custom;
+    settings.subagents = webcodex_store::TeamCountRange { min: 1, max: 3 };
+    settings.cli_per_agent = webcodex_store::TeamCountRange { min: 1, max: 2 };
+    settings.providers[0].model = Some("selected-folder-model".into());
+    let saved =
+        f.db.save_team_policy(&principal, docs, 0, settings)
+            .unwrap();
+
+    let selected = success(
+        native_call(
+            &f,
+            &token,
+            "after-save",
+            "agent_select_project",
+            json!({"project":project}),
+        )
+        .await,
+    );
+    assert_ne!(selected["agent"]["agent_id"], old["agent"]["agent_id"]);
+    assert_eq!(selected["assignment"]["policy"]["max_subagents"], 3);
+    assert_eq!(selected["assignment"]["policy"]["max_cli_calls"], 8);
+    let assignment =
+        success(native_call(&f, &token, "after-save", "agent_assignment", json!({})).await);
+    assert_eq!(assignment["named_project"]["team_project"], docs);
+    assert_eq!(
+        assignment["assignment"]["policy"],
+        selected["assignment"]["policy"]
+    );
+    let observed = success(
+        native_call(
+            &f,
+            &token,
+            "after-save",
+            "team_policy_get",
+            json!({"task_id":assignment["assignment"]["task_id"]}),
+        )
+        .await,
+    );
+    assert_eq!(observed["policy"], serde_json::to_value(saved).unwrap());
+    assert_eq!(observed["max_subagents"], 3);
+    assert_eq!(observed["max_cli_calls"], 8);
+    let unchanged =
+        success(native_call(&f, &token, "before-save", "runtime_status", json!({})).await);
+    assert_eq!(unchanged["assignment"], old["assignment"]);
+}
+
+#[tokio::test]
 async fn native_auto_enrollment_reports_connection_without_configuration_and_requires_control() {
     let f = Fixture::new();
     let host =

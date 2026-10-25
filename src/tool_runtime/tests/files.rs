@@ -58,6 +58,7 @@ async fn named_workspaces_files_pin_each_granted_root_and_enforce_revocation() {
         name: "Multi folder".into(),
         enabled: true,
         folders: folders.clone(),
+        team_project: None,
     };
     db.configure_native_workspaces(host.host_id(), &user.id, 0, vec![workspace.clone()])
         .unwrap();

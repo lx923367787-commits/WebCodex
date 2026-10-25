@@ -172,6 +172,100 @@ fn observation(
 }
 
 #[test]
+fn custom_policy_rejects_impossible_cli_minimum_and_keeps_feasible_maxima() {
+    let (_dir, db) = database();
+    let owner = principal('a');
+    let mut settings = TeamPolicyInput::default();
+    settings.mode = TeamPolicyMode::Custom;
+    settings.subagents = TeamCountRange { min: 2, max: 32 };
+    settings.cli_per_agent = TeamCountRange { min: 11, max: 32 };
+    assert_eq!(
+        db.save_team_policy(&owner, PROJECT, 0, settings.clone())
+            .unwrap_err()
+            .code(),
+        "team_cli_budget_unsatisfiable"
+    );
+    assert_eq!(db.get_team_policy(&owner, PROJECT).unwrap().revision, 0);
+    settings.subagents.min = 3;
+    settings.cli_per_agent.min = 8;
+    let saved = db
+        .save_team_policy(&owner, PROJECT, 0, settings.clone())
+        .unwrap();
+    assert_eq!(saved.settings, settings);
+    // Autonomous mode imposes no minimum, even if a prior custom draft had one.
+    settings.mode = TeamPolicyMode::Auto;
+    settings.subagents.min = 32;
+    settings.cli_per_agent.min = 32;
+    assert!(db.save_team_policy(&owner, PROJECT, 1, settings).is_ok());
+}
+
+#[test]
+fn legacy_policy_with_impossible_cli_minimum_remains_readable_and_revisable() {
+    let (dir, db) = database();
+    let owner = principal('a');
+    let mut settings = TeamPolicyInput::default();
+    settings.mode = TeamPolicyMode::Custom;
+    settings.subagents = TeamCountRange { min: 2, max: 2 };
+    settings.cli_per_agent = TeamCountRange { min: 11, max: 11 };
+    let legacy = TeamPolicy {
+        revision: 7,
+        settings,
+    };
+    // This row satisfied the old individual count limits before total-budget
+    // admission was added. Restore the actual persisted shape, then reopen it.
+    db.conn.lock().unwrap().execute(
+        "INSERT INTO wc_team_policies(owner_principal_kind,owner_principal_digest,project_id,policy_json) VALUES(?1,?2,?3,?4)",
+        params![owner.kind, owner.digest, PROJECT, encode(&legacy).unwrap()],
+    ).unwrap();
+    drop(db);
+    let db = Database::open(&dir.path().join("state.db")).unwrap();
+    assert_eq!(db.get_team_policy(&owner, PROJECT).unwrap(), legacy);
+    assert_eq!(
+        db.save_team_policy(&owner, PROJECT, legacy.revision, legacy.settings.clone())
+            .unwrap_err()
+            .code(),
+        "team_cli_budget_unsatisfiable"
+    );
+
+    let root = task(&db, &owner, PROJECT, "legacy-root");
+    let children = [
+        task(&db, &owner, PROJECT, "legacy-first"),
+        task(&db, &owner, PROJECT, "legacy-second"),
+    ];
+    let member = |id: &str, count: usize| TeamAgentPlan {
+        task_id: id.into(),
+        cli_calls: (0..count)
+            .map(|_| TeamCliCall {
+                instruction: Some("Review this member's assigned material".into()),
+                ..call()
+            })
+            .collect(),
+    };
+    let plan = |count| TeamPlanInput {
+        manager: member(&root, count),
+        subagents: children.iter().map(|id| member(id, count)).collect(),
+    };
+    assert_eq!(
+        db.register_team_plan(&owner, PROJECT, &root, 7, plan(11), "new-plan")
+            .unwrap_err()
+            .code(),
+        "team_cli_budget_unsatisfiable"
+    );
+    assert_eq!(db.get_team_policy(&owner, PROJECT).unwrap(), legacy);
+
+    let mut corrected = legacy.settings;
+    corrected.cli_per_agent.min = 10;
+    let saved = db.save_team_policy(&owner, PROJECT, 7, corrected).unwrap();
+    assert_eq!(saved.revision, 8);
+    assert_eq!(db.get_team_policy(&owner, PROJECT).unwrap(), saved);
+    assert!(
+        db.register_team_plan(&owner, PROJECT, &root, 8, plan(10), "new-plan")
+            .unwrap()
+            .created
+    );
+}
+
+#[test]
 fn policy_cas_is_durable_scoped_and_wire_compatible() {
     let (dir, db) = database();
     let owner = principal('a');

@@ -87,6 +87,31 @@ describe("AI office", () => {
 });
 
 describe("office policy", () => {
+  it("rejects impossible minimum CLI budgets but keeps feasible upper ranges", async () => {
+    const api = apiFixture();
+    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
+    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最多数量"), { target: { value: "32" } });
+    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最少数量"), { target: { value: "16" } });
+    fireEvent.change(screen.getByLabelText("每个 Agent 的 CLI 调用最少数量"), { target: { value: "2" } });
+    expect(screen.getByRole("alert")).toHaveTextContent("最低分工需要 34 次 CLI");
+    expect(screen.getByRole("button", { name: "保存团队策略" })).toBeDisabled();
+    expect(api.savePolicy).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最少数量"), { target: { value: "15" } });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
+    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 7, expect.objectContaining({ subagents: { min: 15, max: 32 }, cli_per_agent: { min: 2, max: 2 } })));
+  });
+
+  it("allows the default policy to be explicitly saved before its first use", async () => {
+    const api = apiFixture();
+    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, revision: 0 } }} api={api} onSaved={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "保存团队策略" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /验证委派计划/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
+    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 0, expect.objectContaining({ mode: "auto", subagents: { min: 0, max: 4 }, cli_per_agent: { min: 0, max: 2 } })));
+  });
+
   it("shows native read-only guidance without retrying or confirming an unknown save", async () => {
     const api = apiFixture();
     const nextAction = "只读重新查询原项目策略以核实结果；保存可能已提交，不要自动重发或更新版本号后重存旧设置。";

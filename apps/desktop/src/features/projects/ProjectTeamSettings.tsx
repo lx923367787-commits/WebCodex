@@ -81,7 +81,8 @@ export function ProjectTeamSettings({ project, api = aiOfficeApi, onBack }: {
       <button type="button" className="secondary-button" onClick={onBack}>← 返回项目列表</button>
     </div>
     <div className="project-team-folder"><span aria-hidden="true">▱</span><div><h2>{project.name}</h2><p className="project-path">{project.path.replace(/^\\\\\?\\/, "")}</p></div></div>
-    <p className="project-help">这套规则用于当前文件夹经 Server 登记的团队任务，不约束独立发起的外部任务。没有 AI 工作时也能预先设置；默认自主模式不加最低执行门槛。</p>
+    <p className="project-help">这套规则用于此工作文件夹的团队任务。保存后，请新开聊天并选择这个项目，新的 Agent 才会获得对应人数和 CLI 额度；已有聊天和任务保留原来的授权边界。没有 AI 工作时也能预先设置。</p>
+    {loaded?.policy.revision === 0 && <p role="status" className="project-help">尚未保存团队策略。请先保存默认安排或自定义边界，再开启新聊天。</p>}
     {loaded && confirmation === "unconfirmed" && observedSource !== "demo" && <div role="alert" className="project-team-load-error"><strong>当前策略尚未获 Server 确认</strong><p>当前显示的缓存或未确认读数不代表配额已在 Server 生效。仍可编辑，保存会向 Server 提交版本校验。</p>{verificationError && <p>{verificationError}</p>}{limitations.length > 0 && <ul>{limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul>}<button type="button" className="secondary-button" onClick={() => void verifyPolicy(loaded.policy.revision)}>重新核实 Server 策略</button></div>}
     {loaded && confirmation === "checking" && <p role="status" className="project-team-loading">{observedSource === "demo" ? "正在重新读取演示策略…" : "正在重新观测 Server，尚未确认策略生效…"}</p>}
     {loaded && confirmation === "server" && <p role="status" className="project-help">Server 已确认当前项目策略 · 版本 {loaded.policy.revision}。已登记任务使用各自冻结的策略版本。</p>}

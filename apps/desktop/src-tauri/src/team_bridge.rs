@@ -168,6 +168,9 @@ pub(super) fn successful_team_output(envelope: Value) -> DesktopResult<Value> {
                     "Server 团队策略已更新，请载入最新版本后再编辑。"
                 }
                 "team_task_not_found" => "Server 未找到当前账户可以访问的团队任务。",
+                "team_cli_budget_unsatisfiable" => {
+                    "最低分工超过每轮团队总预算 32 次 CLI，请减少最少人数或每人最少调用次数。"
+                }
                 _ => "Server 未接受这次团队操作，请检查项目权限和最新任务状态。",
             };
             Err(bridge_error(code, message))

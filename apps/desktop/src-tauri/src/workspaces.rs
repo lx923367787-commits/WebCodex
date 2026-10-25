@@ -10,6 +10,8 @@ pub struct WorkspaceDraft {
     pub name: String,
     pub enabled: bool,
     pub folders: Vec<String>,
+    #[serde(default)]
+    pub team_project: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,6 +78,13 @@ impl AppState {
                 .ok_or_else(|| project_management::project_error("workspace_owner_unavailable"))?;
             let mut projects = vec![];
             for draft in save.projects {
+                if draft
+                    .team_project
+                    .as_ref()
+                    .is_some_and(|target| !draft.folders.contains(target))
+                {
+                    return Err(project_management::project_error("workspace_invalid_input"));
+                }
                 let mut folders = vec![];
                 for id in draft.folders {
                     let folder = inventory
@@ -93,7 +102,7 @@ impl AppState {
                     folders
                         .push(json!({"project":folder.id,"name":folder.name,"path":folder.path}));
                 }
-                projects.push(json!({"id":draft.id,"name":draft.name,"enabled":draft.enabled,"folders":folders}));
+                projects.push(json!({"id":draft.id,"name":draft.name,"enabled":draft.enabled,"folders":folders,"team_project":draft.team_project}));
             }
             json!({"action":"native_workspaces_save","host_id":host,"owner_user":owner,"expected_revision":save.expected_revision,"projects":projects})
         } else {

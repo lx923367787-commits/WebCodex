@@ -278,6 +278,7 @@ fn workspace(n: char) -> crate::NativeWorkspace {
         id: format!("wc_workspace_{}", n.to_string().repeat(32)),
         name: format!("Project {n}"),
         enabled: true,
+        team_project: None,
         folders: vec![
             crate::NativeWorkspaceFolder {
                 project: format!("agent:runner:{n}"),
@@ -456,6 +457,131 @@ fn named_workspace_team_does_not_guess_a_folder_or_borrow_another_owners_policy(
             .unwrap()
             .policy
             .max_cli_calls,
+        0
+    );
+}
+
+#[test]
+fn named_workspace_team_uses_explicit_folder_without_retargeting_existing_chats() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let mut project = workspace('a');
+    let principal = crate::agent_isolation::enrollment_principal_for_execution("native-owner");
+    let mut code_policy = crate::TeamPolicyInput::default();
+    code_policy.mode = crate::TeamPolicyMode::Custom;
+    code_policy.subagents = crate::TeamCountRange { min: 1, max: 3 };
+    code_policy.cli_per_agent = crate::TeamCountRange { min: 1, max: 2 };
+    let code_policy = db
+        .save_team_policy(&principal, &project.folders[0].project, 0, code_policy)
+        .unwrap();
+    let mut docs_policy = crate::TeamPolicyInput::default();
+    docs_policy.mode = crate::TeamPolicyMode::Custom;
+    docs_policy.subagents = crate::TeamCountRange { min: 1, max: 2 };
+    docs_policy.cli_per_agent = crate::TeamCountRange { min: 1, max: 1 };
+    let docs_policy = db
+        .save_team_policy(&principal, &project.folders[1].project, 0, docs_policy)
+        .unwrap();
+    project.team_project = Some(project.folders[1].project.clone());
+    db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![project.clone()])
+        .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let docs = db
+        .ensure_native_host_window(&host, &"a".repeat(64), now)
+        .unwrap();
+    let assignment = db.read_agent_enrollment(&docs).unwrap();
+    assert_eq!(assignment.policy.max_subagents, 2);
+    assert_eq!(assignment.policy.max_cli_calls, 3);
+    assert_eq!(
+        db.agent_team_policy(&docs, &assignment.task_id)
+            .unwrap()
+            .policy,
+        docs_policy
+    );
+    assert_eq!(
+        db.agent_team_execution_folder(&docs).unwrap(),
+        Some(project.folders[1].clone())
+    );
+    // A changed default affects new chats only, never an existing task's target.
+    project.team_project = Some(project.folders[0].project.clone());
+    db.configure_native_workspaces(host.host_id(), "native-owner", 1, vec![project.clone()])
+        .unwrap();
+    assert_eq!(
+        db.agent_team_execution_folder(&docs).unwrap(),
+        Some(project.folders[1].clone())
+    );
+    assert_eq!(
+        db.agent_team_policy(&docs, &assignment.task_id)
+            .unwrap()
+            .policy,
+        docs_policy
+    );
+    let code = db
+        .ensure_native_host_window(&host, &"b".repeat(64), now)
+        .unwrap();
+    let assignment = db.read_agent_enrollment(&code).unwrap();
+    assert_eq!(assignment.policy.max_subagents, 3);
+    assert_eq!(assignment.policy.max_cli_calls, 8);
+    assert_eq!(
+        db.agent_team_policy(&code, &assignment.task_id)
+            .unwrap()
+            .policy,
+        code_policy
+    );
+    project.folders.truncate(1);
+    db.configure_native_workspaces(host.host_id(), "native-owner", 2, vec![project])
+        .unwrap();
+    assert_eq!(
+        db.agent_team_execution_folder(&docs).unwrap_err().code(),
+        "workspace_team_target_changed"
+    );
+    assert!(db.agent_team_execution_folder(&code).is_ok());
+}
+
+#[test]
+fn named_workspace_team_caps_total_cli_budget_without_rejecting_feasible_policy() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let mut project = workspace('a');
+    project.team_project = Some(project.folders[0].project.clone());
+    let principal = crate::agent_isolation::enrollment_principal_for_execution("native-owner");
+    let mut settings = crate::TeamPolicyInput::default();
+    settings.mode = crate::TeamPolicyMode::Custom;
+    settings.subagents = crate::TeamCountRange { min: 1, max: 32 };
+    settings.cli_per_agent = crate::TeamCountRange { min: 1, max: 32 };
+    let saved = db
+        .save_team_policy(&principal, &project.folders[0].project, 0, settings)
+        .unwrap();
+    db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![project])
+        .unwrap();
+    let manager = db
+        .ensure_native_host_window(
+            &host,
+            &"a".repeat(64),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    let assignment = db.read_agent_enrollment(&manager).unwrap();
+    assert_eq!(assignment.policy.max_subagents, 32);
+    assert_eq!(assignment.policy.max_cli_calls, 32);
+    assert_eq!(
+        db.agent_team_policy(&manager, &assignment.task_id)
+            .unwrap()
+            .policy,
+        saved
+    );
+}
+
+#[test]
+fn named_workspace_team_target_must_be_a_registered_member_folder() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let mut project = workspace('a');
+    project.team_project = Some("agent:runner:unrelated".into());
+    assert_eq!(
+        db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![project])
+            .unwrap_err()
+            .code(),
+        "workspace_team_target_invalid"
+    );
+    assert_eq!(
+        db.read_native_workspaces(host.host_id()).unwrap().revision,
         0
     );
 }

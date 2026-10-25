@@ -207,6 +207,20 @@ fn validate_policy(policy: &OfficePolicyInput) -> DesktopResult<()> {
     Ok(())
 }
 
+fn validate_policy_for_save(policy: &OfficePolicyInput) -> DesktopResult<()> {
+    validate_policy(policy)?;
+    // Older policies must remain readable so the user can revise them.
+    if policy.mode == PolicyMode::Custom
+        && (policy.subagents.min + 1) * policy.cli_per_agent.min > 32
+    {
+        return Err(office_error(
+            "ai_office_invalid_policy",
+            "最低分工超过每轮团队总预算 32 次 CLI，请减少最少人数或每人最少调用次数。",
+        ));
+    }
+    Ok(())
+}
+
 fn read_store(path: &Path) -> DesktopResult<PolicyStore> {
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -326,7 +340,7 @@ fn save_policy(
     expected: u64,
     settings: OfficePolicyInput,
 ) -> DesktopResult<OfficePolicy> {
-    validate_policy(&settings)?;
+    validate_policy_for_save(&settings)?;
     let mut store = read_store(path)?;
     let key = store_key(scope, &project.id);
     let revision = store
@@ -454,15 +468,18 @@ pub fn evaluate_plan(
             agent_id,
         })
     };
-    if custom
-        && !(policy.settings.subagents.min..=policy.settings.subagents.max)
-            .contains(&(plan.subagents.len() as u32))
+    let minimum_subagents = if custom {
+        policy.settings.subagents.min
+    } else {
+        0
+    };
+    if !(minimum_subagents..=policy.settings.subagents.max).contains(&(plan.subagents.len() as u32))
     {
         add(
             "subagent_count",
             format!(
                 "The plan requires {}–{} child assignments.",
-                policy.settings.subagents.min, policy.settings.subagents.max
+                minimum_subagents, policy.settings.subagents.max
             ),
             None,
         );
@@ -543,6 +560,15 @@ pub fn evaluate_plan(
                 }
             }
         }
+    }
+    let maximum_cli_calls =
+        ((policy.settings.subagents.max + 1) * policy.settings.cli_per_agent.max).min(32);
+    if cli_call_count > maximum_cli_calls as usize {
+        add(
+            "cli_total_budget",
+            format!("此分工需要 {cli_call_count} 次 CLI，超过新聊天的团队总预算 {maximum_cli_calls} 次。"),
+            None,
+        );
     }
     Ok(OfficePlanEvaluation {
         admitted: violations.is_empty(),
@@ -831,7 +857,7 @@ impl AppState {
         expected: u64,
         settings: OfficePolicyInput,
     ) -> DesktopResult<OfficePolicy> {
-        validate_policy(&settings)?;
+        validate_policy_for_save(&settings)?;
         if expected > i64::MAX as u64 {
             return Err(office_error(
                 "ai_office_revision_conflict",
@@ -864,6 +890,12 @@ impl AppState {
         plan: OfficePlan,
     ) -> DesktopResult<OfficePlanEvaluation> {
         let policy = self.server_team_policy(&id).await?;
+        if policy.revision == 0 {
+            return Err(office_error(
+                "ai_office_policy_not_saved",
+                "请先保存团队策略，再验证委派计划。",
+            ));
+        }
         if policy.revision != expected {
             return Err(office_error(
                 "ai_office_revision_conflict",
