@@ -46,6 +46,8 @@ Desktop：管理本地运行时、项目和连接设置
 
 ## 开始使用
 
+> **请替换为自己的插件名称：** 示例中的 `@WebCodex`（或 `@webcodex`）必须替换为你在 ChatGPT 中实际连接的插件名称。例如，家里的插件叫 `WebCodex-Hom`，就使用 `@WebCodex-Hom`；公司环境使用对应的公司插件。通过脚本新建聊天、接续对话或创建子 GPT agent 时，还需同步修改脚本中的 @ 输入、已选插件校验和授权弹窗名称匹配，保持名称一致。
+
 ### 日常使用：Desktop 或常驻 Server + Runner
 
 Windows / macOS 可按 [Desktop 安装指南](docs/desktop-install.zh-CN.md)准备应用，再按[桌面使用指南](docs/desktop-guide.zh-CN.md)注册真实工作目录、配置连接并检查 Runner 状态。CLI、Linux、已有 Server 和高级部署见[完整使用指南](docs/PERSONAL_SETUP.zh-CN.md)。
