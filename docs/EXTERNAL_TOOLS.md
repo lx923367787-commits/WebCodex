@@ -33,6 +33,8 @@ Build from fresh inputs, not a live installation. Windows portable, source-build
 
 The 2026-10-25 review found standalone model CLIs in the original transfer, and a Codex executor nested in the corrected transfer's Goal ACP dependencies. Current source packaging excludes both. Previously downloaded archives and installed directories are not changed by a source update; use a fresh build or a separately verified subsequent artifact. Historical hashes and manifests must remain historical evidence, not be relabeled as the new payload.
 
+See the [2026-10-25 collaboration review](agent/collaboration-lessons-2026-10-25.zh-CN.md) for the tested failure modes. Node CodeBuddy metadata discovery now uses an explicit administrator-owned `codebuddy_config_directory` in its reviewed Runner resource profile; it no longer assumes one installation's account directory. The directory is included in the approval digest. Configure and re-review it on each machine; never ship its credentials or reuse another machine's approval.
+
 ## 简体中文
 
 WebCodex 提供自己的 Server、Runner、管理 CLI 和工具对接代码。**模型 CLI 必须在每台 Runner 所在电脑由用户自行安装，登录自己的账号或配置自己的 API key，再配置 Runner 并验证。**此规则同样适用于 CodeBuddy/WorkBuddy、Antigravity、Codex、Gemini，以及 Goal ACP 依赖中嵌套的模型执行器。
@@ -47,6 +49,8 @@ WebCodex 提供自己的 Server、Runner、管理 CLI 和工具对接代码。**
 | Runner 与本地运行状态 | 本机生成路径、项目授权、凭据映射和执行资源准入；不随包复制旧 Runner 配置、账号数据库、carrier、租约、可执行文件批准状态。 |
 
 操作顺序是：**本机安装 → 本机登录/填 key → 查询实际版本与模型 → 配置本机 Runner → 通过该 Runner 实际执行验收**。界面能列出模型、宿主命令行能调用、隔离 Runner 能执行，是三种不同的验证，不能相互替代。更新 CLI 后重新验证资源；不能为了复用公司配置而绕过路径、摘要、身份或沙箱检查。凭据只按受支持的最小映射传入，不能把整个用户目录或全部环境变量交给隔离任务。
+
+本次隔离调用与正式交付问题见[协作复盘](agent/collaboration-lessons-2026-10-25.zh-CN.md)。Node CodeBuddy 的元数据查询改用受信 Runner 资源 profile 中显式指定的 `codebuddy_config_directory`，不假定某套安装的账号目录。目录参与审核摘要，换电脑或目录需重新审核；不要复制凭据内容或另一台机器的准入记录。代理端口、浏览器应用名称及登录账号同样按目标机核实，源码中的通用示例不代表实际连接。
 
 Windows 普通聊天工具安装不再自动安装 Goal ACP；需要时在目标机运行 `windows/setup-providers.ps1 -IncludeGoalProvider`，再按 [Goal ACP 说明](../windows/goal-provider/README.md) 登录与配置。公司和家里分别安装、登录、授权。使用两个插件时，各自与对应电脑配置不同的 Tunnel ID，不能指望一个 ID 自动判断应该连接哪台电脑。
 

@@ -35,6 +35,7 @@
 ## 我遇到了问题
 
 - [故障排查](TROUBLESHOOTING.zh-CN.md) —— 安装、连接、运行和 Runner 问题
+- [2026-10-25 多 Agent 协作复盘](agent/collaboration-lessons-2026-10-25.zh-CN.md) —— 团队配置、隔离 CLI、正式交付及跨电脑边界
 - [安全说明](../SECURITY.md) —— 安全模型和使用建议
 
 ## 我想理解或扩展 WebCodex
