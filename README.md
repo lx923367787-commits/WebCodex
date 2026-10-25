@@ -46,6 +46,8 @@ Repository files remain on their owning machine. Content read by the agent and t
 
 ## Getting started
 
+> **Use your actual plugin name:** `@WebCodex` (or `@webcodex`) in examples must be replaced with the exact name of the plugin you connected in ChatGPT. For example, if your home plugin is named `WebCodex-Hom`, use `@WebCodex-Hom`; choose the corresponding plugin for your work environment. When using scripts to create chats, resume conversations, or launch child GPT agents, also update their mention selection, selected-plugin checks, and approval-dialog matching to the same name.
+
 ### Daily use: Desktop or a regular Server + Runner
 
 For Windows / macOS, follow [Desktop installation](docs/desktop-install.md), then [Using Desktop](docs/desktop-guide.md) to register a working directory, configure the connection, and check Runner availability. For CLI, Linux, existing Servers, or advanced setup, see [Full Setup](docs/PERSONAL_SETUP.md).
