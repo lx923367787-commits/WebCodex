@@ -622,6 +622,12 @@ fn map_cli_catalog(
         || catalog.models.is_empty()
         || !bounded_options(&catalog.models, 256, 128)
         || !bounded_options(&catalog.efforts, 32, 64)
+        || webcodex_core::agent_cli::validate_model_efforts(
+            &catalog.models,
+            &catalog.efforts,
+            &catalog.model_efforts,
+        )
+        .is_err()
     {
         return Err(invalid.into());
     }
@@ -634,6 +640,7 @@ fn map_cli_catalog(
             executable_sha256: executable_sha256.into(),
             models: catalog.models,
             efforts: catalog.efforts,
+            model_efforts: catalog.model_efforts,
             source: catalog.source,
             resource_set_id: catalog.resource_set_id,
             resource_manifest_hash: catalog.resource_manifest_hash,
@@ -787,6 +794,7 @@ mod tests {
             cli_version: "observed-version".into(),
             models: vec!["observed-model".into()],
             efforts: Vec::new(),
+            model_efforts: Default::default(),
             source: "installed_help".into(),
             status: "ready".into(),
             message: "Raw probe diagnostics are not projected".into(),

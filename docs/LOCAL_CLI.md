@@ -49,6 +49,15 @@ directories; installer symlinks can point to a new version without a new resourc
 approval. Explicit PATH/profile settings take precedence. A credential-free
 system proxy is used per process when no explicit proxy override exists.
 
+Codex and Claude adapters read their installed structured model catalogs. When
+the catalog supplies reasoning choices per model, both selection and execution
+validate that exact model's choices. Codex completion is its terminal protocol
+event; an earlier error event cannot become success after a later completion.
+For Claude recipes that disable user customizations, the Runner projects only
+the installed CLI's account/gateway/model settings into that child process.
+Explicit environment values win. These private values never enter discovery
+responses or saved call receipts, and unrelated executables receive no mapping.
+
 Missing installations, unsupported automatic metadata and expired accounts are
 different states. For an adapter without automatic invocation metadata, use the
 raw native-argument form after inspecting actual CLI help. Never invent options.

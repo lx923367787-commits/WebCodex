@@ -407,6 +407,13 @@ impl ToolRuntime {
 /// Model tools never accept a management credential. Run credentials can call
 /// only model broker routes, never diagnostics, exports, SQL or administration.
 pub(crate) fn model_route(path: &str) -> bool {
+    // Startup checks carry the existing exact project credential before any
+    // model Agent is enrolled. This read-only route keeps its normal bearer,
+    // project ownership and scope checks; business Connector routes do not.
+    if path == crate::route_metadata::spec(crate::route_metadata::RouteId::ConnectorReadiness).path
+    {
+        return false;
+    }
     path == "/mcp"
         || crate::route_metadata::path_has_surface(
             path,

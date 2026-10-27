@@ -319,6 +319,13 @@ fn gate_router(config: Arc<crate::Config>, db: Arc<crate::Database>) -> Router {
                 .push(Router::with_path("shell/agent/offline").post(echo_ok))
                 .push(Router::with_path("shell/agent/poll").post(echo_ok))
                 .push(Router::with_path("shell/agent/result").post(echo_ok))
+                .push(
+                    Router::with_path(
+                        crate::runner_protocol::RUNNER_AGENT_EXECUTION_CLOSE_RECEIPT_PATH
+                            .trim_start_matches("/api/"),
+                    )
+                    .post(echo_ok),
+                )
                 .push(Router::with_path("shell/agent/persistent_shell_result").post(echo_ok))
                 .push(Router::with_path("shell/agent/job_update").post(echo_ok))
                 .push(Router::with_path("agents/ws").get(echo_ok)),

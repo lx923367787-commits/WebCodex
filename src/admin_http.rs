@@ -709,7 +709,9 @@ mod tests {
             .filter(|spec| spec.surface == crate::route_metadata::RouteSurface::Admin);
         assert!(admin
             .clone()
-            .all(|spec| spec.path.starts_with("/api/admin/")));
+            .all(|spec| spec.path.starts_with("/api/admin/")
+                || (spec.id == crate::route_metadata::RouteId::OfficeControl
+                    && spec.path == "/api/office/control")));
         assert!(admin.all(|spec| !crate::route_metadata::path_has_surface(
             spec.path,
             crate::route_metadata::RouteSurface::HostConsole,

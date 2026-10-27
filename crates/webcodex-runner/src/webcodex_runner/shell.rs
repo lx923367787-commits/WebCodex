@@ -414,6 +414,12 @@ fn configured_process_command(
         Some(profile) => apply_env_snapshot(&mut cmd, &profile.env_snapshot),
         None => apply_shell_environment(&mut cmd, shell)?,
     }
+    if shell.environment_mode == ShellEnvironmentMode::Inherit && profile.is_none() {
+        webcodex_process::cli_registry::apply_installed_cli_account_environment(
+            Path::new(&resolved_program),
+            &mut cmd,
+        )?;
+    }
     #[cfg(windows)]
     for (key, value) in native_cli_environment(shell, profile, program, args, &resolved_program)? {
         cmd.env(key, value);

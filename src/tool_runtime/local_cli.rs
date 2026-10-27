@@ -232,10 +232,21 @@ pub(crate) async fn start_selected(
     if capabilities.status != "ready" || !capabilities.models.contains(&request.model) {
         return denial("local_cli_model_not_discovered");
     }
+    let levels = if capabilities.model_efforts.is_empty() {
+        &capabilities.efforts
+    } else {
+        let Some(levels) = capabilities.model_efforts.get(&request.model) else {
+            return denial("local_cli_model_not_discovered");
+        };
+        levels
+    };
     if request
         .effort
         .as_ref()
-        .is_some_and(|effort| !capabilities.efforts.contains(effort))
+        .is_some_and(|effort| !levels.contains(effort))
+        || (request.effort.is_none()
+            && !capabilities.model_efforts.is_empty()
+            && !levels.is_empty())
     {
         return denial("local_cli_effort_not_discovered");
     }

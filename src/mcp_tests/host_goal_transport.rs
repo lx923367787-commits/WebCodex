@@ -286,14 +286,34 @@ async fn call_host_goal_over_mcp(
     result
 }
 
-#[tokio::test]
-async fn host_goal_mcp_plan_confirmation_claim_and_fresh_conversation_restore() {
-    host_goal_mcp_workflow(ModelSurface::LocalCoding).await;
+#[test]
+fn host_goal_mcp_plan_confirmation_claim_and_fresh_conversation_restore() {
+    run_host_goal_workflow(ModelSurface::LocalCoding);
 }
 
-#[tokio::test]
-async fn host_goal_mcp_gateway_plan_confirmation_claim_and_fresh_conversation_restore() {
-    host_goal_mcp_workflow(ModelSurface::AdaptiveRuntime).await;
+#[test]
+fn host_goal_mcp_gateway_plan_confirmation_claim_and_fresh_conversation_restore() {
+    run_host_goal_workflow(ModelSurface::AdaptiveRuntime);
+}
+
+fn run_host_goal_workflow(surface: ModelSurface) {
+    // This multi-step integration fixture retains a full runtime/router across
+    // awaits. Give only these tests the same bounded stack as file-import E2E.
+    let result = std::thread::Builder::new()
+        .name("host-goal-mcp-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(host_goal_mcp_workflow(surface));
+        })
+        .unwrap()
+        .join();
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 async fn host_goal_mcp_workflow(surface: ModelSurface) {

@@ -64,6 +64,7 @@ pub(crate) fn discover_inventory(
             version: raw.version,
             models: raw.models,
             efforts: raw.efforts,
+            model_efforts: raw.model_efforts,
             source: raw.source.into(),
             status: raw.status.into(),
             message: raw.message,
@@ -176,7 +177,9 @@ fn project_catalog(
 ) -> Result<AgentCliCatalog, String> {
     deadline.require(Duration::ZERO)?;
     let expected_source = match adapter_for(resource)?.metadata {
-        webcodex_core::cli_adapter::CliMetadataRecipe::AntigravityModels => "live_catalog",
+        webcodex_core::cli_adapter::CliMetadataRecipe::AntigravityModels
+        | webcodex_core::cli_adapter::CliMetadataRecipe::CodexAppServer
+        | webcodex_core::cli_adapter::CliMetadataRecipe::ClaudeInitialize => "live_catalog",
         _ => "installed_help",
     };
     if raw.provider_id != query.provider.id()
@@ -206,6 +209,7 @@ fn project_catalog(
         cli_version: raw.version,
         models: raw.models,
         efforts: raw.efforts,
+        model_efforts: raw.model_efforts,
         source: raw.source.into(),
         status: raw.status.into(),
         message: raw.message,

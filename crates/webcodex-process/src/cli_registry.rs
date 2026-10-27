@@ -168,6 +168,50 @@ fn native(path: &Path) -> bool {
         )
     }
 }
+
+/// Apply a locally configured account recipe only to its exact current native
+/// installation and declared invocation. A similarly named executable gains no credential
+/// mapping. Generic processes do not depend on an optional adapter registry.
+pub fn apply_installed_cli_account_environment(
+    program: &Path,
+    command: &mut std::process::Command,
+) -> Result<(), String> {
+    if !program.is_absolute() {
+        return Ok(());
+    }
+    let Ok(actual) = program.canonicalize() else {
+        return Ok(());
+    };
+    let (Ok(adapters), Ok(installations)) =
+        (configured_cli_adapters(), discover_cli_installations(&[]))
+    else {
+        return Ok(());
+    };
+    for installation in installations.iter().filter(|entry| entry.native) {
+        if installation.executable.canonicalize().ok().as_ref() != Some(&actual) {
+            continue;
+        }
+        if let Some(adapter) = adapters
+            .iter()
+            .find(|entry| entry.id == installation.provider_id)
+        {
+            let Some(invocation) = &adapter.invocation else {
+                continue;
+            };
+            let expected: Vec<_> = invocation
+                .fixed_args
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect();
+            let actual_args: Vec<_> = command.get_args().map(std::ffi::OsString::from).collect();
+            if !actual_args.ends_with(&expected) {
+                continue;
+            }
+            crate::cli_catalog::apply_native_account_environment(adapter, command)?;
+        }
+    }
+    Ok(())
+}
 fn native_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     if let Some(text) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {

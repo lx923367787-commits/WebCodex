@@ -292,7 +292,12 @@ mod tests {
         assert_eq!(short.effective_timeout_secs, 5);
         assert_eq!(short.sync_wait_secs, 5);
 
-        assert_eq!(StructuredExecutionBudget::resolve(Some(900)).unwrap().effective_timeout_secs, 900);
+        assert_eq!(
+            StructuredExecutionBudget::resolve(Some(900))
+                .unwrap()
+                .effective_timeout_secs,
+            900
+        );
         assert!(StructuredExecutionBudget::resolve(Some(3600)).is_ok());
         assert!(StructuredExecutionBudget::resolve(Some(3601)).is_err());
 

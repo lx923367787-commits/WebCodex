@@ -459,12 +459,14 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
                 prefix_args: vec![],
                 model_flag: "--engine".into(),
                 effort_flag: Some("--thinking".into()),
+                effort_config_key: None,
                 effort_required: true,
                 fixed_args: vec!["--json".into()],
                 input: CliInputFormat::Text,
                 result: Some(CliResultContract {
                     format: CliResultFormat::Json,
                     failure_flag: "is_error".into(),
+                    failure_events: vec![],
                     terminal_field: Some("type".into()),
                     terminal_value: Some("result".into()),
                 }),
@@ -496,7 +498,11 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
                 installed: true,
                 version: "any-new-version".into(),
                 models: vec!["chosen-model".into()],
-                efforts: vec!["low".into()],
+                efforts: vec!["low".into(), "high".into()],
+                model_efforts: std::collections::BTreeMap::from([(
+                    "chosen-model".into(),
+                    vec!["low".into()],
+                )]),
                 source: "installed_help".into(),
                 status: "ready".into(),
                 message: String::new(),
@@ -518,6 +524,14 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
         assert!(metadata.output["capabilities"]
             .get("executableIdentity")
             .is_none());
+        for effort in [serde_json::Value::Null, json!("high")] {
+            let rejected = invoke(&runtime, &binding, json!({"action":"start","project":project,"cli_id":"third-party","model":"chosen-model","effort":effort,"instruction":"Explicit task","idempotency_key":"invalid-selection"})).await;
+            assert!(!rejected.success);
+            assert_eq!(
+                rejected.output["error_kind"],
+                "local_cli_effort_not_discovered"
+            );
+        }
         let started = invoke(
             &runtime,
             &binding,

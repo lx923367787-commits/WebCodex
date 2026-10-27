@@ -1674,6 +1674,35 @@ async fn connector_credential_cannot_cross_agent_auth_group() {
 }
 
 #[tokio::test]
+async fn connector_readiness_allows_startup_without_granting_business_authority() {
+    let _auth = crate::auth::AuthEnvGuard::auth_required();
+    let fixture = authenticated_project_fixture().await;
+    let (status, body) = post_connector(
+        &fixture,
+        "/api/connector/readiness",
+        &fixture.credential,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ready"], true);
+    let readiness_requests = fixture.recorded_requests.lock().unwrap().len();
+    let (status, body) = post_connector(
+        &fixture,
+        "/api/connector/task/start",
+        &fixture.credential,
+        serde_json::json!({"goal":"must enroll first","mode":"read_only"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "agent_identity_required");
+    assert_eq!(
+        fixture.recorded_requests.lock().unwrap().len(),
+        readiness_requests
+    );
+}
+
+#[tokio::test]
 async fn connector_readiness_is_scoped_to_request_principal() {
     // Expected pre-fix failure: readiness ignores the request AuthContext, so
     // another project's credential can distinguish online from offline.

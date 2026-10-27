@@ -39,6 +39,25 @@ describe("AI office", () => {
     await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 7, expect.objectContaining({ providers: [expect.objectContaining({ provider_id: "manual-cli", enabled: true })] })));
     expect(api.refreshCli).not.toHaveBeenCalled();
   });
+  it("limits reasoning options to the selected model and clears stale effort", async () => {
+    const api = apiFixture();
+    api.refreshCli = vi.fn<AiOfficeApi["refreshCli"]>(async (id) => ({ providerId: id, label: "WorkBuddy", installed: true, version: "test", models: ["model-a", "model-b", "model-c"], efforts: ["low", "high"], modelEfforts: { "model-a": ["low"], "model-b": ["high"], "model-c": [] }, source: "live_catalog", status: "ready", message: "Model catalog", checkedAt: "now", accountAvailabilityVerified: false }));
+    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "刷新 WorkBuddy 模型列表" }));
+    await screen.findByText("Model catalog");
+    const model = screen.getByLabelText("WorkBuddy 模型");
+    const effort = screen.getByLabelText("WorkBuddy 思考强度");
+    fireEvent.change(model, { target: { value: "model-a" } });
+    expect(within(effort).queryByText("high")).not.toBeInTheDocument();
+    fireEvent.change(effort, { target: { value: "low" } });
+    fireEvent.change(model, { target: { value: "model-b" } });
+    expect(effort).toHaveValue("");
+    expect(within(effort).queryByText("low")).not.toBeInTheDocument();
+    expect(within(effort).getByText("high")).toBeInTheDocument();
+    fireEvent.change(model, { target: { value: "model-c" } });
+    expect(effort).toBeDisabled();
+  });
   it("renders discovered third-party CLIs and keeps missing saved selections explicit", async () => {
     const api = apiFixture();
     api.discoverCli = vi.fn(async () => [{ providerId: "custom-cli", label: "Custom CLI", installed: true, native: true, adapterAvailable: true, status: "discovered", message: "已发现" }]);

@@ -209,6 +209,7 @@ impl JobManager {
                 version: raw.cli_version,
                 models: raw.models,
                 efforts: raw.efforts,
+                model_efforts: raw.model_efforts,
                 source: raw.source,
                 status: raw.status,
                 message: raw.message,

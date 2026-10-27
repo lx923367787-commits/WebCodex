@@ -61,6 +61,7 @@ export interface CliCatalog {
   version: string | null;
   models: string[];
   efforts: string[];
+  modelEfforts?: Record<string, string[]>;
   source: "installed_help" | "live_catalog" | "unavailable";
   status: "ready" | "unavailable" | "error";
   message: string;

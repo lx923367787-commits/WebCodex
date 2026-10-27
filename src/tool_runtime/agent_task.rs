@@ -558,7 +558,9 @@ impl ToolRuntime {
                 replay_key,
                 context.instruction.clone(),
                 config,
-                Some(timeout_secs.unwrap_or(webcodex_core::coding_agent::CODING_AGENT_LONG_RESPONSE_TIMEOUT_SECS)),
+                Some(timeout_secs.unwrap_or(
+                    webcodex_core::coding_agent::CODING_AGENT_LONG_RESPONSE_TIMEOUT_SECS,
+                )),
                 auth,
             )
             .await

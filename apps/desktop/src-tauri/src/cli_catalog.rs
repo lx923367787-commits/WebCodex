@@ -66,7 +66,11 @@ fn selected_system_proxy(
     explicit_proxy: bool,
     candidate: Option<platform::SystemProxyCandidate>,
 ) -> Result<Option<String>, String> {
-    if provider != Provider::Antigravity || explicit_proxy {
+    if !matches!(
+        provider,
+        Provider::Antigravity | Provider::Codex | Provider::Claude
+    ) || explicit_proxy
+    {
         return Ok(None);
     }
     let Some(candidate) = candidate.filter(|candidate| candidate.enabled) else {

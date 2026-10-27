@@ -68,6 +68,7 @@ pub(crate) struct ObservedCliProvider {
     pub executable_sha256: String,
     pub models: Vec<String>,
     pub efforts: Vec<String>,
+    pub model_efforts: std::collections::BTreeMap<String, Vec<String>>,
     pub source: String,
     pub resource_set_id: String,
     /// Resource version covered by the provider-controls review. Registry's
@@ -497,12 +498,23 @@ fn cli_selection_discovered(
     model: &str,
     effort: Option<&str>,
 ) -> bool {
+    let levels = if provider.model_efforts.is_empty() {
+        &provider.efforts
+    } else {
+        let Some(levels) = provider.model_efforts.get(model) else {
+            return false;
+        };
+        levels
+    };
     provider.models.iter().any(|known| known == model)
         && match effort {
-            Some(effort) => provider.efforts.iter().any(|known| known == effort),
+            Some(effort) => levels.iter().any(|known| known == effort),
             // Antigravity's exact live slug already pins reasoning (e.g.
             // gemini-3.8-flash-high); --effort is an optional override.
             None => {
+                if !provider.model_efforts.is_empty() {
+                    return levels.is_empty();
+                }
                 provider
                     .controls
                     .as_ref()
@@ -556,6 +568,12 @@ fn validate_catalog(
             || provider.efforts.len() > 32
             || provider.models.iter().any(|value| !bounded(value, 256))
             || provider.efforts.iter().any(|value| !bounded(value, 64))
+            || webcodex_core::agent_cli::validate_model_efforts(
+                &provider.models,
+                &provider.efforts,
+                &provider.model_efforts,
+            )
+            .is_err()
         {
             return Err("agent_team_catalog_unavailable".into());
         }
@@ -617,7 +635,7 @@ fn inventory_projection(inventory: webcodex_core::agent_cli::AgentCliInventory) 
 
 fn catalog_projection(catalog: &AgentTeamCatalog) -> Value {
     json!({"project":catalog.project,"observed_at_ms":catalog.observed_at_ms,"expires_at_ms":catalog.expires_at_ms,
-        "providers":catalog.providers.iter().map(|p|json!({"provider_id":p.provider_id,"version":p.version,"models":p.models,"efforts":p.efforts,"source":p.source,"execution_controls_verified":require_provider_controls(p).is_ok()})).collect::<Vec<_>>(),
+        "providers":catalog.providers.iter().map(|p|json!({"provider_id":p.provider_id,"version":p.version,"models":p.models,"efforts":p.efforts,"model_efforts":p.model_efforts,"source":p.source,"execution_controls_verified":require_provider_controls(p).is_ok()})).collect::<Vec<_>>(),
         "unavailable_providers":catalog.unavailable_providers,
         "ordinary_local_cli_tool":"cli","ordinary_local_cli_requires_isolation_resources":false,
         "thinking_profile_ids":catalog.host_profile_ids,"host_profiles_expires_at_ms":catalog.host_profiles_expires_at_ms,
@@ -1157,11 +1175,23 @@ async fn start(
         let Some(capabilities) = inventory.capabilities else {
             return denied("agent_cli_capabilities_missing");
         };
+        if !capabilities.installed || capabilities.status != "ready" {
+            return denied("agent_cli_installation_unavailable");
+        }
         if inventory.target != catalog.target
             || capabilities.executable_identity != format!("sha256:{}", provider.executable_sha256)
             || capabilities.version != provider.version
         {
             return denied("agent_cli_installation_changed");
+        }
+        let current_selection = ObservedCliProvider {
+            models: capabilities.models,
+            efforts: capabilities.efforts,
+            model_efforts: capabilities.model_efforts,
+            ..provider.clone()
+        };
+        if !cli_selection_discovered(&current_selection, &slot.model, slot.effort.as_deref()) {
+            return denied("agent_cli_selection_not_discovered");
         }
     }
     // Actual resource facts come from authenticated Runner registration, not

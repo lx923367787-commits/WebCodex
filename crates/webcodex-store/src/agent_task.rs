@@ -14,16 +14,18 @@ use webcodex_core::coding_agent::{
     merge_coding_agent_run_snapshot, validate_coding_agent_run_snapshot, CodingAgentExecutionState,
     CodingAgentObservationMerge, CodingAgentRunSnapshot, CodingAgentRunState, CodingAgentTerminal,
 };
+#[cfg(test)]
+#[path = "agent_cli_worker_task_tests.rs"]
+mod cli_worker_task_tests;
 #[path = "agent_public_task.rs"]
 mod public_execution;
 #[cfg(test)]
 #[path = "agent_public_task_tests.rs"]
 mod public_execution_tests;
-#[cfg(test)]
-#[path = "agent_cli_worker_task_tests.rs"]
-mod cli_worker_task_tests;
 mod takeover;
-pub(crate) use public_execution::{complete_cli_worker_task_on_connection, public_execution_on_connection};
+pub(crate) use public_execution::{
+    complete_cli_worker_task_on_connection, public_execution_on_connection,
+};
 pub use public_execution::{
     AgentCliWorkerTaskSnapshot, AgentPublicTaskExecution, AgentPublicTaskMutation,
 };

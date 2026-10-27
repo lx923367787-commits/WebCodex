@@ -62,8 +62,29 @@ impl CliResultVerifier {
                 },
             )
             .collect();
+        if let Some(field) = &contract.terminal_field {
+            if values.iter().any(|value| {
+                value
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|event| {
+                        contract
+                            .failure_events
+                            .iter()
+                            .any(|failure| failure == event)
+                    })
+            }) {
+                return Err("agent_cli_reported_error");
+            }
+        }
         if results.len() != 1 {
             return Err("agent_cli_terminal_result_missing_or_ambiguous");
+        }
+        if contract.format == CliResultFormat::JsonLines && values.last() != Some(results[0]) {
+            return Err("agent_cli_terminal_result_missing_or_ambiguous");
+        }
+        if contract.failure_flag.is_empty() && !contract.failure_events.is_empty() {
+            return Ok(());
         }
         match results[0]
             .get(&contract.failure_flag)
@@ -83,9 +104,34 @@ mod tests {
         CliResultContract {
             format: CliResultFormat::Json,
             failure_flag: "is_error".into(),
+            failure_events: vec![],
             terminal_field: None,
             terminal_value: None,
         }
+    }
+    #[test]
+    fn codex_requires_one_final_completed_event_without_protocol_errors() {
+        let adapter = crate::cli_adapter::cli_adapters(&[])
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == "codex")
+            .unwrap();
+        let contract = adapter.invocation.unwrap().result;
+        for output in [
+            "{\"type\":\"turn.failed\"}\n",
+            "{\"type\":\"turn.completed\"}\n{\"type\":\"error\"}\n",
+            "{\"type\":\"error\"}\n{\"type\":\"turn.completed\"}\n",
+            "{\"type\":\"turn.completed\"}\n{\"type\":\"turn.started\"}\n",
+        ] {
+            let mut verifier = CliResultVerifier::new(contract.clone());
+            verifier.observe_stdout(output.as_bytes());
+            assert!(verifier.finish().is_err());
+        }
+        let mut success = CliResultVerifier::new(contract);
+        success.observe_stdout(
+            b"{\"type\":\"turn.started\"}\n{\"type\":\"turn.completed\",\"usage\":{}}\n",
+        );
+        assert!(success.finish().is_ok());
     }
     #[test]
     fn zero_process_exit_cannot_hide_a_cli_error_or_missing_result() {

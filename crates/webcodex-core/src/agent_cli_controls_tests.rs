@@ -2,6 +2,35 @@ use super::*;
 use crate::runner_protocol::AgentExecutionResourceDescriptor;
 
 #[test]
+fn codex_native_config_effort_is_quoted_and_cannot_retarget_an_override() {
+    let adapter = crate::cli_adapter::cli_adapters(&[])
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == "codex")
+        .unwrap();
+    let mut value = record(AgentCliProvider::parse("codex").unwrap());
+    value.loading_method = "registered-native-cli-v1".into();
+    value.adapter = Some(adapter.clone());
+    let (base, _) = adapter
+        .invocation("observed-model", Some("high"), "task")
+        .unwrap();
+    assert_eq!(base[4], "model_reasoning_effort=\"high\"");
+    let args = compose_reviewed_cli_argv(&value, &base).unwrap();
+    validate_reviewed_cli_argv(&value, &args).unwrap();
+    let mut forged = args.clone();
+    forged[4] = "sandbox_mode=\"danger-full-access\"".into();
+    assert!(validate_reviewed_cli_argv(&value, &forged).is_err());
+    let mut unquoted = args;
+    unquoted[4] = "model_reasoning_effort=high".into();
+    assert!(validate_reviewed_cli_argv(&value, &unquoted).is_err());
+    value.fixed_args.push(ReviewedControlArg {
+        flag: "--config".into(),
+        value: Some("override".into()),
+    });
+    assert!(value.validate_shape().is_err());
+}
+
+#[test]
 fn registered_native_adapter_uses_its_own_bound_protocol_without_a_product_enum() {
     let provider = AgentCliProvider::parse("third-party-cli").unwrap();
     let mut adapter = crate::cli_adapter::cli_adapters(&[]).unwrap().remove(0);

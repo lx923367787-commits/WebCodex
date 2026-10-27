@@ -34,6 +34,8 @@ fn server(status: u16, response: Value) -> (String, std::thread::JoinHandle<(Str
                 Err(error) => panic!("fixture accept: {error}"),
             }
         };
+        // Accepted sockets inherit the listener's nonblocking mode on Windows.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();

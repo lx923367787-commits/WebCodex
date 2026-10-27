@@ -2078,9 +2078,7 @@ async fn team_cli_fast_failure_retains_public_job_for_recovery() {
             )
             .await
     });
-    let request =
-        wait_for_runner_request_for_instance(&runtime, "team-retained-job", "inst")
-            .await;
+    let request = wait_for_runner_request_for_instance(&runtime, "team-retained-job", "inst").await;
     assert_eq!(request.kind, "start_process_job");
     update_process_job(
         &runtime,

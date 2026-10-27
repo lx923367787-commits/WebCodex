@@ -80,6 +80,8 @@ pub struct AgentCliCapabilities {
     pub version: String,
     pub models: Vec<String>,
     pub efforts: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_efforts: std::collections::BTreeMap<String, Vec<String>>,
     pub source: String,
     pub status: String,
     pub message: String,
@@ -152,6 +154,11 @@ impl AgentCliInventory {
             text(&capabilities.label, 128, false)?;
             text(&capabilities.version, 128, capabilities.status != "ready")?;
             text(&capabilities.message, 2048, true)?;
+            validate_model_efforts(
+                &capabilities.models,
+                &capabilities.efforts,
+                &capabilities.model_efforts,
+            )?;
             for (options, max) in [(&capabilities.models, 128), (&capabilities.efforts, 64)] {
                 let mut seen = BTreeSet::new();
                 for option in options {
@@ -278,6 +285,8 @@ pub struct AgentCliCatalog {
     pub cli_version: String,
     pub models: Vec<String>,
     pub efforts: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_efforts: std::collections::BTreeMap<String, Vec<String>>,
     pub source: String,
     pub status: String,
     pub message: String,
@@ -286,6 +295,32 @@ pub struct AgentCliCatalog {
     /// Fixed metadata probes never verify model entitlement or nested execution.
     pub account_availability_verified: bool,
     pub nested_delegation_verified_disabled: bool,
+}
+
+/// A nonempty model map is complete; an omitted key must never fall back to
+/// another model's reasoning options. Empty maps retain legacy CLI-wide lists.
+pub fn validate_model_efforts(
+    models: &[String],
+    efforts: &[String],
+    mapping: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<(), String> {
+    if mapping.is_empty() {
+        return Ok(());
+    }
+    if mapping.len() != models.len() || mapping.len() > 256 {
+        return Err("agent_cli_model_efforts_invalid".into());
+    }
+    for (model, levels) in mapping {
+        let unique: BTreeSet<_> = levels.iter().collect();
+        if !models.contains(model)
+            || levels.len() > 32
+            || unique.len() != levels.len()
+            || levels.iter().any(|level| !efforts.contains(level))
+        {
+            return Err("agent_cli_model_efforts_invalid".into());
+        }
+    }
+    Ok(())
 }
 impl AgentCliCatalog {
     pub fn validate_for(
@@ -325,6 +360,7 @@ impl AgentCliCatalog {
         if self.models.len() > 256 || self.efforts.len() > 32 {
             return Err("agent_cli_catalog_limit".into());
         }
+        validate_model_efforts(&self.models, &self.efforts, &self.model_efforts)?;
         for (values, limit) in [(&self.models, 128), (&self.efforts, 64)] {
             let mut seen = BTreeSet::new();
             for value in values {
@@ -348,7 +384,11 @@ impl AgentCliCatalog {
                     .find(|adapter| adapter.id == self.provider.id())
             });
         let expected_source = match selected_adapter.as_ref().map(|adapter| adapter.metadata) {
-            Some(crate::cli_adapter::CliMetadataRecipe::AntigravityModels) => "live_catalog",
+            Some(
+                crate::cli_adapter::CliMetadataRecipe::AntigravityModels
+                | crate::cli_adapter::CliMetadataRecipe::CodexAppServer
+                | crate::cli_adapter::CliMetadataRecipe::ClaudeInitialize,
+            ) => "live_catalog",
             _ => "installed_help",
         };
         if self.source != "unavailable" && self.source != expected_source {

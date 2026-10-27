@@ -1173,7 +1173,9 @@ fn job_manager_stop_all_clears_queue_and_requests_running_stop() {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let running_child = Arc::new(Mutex::new(
-        ManagedChild::spawn(&mut running_command).unwrap(),
+        crate::webcodex_runner::jobs::child::JobChild::from(
+            ManagedChild::spawn(&mut running_command).unwrap(),
+        ),
     ));
     let running_pid = lock_unpoison(&running_child).id();
     jobs.jobs.lock().unwrap().insert(

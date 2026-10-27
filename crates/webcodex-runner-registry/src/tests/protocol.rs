@@ -449,7 +449,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
             hostname: None,
             host_context: None,
             capabilities: RunnerCapabilities {
-                agent_isolated_execution_v1: false,
+                agent_isolated_execution_v1: true,
                 shell: true,
                 file_read: true,
                 file_write: true,
@@ -476,7 +476,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
                 structured_go_test_tool: true,
                 structured_go_test_packages: true,
                 structured_process_argv: true,
-                local_cli: false,
+                local_cli: true,
                 structured_script_payload: true,
                 internal_posix_script: true,
                 structured_execution_jobs: true,
