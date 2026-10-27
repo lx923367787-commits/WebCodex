@@ -5,6 +5,8 @@ use webcodex_store::{
     AgentEnrollmentPolicy, AgentEnrollmentPurpose, NewAgentEnrollment, VerifiedAgentRun,
 };
 
+mod decision;
+
 struct TeamFixture {
     _temp: tempfile::TempDir,
     db: crate::Database,

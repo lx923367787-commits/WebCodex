@@ -564,7 +564,7 @@ pub(crate) fn assignment(db: &Database, binding: &VerifiedAgentRun, args: &Value
     }
     match db.read_agent_enrollment(binding) {
         Ok(projection) => ToolResult::ok(
-            json!({"assignment":projection,"named_project":db.agent_native_workspace(binding).ok()}),
+            json!({"assignment":projection,"named_project":db.agent_native_workspace(binding).ok(),"evidence_review_guidance":crate::agent_team_decision::GUIDANCE}),
         ),
         Err(error) => crate::agent_isolation::denial(error.code()),
     }

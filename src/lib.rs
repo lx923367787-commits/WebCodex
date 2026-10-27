@@ -32,6 +32,7 @@ mod agent_isolation;
 mod agent_isolation_tests;
 mod agent_private_files;
 mod agent_team;
+mod agent_team_decision;
 mod agent_team_catalog;
 mod agent_team_delivery;
 mod agent_team_execution;

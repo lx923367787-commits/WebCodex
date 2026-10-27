@@ -61,6 +61,7 @@ pub struct AgentTeamPlanView {
     pub tasks: Vec<AgentTeamTask>,
     pub completion: crate::TeamCompletion,
     pub receipts: AgentTeamReceiptPage,
+    pub decision_reviews: Vec<crate::team_decision::DecisionSummary>,
 }
 
 fn assignment_error(error: crate::AgentIsolationError) -> CommunicationStoreError {
@@ -183,6 +184,7 @@ fn public_plan_on(
     let completion = crate::team_completion::completion_on(conn, principal, &plan)?;
     let receipts = receipts_on(conn, principal, project, Some(root), None, offset, limit)?;
     Ok(AgentTeamPlanView {
+        decision_reviews: crate::team_decision::summaries_on(conn, root)?,
         cli_rounds: cli_round::public_rounds_on(conn, root)?,
         plan,
         tasks,

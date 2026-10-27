@@ -34,6 +34,7 @@ impl Database {
                 .map_err(|_| anyhow::anyhow!("agent state unavailable"))?;
             crate::agent_meeting::init_agent_meeting_tables(&conn)?;
             crate::team_task::init_team_task_tables(&conn)?;
+            crate::team_decision::init_tables(&conn)?;
             crate::agent_cli_delivery::init_agent_cli_delivery_tables(&conn)?;
             crate::team_agent::init_team_agent_tables(&conn)?;
             crate::cli_fallback::init_cli_fallback_tables(&conn)?;

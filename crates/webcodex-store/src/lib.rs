@@ -58,6 +58,9 @@ mod cli_fallback;
 mod communication;
 mod team_agent;
 mod team_completion;
+pub mod team_decision;
+#[cfg(test)]
+mod team_decision_tests;
 pub mod team_task;
 pub use cli_fallback::{
     CliFallbackClaim, CliFallbackObservation, CliFallbackRecord, CliFallbackResolution,

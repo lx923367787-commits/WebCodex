@@ -162,6 +162,7 @@ pub(crate) fn supports(tool: &str) -> bool {
         || matches!(
             tool,
             "team_policy_get"
+                | "team_decision"
                 | "team_plan_register"
                 | "team_plan_list"
                 | "team_plan_read"
@@ -206,6 +207,10 @@ pub(crate) fn call(
         };
     }
     match tool {
+        "team_decision" => {
+            let request = input!(webcodex_store::team_decision::TeamDecisionRequest);
+            output(db.team_decision(binding, request))
+        }
         "team_policy_get" => {
             let request = input!(Task);
             output(db.agent_team_policy(binding, &request.task_id))
@@ -359,14 +364,15 @@ pub(crate) fn tool_specs() -> Vec<Value> {
         ("team_policy_get","Read public project team policy and your immutable assignment budget. No policy changes are allowed.",exact.clone()),
         ("team_plan_register","Manager only: freeze the assigned root plan using already delegated child tasks. Original policy bounds, per-member limits, assignment total budgets and terminal-task rules all apply. Each CLI call can include bounded immutable inputs with name/content; supply all required material since its workspace starts empty. Reuse a key only for the same intent.",register),
         ("team_plan_list","List only the plan for your assigned manager task, with exact bounded pagination. This cannot enumerate another task owned by the same human.",page.clone()),
-        ("team_plan_read","Manager only: read your original frozen plan, separately authorized immutable cli_rounds metadata (slot selections, input hashes/counts and first_call_indices; source bundles are not repeated), public task briefs, full-ledger completion gate and one receipt page. A receipt page never substitutes for completion evidence.",root_page),
+        ("team_plan_read","Manager only: read your original frozen plan, separately authorized immutable cli_rounds metadata (slot selections, input hashes/counts and first_call_indices; source bundles are not repeated), public task briefs, full-ledger completion gate, current decision_reviews and one receipt page. A receipt page never substitutes for completion evidence. Agent/CLI execution counts are not votes; report each registered issue's current conclusion and independent evidence counts.",root_page),
         ("team_task_read","Read the public title, brief and state of your exact assigned task. Private Goal, Memory and logs are excluded.",exact.clone()),
         ("team_receipt_list","Read bounded execution receipts: managers see their explicitly delegated plan; members see only their own task. Receipt text and raw logs are excluded.",page),
         ("team_member_create","Manager only: create a real child task and reserve an independent Member identity under your assigned root. Supply an explicit brief, authorized input snapshots, permitted room IDs and the child's CLI ceiling. Identity, project and private task directory are derived by the server. Returns public IDs, never a claim grant; this does not launch a host. Reuse the same key and identical request to recover the same child.",member_create),
         ("team_task_start","Start the public lifecycle of your exact assigned task using a stable idempotency key. This records logical ownership and does not start a process or grant new permissions. Exact replay returns the original execution receipt.",task_start),
         ("team_task_execution_read","Read the public lifecycle receipt of your exact assigned task, or null before it starts. This is not Runner process or stop evidence.",exact.clone()),
-        ("team_task_complete","Complete your exact assigned public task with its execution ID, current revision, succeeded or failed outcome, and stable completion key. Only publish authorized result summaries. The server requires quiescence and, for success, full-ledger team completion evidence. This neither stops processes nor completes a parent's task; exact replay preserves the original result.",task_complete),
+        ("team_task_complete","Complete your exact assigned public task with its execution ID, current revision, succeeded or failed outcome, and stable completion key. Only publish authorized result summaries. The server requires quiescence and, for success, full-ledger team completion evidence plus current verified support for explicitly required team_decision facts. Completion freezes decision_reviews; ordinary tasks without issues gain no evidence gate. Report insufficient/disputed conclusions honestly. This neither stops processes nor completes a parent's task; exact replay preserves the original result.",task_complete),
         ("team_cli_start","Request your own frozen CLI slot with an explicitly discovered fallback thinking profile and stable key. The server validates the actual provider catalog and delegation controls, creates one independent worker identity on the original slot, and dispatches only a committed isolated Job. Replays preserve original worker/target/model and never blindly resend unknown work. Missing prerequisites reject before reservation; an existing incomplete preparation requires reconciliation.",cli_start),
         ("team_agent_start","Manager only: queue an already created Member from your frozen plan using its exact task and enrollment receipt. Explicitly choose a current discovered thinking profile and a stable idempotency key. The server rechecks your assignment, plan, member identity and ordinary slot in one transaction. Exact replay retains the original queue binding; a queued receipt is not evidence that a host window started. Never supply credentials or invent another identity on retry.",agent_start),
-    ].into_iter().map(|(name,description,input)|json!({"name":name,"description":description,"inputSchema":input})).collect()
+    ].into_iter().map(|(name,description,input)|json!({"name":name,"description":description,"inputSchema":input}))
+        .chain(std::iter::once(crate::agent_team_decision::tool_spec())).collect()
 }

@@ -214,6 +214,7 @@ pub(crate) fn tool_scope(name: &str, args: &Value) -> &'static str {
             "project:read"
         }
         "goal_read" | "goal_bootstrap" => "project:read",
+        "team_decision" if args.get("action").and_then(Value::as_str) == Some("read") => "project:read",
         "team_policy_get"
         | "team_plan_list"
         | "team_plan_read"

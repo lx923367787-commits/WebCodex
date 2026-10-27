@@ -772,6 +772,7 @@ fn agent_team_execution_worker_observation_exposes_cas_without_private_completio
             completed_generation: Some(3),
             terminal_result: Some("private-result".into()),
             terminal_reason: Some("private-reason".into()),
+            decision_reviews: vec![],
         },
         completion_expected_revision: 7,
     };

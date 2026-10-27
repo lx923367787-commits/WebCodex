@@ -21,6 +21,7 @@ pub struct AgentPublicTaskExecution {
     pub completed_generation: Option<i64>,
     pub terminal_result: Option<String>,
     pub terminal_reason: Option<String>,
+    pub decision_reviews: Vec<crate::team_decision::DecisionSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,10 +102,11 @@ pub(crate) fn public_execution_on_connection(
     conn: &Connection,
     task: &str,
 ) -> Result<Option<AgentPublicTaskExecution>, CommunicationStoreError> {
+    let decision_reviews = crate::team_decision::completion_on(conn, task)?;
     conn.query_row("SELECT execution_id,task_id,agent_id,started_run_id,started_generation,state,revision,started_at_unix_ms,terminal_at_unix_ms,completed_run_id,completed_generation,terminal_result,terminal_reason FROM wc_agent_public_executions WHERE task_id=?1",[task],|r|Ok(AgentPublicTaskExecution {
         execution_id:r.get(0)?,task_id:r.get(1)?,agent_id:r.get(2)?,started_run_id:r.get(3)?,started_generation:r.get(4)?,
         state:AgentTaskState::from_db(&r.get::<_,String>(5)?,5)?,revision:r.get(6)?,started_at_unix_ms:r.get(7)?,terminal_at_unix_ms:r.get(8)?,
-        completed_run_id:r.get(9)?,completed_generation:r.get(10)?,terminal_result:r.get(11)?,terminal_reason:r.get(12)?,
+        completed_run_id:r.get(9)?,completed_generation:r.get(10)?,terminal_result:r.get(11)?,terminal_reason:r.get(12)?,decision_reviews:decision_reviews.clone(),
     })).optional().map_err(store_error)
 }
 
@@ -457,6 +459,7 @@ impl Database {
                 task_id,
             )?;
         }
+        crate::team_decision::freeze_completion(&tx, task_id, outcome == AgentTaskState::Succeeded)?;
         tx.execute("UPDATE wc_agent_public_executions SET state=?2,revision=revision+1,terminal_at_unix_ms=?3,completed_run_id=?4,completed_generation=?5,terminal_result=?6,terminal_reason=?7,completion_key_hash=?8,completion_request_hash=?9 WHERE task_id=?1",params![task_id,outcome.as_str(),now,binding.run_id(),binding.generation(),result,reason,key,hash]).map_err(store_error)?;
         // The canonical Task's terminal marker is intentionally not a legacy
         // attempt: latest_attempt_id remains NULL, so no legacy lookup occurs.
