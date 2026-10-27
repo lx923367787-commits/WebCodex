@@ -17,11 +17,15 @@ WebCodex supplies its Server, Runner, management CLI and integration code. It do
 
 ### Runner setup and acceptance
 
+The unified `cli` tool defaults to trusted local-user execution. It discovers the installed program, uses the existing local login and does not require a frozen team plan or version/hash resource approval. Explicit `execution_mode:"isolated"` retains the reviewed sandbox path. See [the complete interface and update behavior](LOCAL_CLI.md).
+
 1. Install the chosen CLI from its official distribution on the machine that will execute the work. Discover its actual version, model and effort options; do not assume another machine's defaults or entitlement.
 2. Sign in locally or configure that user's key using the CLI's supported mechanism. Do not put secrets in Git, examples, archives, screenshots or command arguments.
-3. Configure the Runner's local executable/package paths, required credential mapping and execution resources through the supported setup. A Desktop model list is discovery only; it does not change a previously approved Runner resource. Isolated jobs still require their sandbox/resource checks and must not inherit an entire host home or arbitrary environment.
+3. For ordinary local mode, discover the CLI installed for the Runner user and use its existing environment. For explicit isolated mode, configure executable/package paths, required credential mapping and execution resources through the supported setup. A Desktop model list is discovery only; it does not change a previously approved Runner resource. Isolated jobs still require their sandbox/resource checks and must not inherit an entire host home or arbitrary environment.
 4. Test the exact selected model through the intended Runner execution path. A CLI `--help` listing, a successful host-shell call, and a successful isolated Runner job are different evidence. Missing login, permissions or compatible resources must be reported, never silently replaced by a bundled CLI or a different account.
-5. After a CLI upgrade or move, refresh discovery and revalidate its execution resources. Do not disable hash, ownership or sandbox checks to reuse the old approval.
+5. After a CLI upgrade or move, refresh native discovery and capability metadata. Ordinary local calls do not pin an installation hash. Explicit isolated calls must revalidate their version-bound resources; do not reuse an invalid isolation approval.
+
+`team_cli_catalog` keeps usable selections in `providers` and reports omitted providers in `unavailable_providers` using bounded reason codes. `agent_isolated_execution_unavailable` means the bound Runner has not advertised the required isolated execution capabilities; `agent_cli_provider_resource_unavailable` means that provider's execution resource is absent. Neither proves the host CLI is uninstalled. Inspect the exact Runner's local resource configuration and current registration. `team_cli_start` returns `team_plan_required` for an authorized existing task without a frozen plan; register the intended team plan rather than creating a replacement manager. Catalog discovery and a successful host CLI smoke do not replace isolated execution acceptance.
 
 For optional Windows Goal ACP, run `windows/setup-providers.ps1 -IncludeGoalProvider` on the destination, or follow [its guide](../windows/goal-provider/README.md). The normal setup omits this model executor. Offline preparation requires dependencies already installed/prepared by that user; the distributable does not copy the publisher's installed Goal npm tree.
 
@@ -48,7 +52,7 @@ WebCodex 提供自己的 Server、Runner、管理 CLI 和工具对接代码。**
 | Office、CAD/CAE、商业软件 | 由用户在目标机安装并取得许可；MCP/COM/Python 适配器不能代替应用本体及授权。 |
 | Runner 与本地运行状态 | 本机生成路径、项目授权、凭据映射和执行资源准入；不随包复制旧 Runner 配置、账号数据库、carrier、租约、可执行文件批准状态。 |
 
-操作顺序是：**本机安装 → 本机登录/填 key → 查询实际版本与模型 → 配置本机 Runner → 通过该 Runner 实际执行验收**。界面能列出模型、宿主命令行能调用、隔离 Runner 能执行，是三种不同的验证，不能相互替代。更新 CLI 后重新验证资源；不能为了复用公司配置而绕过路径、摘要、身份或沙箱检查。凭据只按受支持的最小映射传入，不能把整个用户目录或全部环境变量交给隔离任务。
+操作顺序是：**本机安装 → 本机登录/填 key → 查询实际版本与模型 → 配置本机 Runner → 通过该 Runner 实际执行验收**。界面能列出模型、宿主命令行能调用、隔离 Runner 能执行，是三种不同的验证，不能相互替代。普通本机调用由统一的 `cli` 工具默认执行，使用现有本机账号和环境；CLI 更新后重新发现安装及原生能力，无需重新生成隔离资源批准。只有显式隔离模式需重新验证其版本绑定资源；不能复用失效的隔离批准。凭据只按受支持的最小映射传入，不能把整个用户目录或全部环境变量交给隔离任务。
 
 本次隔离调用与正式交付问题见[协作复盘](agent/collaboration-lessons-2026-10-25.zh-CN.md)。Node CodeBuddy 的元数据查询改用受信 Runner 资源 profile 中显式指定的 `codebuddy_config_directory`，不假定某套安装的账号目录。目录参与审核摘要，换电脑或目录需重新审核；不要复制凭据内容或另一台机器的准入记录。代理端口、浏览器应用名称及登录账号同样按目标机核实，源码中的通用示例不代表实际连接。
 

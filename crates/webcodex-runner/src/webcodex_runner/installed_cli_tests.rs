@@ -12,14 +12,44 @@ fn runner_real_process_installed_cli_operator_smoke() {
     let raw =
         std::env::var("WEBCODEX_LOCAL_CLI_SMOKE_SPEC").expect("Explicit CLI smoke spec required");
     let spec: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    let program = spec["program"].as_str().unwrap();
-    let args: Vec<String> = serde_json::from_value(spec["args"].clone()).unwrap();
+    let requested_program = spec["program"].as_str().unwrap();
     let prompt = spec["stdin"].as_str().unwrap();
+    let adapter = webcodex_process::cli_registry::configured_cli_adapters()
+        .unwrap()
+        .into_iter()
+        .find(|adapter| match spec["cli_id"].as_str() {
+            Some(id) => adapter.id == id,
+            None => adapter.executables.iter().any(|name| {
+                name == requested_program || name == &format!("{requested_program}.exe")
+            }),
+        })
+        .expect("Selected smoke CLI must have a configured adapter");
+    let (program, args, input) = if spec["cli_id"].is_string() {
+        let installation = webcodex_process::cli_registry::discover_cli_installations(&[])
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.provider_id == adapter.id)
+            .expect("Selected CLI must be installed");
+        let (args, input) = adapter
+            .invocation(
+                spec["model"].as_str().unwrap(),
+                spec["effort"].as_str(),
+                prompt,
+            )
+            .unwrap();
+        (installation.command, args, input)
+    } else {
+        (
+            requested_program.to_owned(),
+            serde_json::from_value::<Vec<String>>(spec["args"].clone()).unwrap(),
+            prompt.to_owned(),
+        )
+    };
     let marker = spec["expected_result"].as_str().unwrap();
     assert!(!marker.is_empty());
     let temp = tempfile::tempdir().unwrap();
     assert!(
-        resolve_installed(program).is_some(),
+        resolve_installed(&program).is_some(),
         "Selected program is not installed"
     );
     let result = run_process_with_profiles_and_execution_state(
@@ -32,9 +62,9 @@ fn runner_real_process_installed_cli_operator_smoke() {
         temp.path(),
         &PreparedShellProfileCache::default(),
         Some(temp.path().to_str().unwrap()),
-        program,
+        &program,
         &args,
-        Some(prompt),
+        Some(&input),
         90,
         None,
     );
@@ -50,6 +80,12 @@ fn runner_real_process_installed_cli_operator_smoke() {
     let output: serde_json::Value =
         serde_json::from_str(result.result.stdout.as_deref().unwrap_or(""))
             .expect("CLI did not return its requested JSON result");
+    let mut verifier =
+        webcodex_core::cli_result::CliResultVerifier::new(adapter.invocation.unwrap().result);
+    verifier.observe_stdout(result.result.stdout.as_deref().unwrap_or("").as_bytes());
+    verifier
+        .finish()
+        .expect("Production CLI result verifier rejected actual native output");
     if let Some(path) = spec["diagnostic_path"].as_str() {
         let path = Path::new(path);
         assert!(

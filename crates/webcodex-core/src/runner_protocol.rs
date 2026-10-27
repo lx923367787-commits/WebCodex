@@ -229,6 +229,7 @@ pub const RUNNER_CAPABILITY_STRUCTURED_GO_TEST_PACKAGES: &str = "structured_go_t
 /// older Runners may support validation argv without accepting arbitrary
 /// process argv.
 pub const RUNNER_CAPABILITY_STRUCTURED_PROCESS_ARGV: &str = "structured_process_argv";
+pub const RUNNER_CAPABILITY_LOCAL_CLI: &str = "local_cli";
 /// Model-facing bounded script content carried as typed protocol data. This is
 /// deliberately independent from raw shell and native process argv support:
 /// older Runners must fail closed rather than interpreting script text through
@@ -435,6 +436,7 @@ pub const RUNNER_CAPABILITY_NAMES: &[&str] = &[
     RUNNER_CAPABILITY_INTERNAL_POSIX_SCRIPT,
     RUNNER_CAPABILITY_STRUCTURED_EXECUTION_JOBS,
     RUNNER_CAPABILITY_AGENT_ISOLATED_EXECUTION_V1,
+    RUNNER_CAPABILITY_LOCAL_CLI,
     RUNNER_CAPABILITY_DETACHED_PROCESS_JOBS,
     RUNNER_CAPABILITY_LSP_READ_ONLY_NAVIGATION,
     RUNNER_CAPABILITY_LSP_CALL_HIERARCHY,
@@ -5680,6 +5682,7 @@ mod envelope_tests {
                 "internal_posix_script",
                 "structured_execution_jobs",
                 "agent_isolated_execution_v1",
+                "local_cli",
                 "detached_process_jobs",
                 "lsp_read_only_navigation",
                 "lsp_call_hierarchy",

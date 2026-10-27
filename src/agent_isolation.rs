@@ -371,7 +371,6 @@ impl ToolRuntime {
     ) -> ToolResult {
         if !crate::agent_team::supports_execution(name)
             && !crate::tool_runtime::named_project_files::supports(name)
-            && name != "local_cli"
         {
             return self.isolated_model_call(name, arguments, auth);
         }
@@ -390,9 +389,7 @@ impl ToolRuntime {
             Ok(binding) => {
                 // The execution adapter must obtain its current business/observe
                 // permit from the store. No user credential is manufactured here.
-                if name == "local_cli" {
-                    crate::tool_runtime::local_cli::call(self, binding, arguments).await
-                } else if crate::tool_runtime::named_project_files::supports(name) {
+                if crate::tool_runtime::named_project_files::supports(name) {
                     crate::tool_runtime::named_project_files::call_tool(
                         self, binding, name, arguments,
                     )
@@ -444,7 +441,6 @@ pub(crate) fn tool_specs() -> Value {
     tools.extend(crate::agent_enrollment::tool_specs());
     tools.push(crate::tool_runtime::named_project_files::spec());
     tools.extend(crate::tool_runtime::named_project_files::tool_specs());
-    tools.push(crate::tool_runtime::local_cli::spec());
     for spec in crate::tool_runtime::registered_tool_specs()
         .into_iter()
         .filter(|spec| crate::agent_goal_adapter::supports(&spec.name))

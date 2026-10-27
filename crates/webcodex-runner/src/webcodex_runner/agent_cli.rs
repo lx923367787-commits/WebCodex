@@ -3,11 +3,99 @@
 use super::{CommandResult, RunnerSink};
 use std::path::Path;
 use std::time::{Duration, Instant};
-use webcodex_core::agent_cli::{
-    AgentCliCatalog, AgentCliCatalogQuery, AgentCliProvider, AGENT_CLI_CATALOG_TTL_MS,
-};
+#[cfg(test)]
+use webcodex_core::agent_cli::AgentCliProvider;
+use webcodex_core::agent_cli::{AgentCliCatalog, AgentCliCatalogQuery, AGENT_CLI_CATALOG_TTL_MS};
 use webcodex_core::runner_protocol::AgentExecutionResourceDescriptor;
 use webcodex_process::cli_catalog::{CliCatalog, Provider, TrustedMetadataContext};
+
+pub(crate) fn discover_inventory(
+    sink: &RunnerSink,
+    query: &webcodex_core::agent_cli::AgentCliInventoryQuery,
+    adapters: &[webcodex_core::cli_adapter::CliAdapter],
+) -> Result<webcodex_core::agent_cli::AgentCliInventory, String> {
+    use webcodex_core::agent_cli::{AgentCliInstallation, AgentCliInventory};
+    query.validate()?;
+    validate_target(
+        sink,
+        &query.target.client_id,
+        &query.target.runner_instance_id,
+    )?;
+    let deadline = ControlDeadline::new(query.deadline_at_ms)?;
+    let discovered = webcodex_process::cli_registry::discover_cli_installations(adapters)?;
+    let capabilities = if let Some(provider_id) = query.provider {
+        let mut definitions = webcodex_process::cli_registry::configured_cli_adapters()?;
+        for adapter in adapters {
+            if let Some(existing) = definitions.iter_mut().find(|entry| entry.id == adapter.id) {
+                *existing = adapter.clone();
+            } else {
+                definitions.push(adapter.clone());
+            }
+        }
+        let adapter = definitions
+            .iter()
+            .find(|entry| entry.id == provider_id.id())
+            .ok_or("agent_cli_adapter_unavailable")?;
+        let installation = discovered
+            .iter()
+            .find(|entry| entry.provider_id == provider_id.id())
+            .ok_or("agent_cli_not_installed")?;
+        if !installation.native {
+            return Err("agent_cli_launcher_requires_adapter".into());
+        }
+        let pinned = super::jobs::agent_resources::pin_discovered_catalog_executable(
+            &installation.executable,
+            provider_id,
+        )?;
+        let proxy = super::shell::native_metadata_system_proxy();
+        let context = TrustedMetadataContext::for_current_user(
+            Provider::for_adapter(adapter),
+            &pinned.program,
+            proxy.as_deref(),
+        )
+        .map_err(|_| "agent_cli_metadata_context_unavailable")?;
+        let raw = probe_metadata(adapter, &pinned.program, &context, &deadline)?;
+        Some(webcodex_core::agent_cli::AgentCliCapabilities {
+            adapter: Some(adapter.clone()),
+            provider_id: raw.provider_id,
+            label: raw.label,
+            installed: raw.installed,
+            version: raw.version,
+            models: raw.models,
+            efforts: raw.efforts,
+            source: raw.source.into(),
+            status: raw.status.into(),
+            message: raw.message,
+            account_availability_verified: false,
+        })
+    } else {
+        None
+    };
+    deadline.require(Duration::ZERO)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let inventory = AgentCliInventory {
+        capabilities,
+        version: 1,
+        target: query.target.clone(),
+        observed_at_ms: now,
+        expires_at_ms: now + AGENT_CLI_CATALOG_TTL_MS,
+        installations: discovered
+            .into_iter()
+            .map(|entry| AgentCliInstallation {
+                command: entry.command,
+                provider_id: entry.provider_id,
+                label: entry.label,
+                installed: entry.installed,
+                native: entry.native,
+                adapter_available: entry.adapter_available,
+                status: entry.status.into(),
+                message: entry.message.into(),
+            })
+            .collect(),
+    };
+    inventory.validate_for(query, now)?;
+    Ok(inventory)
+}
 
 #[cfg(test)]
 #[path = "agent_cli_tests.rs"]
@@ -60,11 +148,23 @@ pub(crate) fn validate_target(
     }
 }
 
-fn provider(value: AgentCliProvider) -> Provider {
-    match value {
-        AgentCliProvider::WorkBuddy => Provider::WorkBuddy,
-        AgentCliProvider::Antigravity => Provider::Antigravity,
+fn adapter_for(
+    resource: &AgentExecutionResourceDescriptor,
+) -> Result<webcodex_core::cli_adapter::CliAdapter, String> {
+    if let Some(adapter) = resource
+        .reviewed_controls
+        .as_ref()
+        .and_then(|record| record.adapter.as_ref())
+    {
+        return Ok(adapter.clone());
     }
+    let provider = resource
+        .provider
+        .ok_or("agent_cli_provider_mapping_mismatch")?;
+    webcodex_core::cli_adapter::cli_adapters(&[])?
+        .into_iter()
+        .find(|adapter| adapter.id == provider.id())
+        .ok_or("agent_cli_adapter_unavailable".into())
 }
 
 fn project_catalog(
@@ -74,9 +174,9 @@ fn project_catalog(
     deadline: &ControlDeadline,
 ) -> Result<AgentCliCatalog, String> {
     deadline.require(Duration::ZERO)?;
-    let expected_source = match query.provider {
-        AgentCliProvider::WorkBuddy => "installed_help",
-        AgentCliProvider::Antigravity => "live_catalog",
+    let expected_source = match adapter_for(resource)?.metadata {
+        webcodex_core::cli_adapter::CliMetadataRecipe::AntigravityModels => "live_catalog",
+        _ => "installed_help",
     };
     if raw.provider_id != query.provider.id()
         || raw.account_availability_verified
@@ -138,7 +238,8 @@ pub(crate) fn query_catalog(
     // Do not cancel the shared helper half-way through its cleanup or borrow a
     // business CLI timeout. The Registry control budget must fit both phases.
     deadline.require(Duration::from_secs(33))?;
-    let provider = provider(query.provider);
+    let adapter = adapter_for(resource)?;
+    let provider = Provider::for_adapter(&adapter);
     let proxy = super::shell::native_metadata_system_proxy();
     let node_mapping = resource.reviewed_controls.as_ref().is_some_and(|control| {
         control.loading_method == webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING
@@ -163,6 +264,16 @@ pub(crate) fn query_catalog(
     }
     .map_err(|_| "agent_cli_metadata_context_unavailable")?;
     deadline.require(Duration::from_secs(33))?;
+    let raw = probe_metadata(&adapter, program, &context, deadline)?;
+    project_catalog(query, resource, raw, deadline)
+}
+
+fn probe_metadata(
+    adapter: &webcodex_core::cli_adapter::CliAdapter,
+    program: &Path,
+    context: &TrustedMetadataContext,
+    deadline: &ControlDeadline,
+) -> Result<CliCatalog, String> {
     let raw = std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .name("agent-cli-metadata".into())
@@ -175,8 +286,8 @@ pub(crate) fn query_catalog(
                 // the fixed helper, so scheduler delay cannot consume its budget.
                 deadline.require(Duration::from_secs(33))?;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    runtime.block_on(webcodex_process::cli_catalog::probe_installed_cli(
-                        provider, program, &context,
+                    runtime.block_on(webcodex_process::cli_catalog::probe_cli_adapter(
+                        &adapter, program, &context,
                     ))
                 }))
                 .map_err(|_| "agent_cli_metadata_worker_failed".to_owned())
@@ -195,7 +306,7 @@ pub(crate) fn query_catalog(
             .join()
             .map_err(|_| "agent_cli_metadata_worker_failed".to_owned())?
     })?;
-    project_catalog(query, resource, raw, deadline)
+    Ok(raw)
 }
 
 pub(crate) fn bounded_json_result<T: serde::Serialize>(

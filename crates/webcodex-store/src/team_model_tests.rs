@@ -103,6 +103,56 @@ fn plan(root: &str, child: &str) -> TeamPlanInput {
 }
 
 #[test]
+fn assigned_cli_without_plan_reports_prerequisite_only_to_its_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open(&temp.path().join("state.db")).unwrap();
+    let root = task(&db, "planless-cli-root");
+    let manager = enroll(&db, &root, AgentEnrollmentPurpose::Manager, None, "manager");
+    let unrelated = task(&db, "unrelated-cli-root");
+    let other = enroll(
+        &db,
+        &unrelated,
+        AgentEnrollmentPurpose::Manager,
+        None,
+        "other",
+    );
+    assert!(db
+        .read_agent_cli_preparation(&manager, &root, &root, 0, "probe", "profile", Some(900))
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        db.read_agent_cli_planned_slot(&manager, &root, &root, 0)
+            .unwrap_err()
+            .code(),
+        "team_plan_required"
+    );
+    for (caller, source) in [(&other, root.as_str()), (&manager, unrelated.as_str())] {
+        assert_ne!(
+            db.read_agent_cli_planned_slot(caller, source, source, 0)
+                .unwrap_err()
+                .code(),
+            "team_plan_required"
+        );
+    }
+    assert_eq!(
+        db.read_agent_team_task(&manager, &root).unwrap().state,
+        "ready"
+    );
+    assert_eq!(
+        db.list_agent_team_receipts(&manager, &root, 0, 20)
+            .unwrap()
+            .total_count,
+        0
+    );
+    assert_eq!(
+        db.list_agent_team_plans(&manager, &root, 0, 20)
+            .unwrap()
+            .total_count,
+        0
+    );
+}
+
+#[test]
 fn assigned_manager_can_read_own_receipts_before_registering_a_team_plan() {
     let temp = tempfile::tempdir().unwrap();
     let db = Database::open(&temp.path().join("state.db")).unwrap();
@@ -288,7 +338,15 @@ fn assigned_team_receipts_are_scoped_paginated_and_never_replace_completion() {
                 mode: TeamPolicyMode::Custom,
                 subagents: TeamCountRange { min: 1, max: 1 },
                 cli_per_agent: TeamCountRange { min: 1, max: 2 },
-                ..TeamPolicyInput::default()
+                providers: ["workbuddy", "antigravity"]
+                    .into_iter()
+                    .map(|id| crate::TeamProviderPreference {
+                        provider_id: id.into(),
+                        enabled: true,
+                        model: None,
+                        effort: None,
+                    })
+                    .collect(),
             },
         )
         .unwrap();
@@ -633,6 +691,15 @@ fn operator_cli_round_resolves_saved_efforts_and_replays_original_policy_revisio
         )
         .unwrap();
     let mut settings = TeamPolicyInput::default();
+    settings.providers = ["workbuddy", "antigravity"]
+        .into_iter()
+        .map(|id| TeamProviderPreference {
+            provider_id: id.into(),
+            enabled: true,
+            model: None,
+            effort: None,
+        })
+        .collect();
     settings.mode = TeamPolicyMode::Custom;
     settings.cli_per_agent = TeamCountRange { min: 2, max: 2 };
     settings.providers[0].model = Some("observed-model".into());

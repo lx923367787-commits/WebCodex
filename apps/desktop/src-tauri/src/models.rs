@@ -132,6 +132,14 @@ pub struct ReadinessSnapshot {
     pub next_action: Option<String>,
 }
 
+impl ReadinessSnapshot {
+    /// Connection setup must remain available before the first project exists.
+    /// This does not imply project readiness or grant access to any folder.
+    pub fn services_ready(&self) -> bool {
+        self.server == ServerReadiness::Ready && self.runner == RunnerReadiness::Ready
+    }
+}
+
 impl Default for ReadinessSnapshot {
     fn default() -> Self {
         aggregate_readiness(
@@ -605,6 +613,7 @@ mod tests {
             ProjectReadiness::Configured,
         );
         assert!(!server_only.runtime_ready);
+        assert!(!server_only.services_ready());
         assert!(!server_only.ready_for_chatgpt);
 
         let missing_project = aggregate_readiness(
@@ -614,6 +623,7 @@ mod tests {
             ProjectReadiness::None,
         );
         assert!(!missing_project.runtime_ready);
+        assert!(missing_project.services_ready());
         assert!(!missing_project.ready_for_chatgpt);
 
         let local_only = aggregate_readiness(

@@ -121,6 +121,14 @@ pub(super) fn cli_slot_budget_on(
     let local_calls = crate::local_cli::call_count(conn, source).map_err(store_error)?;
     let replay: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_team_cli_attempts WHERE root_task_id=?1 AND source_task_id=?2 AND call_index=?3)",
         params![root,source,index], |r|r.get(0)).map_err(store_error)?;
+    let (family_native, family_legacy) =
+        crate::local_cli::family_counts(conn, root).map_err(store_error)?;
+    if !replay && family_native > 0 && family_native.saturating_add(family_legacy) >= 32 {
+        return Err(error(
+            "agent_team_budget_exceeded",
+            "Native and isolated calls share the original team budget",
+        ));
+    }
     if replay || index.saturating_add(local_calls) < original_budget {
         Ok(())
     } else {

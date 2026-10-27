@@ -41,6 +41,7 @@ pub struct CliCatalog {
 pub enum Provider {
     WorkBuddy,
     Antigravity,
+    Generic,
 }
 impl Provider {
     pub fn parse(id: &str) -> Result<Self, String> {
@@ -54,6 +55,7 @@ impl Provider {
         match self {
             Self::WorkBuddy => "workbuddy",
             Self::Antigravity => "antigravity",
+            Self::Generic => "generic",
         }
     }
     pub fn executable(self) -> &'static str {
@@ -62,18 +64,29 @@ impl Provider {
             (Self::WorkBuddy, false) => "codebuddy",
             (Self::Antigravity, true) => "agy.exe",
             (Self::Antigravity, false) => "agy",
+            (Self::Generic, _) => "cli",
         }
     }
     pub fn installation_directory(self) -> &'static str {
         match self {
             Self::WorkBuddy => "codebuddy",
             Self::Antigravity => "agy",
+            Self::Generic => "cli",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Self::WorkBuddy => "WorkBuddy / CodeBuddy CLI",
             Self::Antigravity => "Antigravity CLI",
+            Self::Generic => "CLI",
+        }
+    }
+    pub fn for_adapter(adapter: &webcodex_core::cli_adapter::CliAdapter) -> Self {
+        use webcodex_core::cli_adapter::CliMetadataRecipe;
+        match adapter.metadata {
+            CliMetadataRecipe::CodebuddyHelp => Self::WorkBuddy,
+            CliMetadataRecipe::AntigravityModels => Self::Antigravity,
+            CliMetadataRecipe::Help => Self::Generic,
         }
     }
 }
@@ -364,6 +377,12 @@ pub async fn probe_installed_cli(
                     "来自 agy CLI 实时模型目录；查询沿用已启用的系统代理，未执行模型任务验证调用权限。"
                 } else { "来自 agy CLI 实时模型目录；未执行模型任务验证调用权限。" }.into();
             }
+            Provider::Generic => {
+                catalog.models = parse_workbuddy_models(help.primary_text());
+                catalog.source = "installed_help";
+                if catalog.models.is_empty() { return Err("已发现 CLI，但帮助未提供可解析的模型目录；需要对应的能力适配器。"); }
+                catalog.message = "来自本机 CLI 帮助；未验证账号或隔离执行能力。".into();
+            }
         }
         Ok(())
     }.await;
@@ -375,6 +394,19 @@ pub async fn probe_installed_cli(
         }
     }
     catalog.checked_at = timestamp_ms();
+    Ok(catalog)
+}
+
+pub async fn probe_cli_adapter(
+    adapter: &webcodex_core::cli_adapter::CliAdapter,
+    executable: &Path,
+    context: &TrustedMetadataContext,
+) -> Result<CliCatalog, String> {
+    adapter.validate()?;
+    let mut catalog =
+        probe_installed_cli(Provider::for_adapter(adapter), executable, context).await?;
+    catalog.provider_id = adapter.id.clone();
+    catalog.label = adapter.label.clone();
     Ok(catalog)
 }
 

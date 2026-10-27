@@ -30,6 +30,7 @@ fn synthetic_record() -> ReviewedAgentCliControls {
         }],
         verification_evidence_sha256: "c".repeat(64),
         independent_review_sha256: "d".repeat(64),
+        adapter: None,
     }
 }
 fn controlled_resource() -> AgentExecutionResourceDescriptor {

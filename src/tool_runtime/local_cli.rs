@@ -33,7 +33,7 @@ enum Request {
         effort: Option<String>,
     },
     Observe {
-        call_id: String,
+        call_id: Option<String>,
         tail_lines: Option<usize>,
         after_observation_token: Option<String>,
         wait_secs: Option<u64>,
@@ -41,20 +41,6 @@ enum Request {
     Stop {
         call_id: String,
     },
-}
-
-pub(crate) fn spec() -> Value {
-    json!({"name":"local_cli","description":"Discover and call any CLI already installed for the authorized Runner user, with literal native argv and that user's existing login/environment. No fixed provider, version/hash approval, copied login, or frozen team plan is required. This is trusted local-user execution, not an OS filesystem sandbox. First discover command names or absolute executable paths; inspect the CLI's own help/version/model options and explicitly choose supported model/effort in native args. model/effort fields record your choice but never invent flags. Start uses project-root cwd, the current task's CLI budget and a stable idempotency_key; it returns a durable call_id/Job. Replay the same key only with identical input. Observe/stop use your own call_id, never another Agent's job. Unknown outcome requires observation; do not change keys to retry. Exit 0 is process success, not task acceptance. Missing programs, old Runners and disabled local execution are reported explicitly.",
-        "inputSchema":{"type":"object","properties":{
-            "action":{"enum":["discover","start","observe","stop"]},
-            "project":{"type":"string"},"commands":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":16},
-            "executable":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},
-            "stdin":{"type":"string"},"timeout_secs":{"type":"integer","minimum":1,"maximum":3600},
-            "idempotency_key":{"type":"string","minLength":1,"maxLength":128},
-            "model":{"type":"string"},"effort":{"type":"string"},"call_id":{"type":"string"},
-            "tail_lines":{"type":"integer","minimum":1,"maximum":500},
-            "after_observation_token":{"type":"string"},"wait_secs":{"type":"integer","minimum":0,"maximum":30}
-        },"required":["action"],"additionalProperties":false}})
 }
 
 fn owner_access(
@@ -145,10 +131,22 @@ fn job_state(job: &ShellJobInfo) -> &'static str {
     }
 }
 
+fn execution_confirmed(job: &ShellJobInfo) -> bool {
+    matches!(
+        job.command_execution_state,
+        Some(
+            webcodex_core::runner_protocol::ShellCommandExecutionState::Completed
+                | webcodex_core::runner_protocol::ShellCommandExecutionState::TimedOut
+        )
+    )
+}
+
 fn receipt(call: &LocalCliCall, job: &ShellJobInfo) -> ToolResult {
     ToolResult::ok(json!({"call":call,"job":job,"execution_mode":"runner_user",
         "terminal":matches!(call.state.as_str(),"completed"|"failed"|"stopped"),
-        "process_success":call.state=="completed","task_acceptance_verified":false,
+        "process_success":job.status=="completed" && job.exit_code==Some(0),
+        "cli_success":call.result_contract.as_ref().and_then(|_| match call.state.as_str() {"completed"=>Some(true),"failed"|"stopped"=>Some(false),_=>None}),
+        "task_acceptance_verified":false,
         "next_action":"Observe this call_id until a trustworthy terminal result, then validate the requested deliverables."}))
 }
 
@@ -156,6 +154,151 @@ pub(crate) async fn call(
     runtime: &ToolRuntime,
     binding: &VerifiedAgentRun,
     args: Value,
+) -> ToolResult {
+    call_with_result_contract(runtime, binding, args, None).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectedStart {
+    project: String,
+    cli_id: String,
+    model: String,
+    effort: Option<String>,
+    instruction: String,
+    idempotency_key: String,
+    timeout_secs: Option<u64>,
+}
+
+pub(crate) async fn start_selected(
+    runtime: &ToolRuntime,
+    binding: &VerifiedAgentRun,
+    args: Value,
+) -> ToolResult {
+    let request: SelectedStart = match serde_json::from_value(args) {
+        Ok(v) => v,
+        Err(_) => return denial("local_cli_invalid_input"),
+    };
+    let provider = match webcodex_core::agent_cli::AgentCliProvider::parse(&request.cli_id) {
+        Ok(v) => v,
+        Err(_) => return denial("agent_cli_invalid_provider_id"),
+    };
+    let (target, _) = match project_scope(runtime, binding, &request.project, true).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(assets) = &runtime.agent_team_assets else {
+        return denial("agent_team_catalog_source_missing");
+    };
+    let inventory = match assets.inventory(binding, Some(provider)).await {
+        Ok(v) => v,
+        Err(_) => return denial("agent_cli_inventory_unavailable"),
+    };
+    if inventory.target.client_id != target.client_id {
+        return denial("local_cli_project_runner_mismatch");
+    }
+    let Some(installation) = inventory
+        .installations
+        .iter()
+        .find(|i| i.provider_id == request.cli_id && i.installed)
+    else {
+        return denial("local_cli_not_installed");
+    };
+    let Some(capabilities) = inventory.capabilities.as_ref() else {
+        return denial("local_cli_capabilities_unavailable");
+    };
+    let Some(adapter) = capabilities
+        .adapter
+        .as_ref()
+        .filter(|adapter| adapter.id == request.cli_id)
+    else {
+        return denial("local_cli_native_arguments_required");
+    };
+    let Some(invocation) = adapter.invocation.as_ref() else {
+        return denial("local_cli_native_arguments_required");
+    };
+    if capabilities.status != "ready" || !capabilities.models.contains(&request.model) {
+        return denial("local_cli_model_not_discovered");
+    }
+    if request
+        .effort
+        .as_ref()
+        .is_some_and(|effort| !capabilities.efforts.contains(effort))
+    {
+        return denial("local_cli_effort_not_discovered");
+    }
+    let (argv, stdin) = match adapter.invocation(
+        &request.model,
+        request.effort.as_deref(),
+        &request.instruction,
+    ) {
+        Ok(v) => v,
+        Err(e) => return denial(&e),
+    };
+    call_with_result_contract(
+        runtime,
+        binding,
+        json!({"action":"start","project":request.project,"executable":installation.command,
+        "args":argv,"stdin":stdin,"model":request.model,"effort":request.effort,
+        "idempotency_key":request.idempotency_key,"timeout_secs":request.timeout_secs}),
+        invocation.result.clone(),
+    )
+    .await
+}
+
+async fn terminal_state(
+    runtime: &ToolRuntime,
+    access: &RunnerAccess,
+    call: &LocalCliCall,
+    job: &ShellJobInfo,
+) -> (&'static str, Option<&'static str>) {
+    let state = job_state(job);
+    if state != "completed" {
+        return (state, None);
+    }
+    let Some(contract) = call.result_contract.as_ref() else {
+        return (state, None);
+    };
+    let Ok((full, stdout, _, _, _, _)) = runtime
+        .runner_registry
+        .job_log_for_auth(
+            Some(access),
+            &job.job_id,
+            Some(0),
+            Some(0),
+            None,
+            None,
+            None,
+        )
+        .await
+    else {
+        return ("unknown", Some("local_cli_result_unavailable"));
+    };
+    if full.stdout_log_truncated {
+        return ("failed", Some("local_cli_result_truncated"));
+    }
+    let mut verifier = webcodex_core::cli_result::CliResultVerifier::new(Some(contract.clone()));
+    verifier.observe_stdout(stdout.as_deref().unwrap_or("").as_bytes());
+    match verifier.finish() {
+        Ok(()) => ("completed", None),
+        Err(code) => ("failed", Some(code)),
+    }
+}
+
+fn result_error(mut result: ToolResult, error: Option<&str>) -> ToolResult {
+    if let Some(error) = error {
+        result.success = false;
+        result.error = Some(error.into());
+        result.output["error_kind"] = json!(error);
+    }
+    result
+}
+
+async fn call_with_result_contract(
+    runtime: &ToolRuntime,
+    binding: &VerifiedAgentRun,
+    args: Value,
+    result_contract: Option<webcodex_core::cli_adapter::CliResultContract>,
 ) -> ToolResult {
     let request: Request = match serde_json::from_value(args.clone()) {
         Ok(request) => request,
@@ -258,8 +401,17 @@ pub(crate) async fn call(
             let fingerprint = format!(
                 "{:x}",
                 Sha256::digest(
-                    serde_json::to_vec(&json!({"project":project,"root":target.path,
-                "process":process,"stdin":stdin,"timeout":timeout,"model":model,"effort":effort}))
+                    serde_json::to_vec(&(
+                        "webcodex.local-cli-request.v1",
+                        &project,
+                        &target.path,
+                        &process,
+                        &stdin,
+                        timeout,
+                        &model,
+                        &effort,
+                        &result_contract,
+                    ))
                     .unwrap()
                 )
             );
@@ -270,6 +422,7 @@ pub(crate) async fn call(
                 &project,
                 &target.client_id,
                 &target.path,
+                result_contract.clone(),
             ) {
                 Ok(v) => v,
                 Err(e) => return denial(e.code()),
@@ -328,18 +481,22 @@ pub(crate) async fn call(
                 )
                 .await;
             match result {
-                Ok(job) => match db.record_local_cli_job(
-                    binding,
-                    &record.call_id,
-                    &job.job_id,
-                    job_state(&job),
-                ) {
-                    Ok(call) => receipt(&call, &job),
-                    Err(e) => ToolResult::err_with_output(
-                        e.code(),
-                        json!({"call_id":record.call_id,"job_id":job_id,"dispatch_certainty":"outcome_unknown"}),
-                    ),
-                },
+                Ok(job) => {
+                    let (state, cli_error) = terminal_state(runtime, &access, &record, &job).await;
+                    match db.record_local_cli_observation(
+                        binding,
+                        &record.call_id,
+                        &job.job_id,
+                        state,
+                        execution_confirmed(&job),
+                    ) {
+                        Ok(call) => result_error(receipt(&call, &job), cli_error),
+                        Err(e) => ToolResult::err_with_output(
+                            e.code(),
+                            json!({"call_id":record.call_id,"job_id":job_id,"dispatch_certainty":"outcome_unknown"}),
+                        ),
+                    }
+                }
                 Err(error) => ToolResult::err_with_output(
                     error,
                     json!({"call_id":record.call_id,"job_id":job_id,"dispatch_certainty":"outcome_unknown",
@@ -353,6 +510,14 @@ pub(crate) async fn call(
             after_observation_token,
             wait_secs,
         } => {
+            let Some(call_id) = call_id else {
+                return match db.list_local_cli_calls(binding) {
+                    Ok(calls) => ToolResult::ok(
+                        json!({"calls":calls,"dispatched":false,"next_action":"Use an existing call_id for status or cancellation; do not start a replacement for an unknown result."}),
+                    ),
+                    Err(error) => denial(error.code()),
+                };
+            };
             if tail_lines.is_some_and(|n| n == 0 || n > 500) || wait_secs.is_some_and(|n| n > 30) {
                 return denial("local_cli_invalid_input");
             }
@@ -386,11 +551,17 @@ pub(crate) async fn call(
                     {
                         return denial("local_cli_job_identity_conflict");
                     }
-                    let call =
-                        match db.record_local_cli_job(binding, &call_id, job_id, job_state(&job)) {
-                            Ok(v) => v,
-                            Err(e) => return denial(e.code()),
-                        };
+                    let (state, cli_error) = terminal_state(runtime, &access, &record, &job).await;
+                    let call = match db.record_local_cli_observation(
+                        binding,
+                        &call_id,
+                        job_id,
+                        state,
+                        execution_confirmed(&job),
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => return denial(e.code()),
+                    };
                     let mut result = receipt(&call, &job);
                     result.output["stdout_tail"] = json!(stdout);
                     result.output["stderr_tail"] = json!(stderr);
@@ -398,7 +569,7 @@ pub(crate) async fn call(
                     result.output["stderr_truncated"] = json!(observation.stderr_truncated);
                     result.output["stdout_delta_reset"] = json!(observation.stdout_delta_reset);
                     result.output["stderr_delta_reset"] = json!(observation.stderr_delta_reset);
-                    result
+                    result_error(result, cli_error)
                 }
                 Err(error) => ToolResult::err_with_output(
                     error,
@@ -424,11 +595,16 @@ pub(crate) async fn call(
                 .await
             {
                 Ok(job) => {
-                    let call =
-                        match db.record_local_cli_job(binding, &call_id, job_id, job_state(&job)) {
-                            Ok(v) => v,
-                            Err(e) => return denial(e.code()),
-                        };
+                    let call = match db.record_local_cli_observation(
+                        binding,
+                        &call_id,
+                        job_id,
+                        job_state(&job),
+                        execution_confirmed(&job),
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => return denial(e.code()),
+                    };
                     receipt(&call, &job)
                 }
                 Err(error) => {

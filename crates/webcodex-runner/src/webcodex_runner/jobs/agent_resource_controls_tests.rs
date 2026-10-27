@@ -187,6 +187,7 @@ fn codebuddy_files_profile() -> AgentExecutionResourceProfile {
         fixed_args: codebuddy_file_worker_args(),
         verification_evidence_sha256: "d".repeat(64),
         independent_review_sha256: "e".repeat(64),
+        adapter: None,
     });
     p
 }
@@ -390,6 +391,7 @@ fn subject(p: &AgentExecutionResourceProfile) -> ReviewedAgentCliControls {
         }],
         verification_evidence_sha256: "d".repeat(64),
         independent_review_sha256: "e".repeat(64),
+        adapter: None,
     }
 }
 

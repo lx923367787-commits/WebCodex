@@ -309,6 +309,15 @@ impl RunnerRegistry {
             .cloned()
             .ok_or_else(|| "agent_execution_resource_unavailable".into())
     }
+    pub async fn list_agent_execution_resources(
+        &self,
+        access: &RunnerAccess,
+        target: &AgentExecutionTarget,
+    ) -> Result<Vec<AgentExecutionResourceDescriptor>, String> {
+        let inner = self.inner.lock().await;
+        let runner = current_target(&inner, access, target)?;
+        Ok(runner.agent_execution_resources.clone())
+    }
     /// Exact observation only. C/B must first authorize this caller to read the
     /// original attempt. Closed execution gates do not prevent observation;
     /// missing Registry state never authorizes reconstruction or another start.

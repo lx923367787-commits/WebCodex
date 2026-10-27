@@ -1,56 +1,68 @@
-# Local installed CLI tool
+# Unified local CLI tool
 
-`local_cli` is a task-owned interface to programs installed on the selected
-Runner computer. It uses ordinary native process jobs and the Runner user's
-existing environment and login. A fixed model-provider enum, a specific CLI
-version, an executable SHA allowlist and an isolated file-worker approval are
-not prerequisites for this tool.
+`cli` discovers and invokes programs installed on the selected Runner computer.
+Its default `execution_mode: "local"` uses native process jobs and the Runner
+user's existing environment and login. It does not require a fixed model-provider
+list, a specific CLI version/hash approval, or a frozen team plan.
 
-This is trusted local-user execution. The selected project determines the
-starting directory; it is not an OS filesystem sandbox. The CLI has the local
-user's operating-system permissions. Existing explicitly isolated shell
-environments and local Runner execution policy remain effective. This tool
-does not silently change those settings or copy another user's login.
+Local mode runs with the operating-system permissions of the Runner user. The
+project selects the starting directory; it is not an OS filesystem sandbox.
+Existing explicit isolated shell profiles and Runner execution policy remain
+effective. No login is copied and no global environment setting is modified.
 
-## Workflow
+## Discover, select, invoke
 
-1. Read `agent_assignment.project_access` and use its exact project identifier.
-2. Call `local_cli` with `action: "discover"`, that `project`, and a `commands`
-   array of command names or absolute executable paths. Discovery does not start
-   a program or verify the account. Its resolved executable path is diagnostic;
-   prefer the installer's stable command/launcher when starting later jobs.
-3. Inspect the CLI's actual version, help, model and reasoning options. Use its
-   native argument syntax; different CLIs do not share a universal model flag.
-4. Use `action: "start"` with `project`, `executable`, literal `args`, optional
-   `stdin`, an explicit timeout and a stable `idempotency_key`. `model` and
-   `effort` record the caller's choice; they do not generate command flags.
-5. Keep the returned `call_id`. Use `observe` for output and status, or `stop`
-   to request cancellation. A successful stop request is not process-exit proof.
+1. Read the exact authorized project identifier in `agent_assignment.project_access`.
+2. `cli({action:"discover", request:{task_id}})` lists installed adapters and their
+   stable launcher commands. `models` with `{task_id,cli_id}` reads actual native
+   model/reasoning options. Installation and help do not prove account entitlement.
+3. Start a selected adapter using `action:"start"` and
+   `request:{project,cli_id,model,effort?,instruction,idempotency_key,timeout_secs?}`.
+   The adapter on that exact Runner supplies native flags and input framing.
+4. For a CLI with a custom interface, discover an explicit command using
+   `request:{project,commands:[name_or_absolute_path]}`. Inspect its own help, then
+   start with `request:{project,executable,args,stdin?,model?,effort?,idempotency_key}`.
+   Arguments remain literal native argv. In this raw form, model/effort only record
+   the selection; they do not generate flags. No compiled adapter is required.
+5. Keep the returned `call_id`; `status` observes its original Job and `cancel`
+   requests its closure. `status` with an empty request lists the current Agent task receipts when a response was lost. A cancellation acknowledgment is not process-exit proof.
 
-No frozen team plan is required for an ordinary local CLI call. The current
-Agent's existing CLI authority and call budget still apply. The server binds
-receipts to its authenticated Agent and task, and records request fingerprints,
-the selected Runner/project and the original durable Job. Another Agent cannot
-read or replace those receipts. Reusing a key with different input is rejected;
-completed calls are not restarted. Unknown execution keeps completion blocked
-until authoritative Job evidence is obtained.
+The current Agent's existing CLI authority and call budget still apply. Ordinary native calls and the original isolated team budget share a 32-call task-family ceiling; explicit additional isolated rounds retain their existing grant contract. Receipts
+bind the authenticated Agent, task, request fingerprint and original Runner/Job.
+Another Agent cannot read or replace them. A replay with different input is
+rejected. Completed calls are not restarted, and unknown execution cannot prove
+completion. The model-facing interface is one `cli` tool; `local_cli` is an
+internal implementation module.
 
-## Updates and failure reporting
+## Persistent machine configuration and updates
 
-Program discovery runs against the current installation. Windows discovery
-includes the user's current PATH registrations and standard per-user executable
-directories; installer launcher symlinks resolve to the current version. An
-installer changing its executable bytes or version does not require recompiling
-WebCodex or manufacturing a new isolation approval. Explicit PATH/profile
-configuration takes precedence during execution. Credential-free system proxy
-settings are inherited per process only when no explicit proxy override exists.
+Built-in adapters describe protocols, not bundled model installations or accounts.
+Optional machine-specific adapter definitions live in
+`%LOCALAPPDATA%/webcodex/cli-adapters.json` on Windows, or the configured
+`WEBCODEX_CLI_ADAPTERS_FILE`. Keep these definitions outside the application
+installation and source checkout; they must not contain credentials. They extend
+or replace protocol recipes without rebuilding WebCodex.
 
-Missing programs are reported as missing; an older Runner reports that an update
-is required. Discovery is not proof of a valid login or model entitlement.
-`process_success` refers only to the process result. Provider error payloads,
-the requested files and the task's acceptance conditions must also be checked;
-exit code zero alone is not business-task success.
+Discovery uses current installations and stable launcher paths. Native command
+lookup includes Windows user PATH registrations and standard per-user binary
+directories; installer symlinks can point to a new version without a new resource
+approval. Explicit PATH/profile settings take precedence. A credential-free
+system proxy is used per process when no explicit proxy override exists.
 
-The existing `team_cli_*` isolated file-worker protocol remains available for
-work that explicitly needs that execution mode. Its fixed adapter constraints
-do not govern generic `local_cli` calls.
+Missing installations, unsupported automatic metadata and expired accounts are
+different states. For an adapter without automatic invocation metadata, use the
+raw native-argument form after inspecting actual CLI help. Never invent options.
+
+`process_success` is only the native process result. For adapters declaring a
+result contract, `cli_success` additionally checks the structured terminal event;
+provider errors, ambiguous/missing results and unavailable output do not become
+success merely because exit code is zero. CodeBuddy JSON event arrays and single
+terminal objects are both supported. Task acceptance still requires validating
+its actual deliverables.
+
+## Explicit isolated execution
+
+Use `execution_mode:"isolated"` only for the existing isolated team workflow.
+That mode retains frozen plan slots, reviewed resources, source-attempt receipts
+and published artifact review. The `team_cli_*` compatibility tools retain the
+same semantics. Their isolation approvals do not gate ordinary local calls.

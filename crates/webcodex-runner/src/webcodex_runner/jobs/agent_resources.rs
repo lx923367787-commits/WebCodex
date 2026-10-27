@@ -604,6 +604,52 @@ pub(crate) struct PinnedCatalogExecutable {
     _pins: Vec<std::fs::File>,
 }
 
+/// Pin a discovered installation for fixed metadata commands only. This
+/// temporary profile is never registered and grants no isolated Job execution.
+pub(crate) fn pin_discovered_catalog_executable(
+    program: &Path,
+    provider: AgentCliProvider,
+) -> Result<PinnedCatalogExecutable, String> {
+    use std::io::Read;
+    let mut source =
+        std::fs::File::open(program).map_err(|_| "agent_cli_metadata_source_unavailable")?;
+    let metadata = source
+        .metadata()
+        .map_err(|_| "agent_cli_metadata_source_unavailable")?;
+    if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES {
+        return Err("agent_cli_metadata_source_limit".into());
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut total = 0u64;
+    loop {
+        let count = source
+            .read(&mut buffer)
+            .map_err(|_| "agent_cli_metadata_source_unavailable")?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > MAX_RESOURCE_BYTES {
+            return Err("agent_cli_metadata_source_limit".into());
+        }
+        digest.update(&buffer[..count]);
+    }
+    let profiles = validate_profiles(&AgentExecutionResourcesConfig {
+        profiles: vec![AgentExecutionResourceProfile {
+            id: format!("metadata-{}", provider.id()),
+            provider: Some(provider),
+            reviewed_controls: None,
+            user_https_proxy: false,
+            codebuddy_config_directory: None,
+            executable: program.to_path_buf(),
+            executable_sha256: format!("{:x}", digest.finalize()),
+            files: vec![],
+        }],
+    })?;
+    pin_catalog_executable(&profiles, provider)
+}
+
 fn catalog_entrypoint(profile: &ValidatedProfile) -> Result<Option<PathBuf>, String> {
     if profile.reviewed_controls.as_ref().is_some_and(|control| {
         control.loading_method == webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING
@@ -761,6 +807,7 @@ fn environment(root: &Path, windows_directory: &Path) -> Result<BTreeMap<String,
 /// and the existing Store/Job close decision authorize resource release.
 /// It intentionally does not remove directories on Drop: Job recovery owns them.
 pub(crate) struct PreparedAgentResources {
+    result_contract: Option<webcodex_core::cli_adapter::CliResultContract>,
     pub(crate) program: PathBuf,
     pub(crate) cwd: PathBuf,
     pub(crate) environment: BTreeMap<String, String>,
@@ -777,6 +824,9 @@ pub(crate) struct PreparedAgentResources {
 }
 
 impl PreparedAgentResources {
+    pub(crate) fn result_contract(&self) -> Option<&webcodex_core::cli_adapter::CliResultContract> {
+        self.result_contract.as_ref()
+    }
     pub(crate) fn proxy_requested(&self) -> bool {
         self.proxy_requested
     }
@@ -2358,7 +2408,7 @@ mod windows {
         }
         let antigravity_files =
             file_worker && profile.provider == Some(AgentCliProvider::Antigravity);
-        if file_worker && !antigravity_files {
+        if file_worker && profile.provider == Some(AgentCliProvider::WorkBuddy) {
             let user_home = std::env::var_os("USERPROFILE")
                 .map(PathBuf::from)
                 .ok_or("codebuddy_native_auth_source_unavailable")?;
@@ -2444,6 +2494,18 @@ mod windows {
             None
         };
         Ok(PreparedAgentResources {
+            result_contract: profile
+                .reviewed_controls
+                .as_ref()
+                .and_then(|record| {
+                    record.adapter.clone().or_else(|| {
+                        webcodex_core::cli_adapter::cli_adapters(&[])
+                            .ok()?
+                            .into_iter()
+                            .find(|adapter| adapter.id == record.provider.id())
+                    })
+                })
+                .and_then(|adapter| adapter.invocation?.result),
             workspace_snapshot,
             program: root.join(PROGRAM),
             cwd: root.join("workspace"),
@@ -2464,3 +2526,7 @@ mod windows {
 #[cfg(test)]
 #[path = "agent_resources_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "agent_codebuddy_operator_probe.rs"]
+mod codebuddy_operator_probe;

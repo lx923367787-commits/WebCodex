@@ -20,12 +20,47 @@ function apiFixture(): AiOfficeApi {
   return {
     snapshot: vi.fn<AiOfficeApi["snapshot"]>(async (id?: string) => ({ ...snapshot, selected_project_id: id ?? "active", members: id === "idle" ? [] : snapshot.members })),
     savePolicy: vi.fn<AiOfficeApi["savePolicy"]>(async (_id, revision, input) => ({ ...input, revision: revision + 1 })),
+    discoverCli: vi.fn(async () => [{ providerId: "workbuddy", label: "WorkBuddy", installed: true, native: true, adapterAvailable: true, status: "discovered", message: "已发现" }, { providerId: "antigravity", label: "Antigravity", installed: true, native: true, adapterAvailable: true, status: "discovered", message: "已发现" }]),
     refreshCli: vi.fn<AiOfficeApi["refreshCli"]>(async (id) => ({ providerId: id, label: "WorkBuddy", installed: true, version: "test-version", models: ["discovered-model"], efforts: ["high"], source: "installed_help", status: "ready", message: "从本机 CLI 帮助发现。", checkedAt: "2026-10-23T00:00:00Z", accountAvailabilityVerified: false })),
     evaluatePlan: vi.fn<AiOfficeApi["evaluatePlan"]>(async (_id, revision, plan) => ({ admitted: true, policy_revision: revision, enforcement: "demo_plan_only", subagent_count: plan.subagents.length, cli_call_count: plan.manager.cli_calls.length + plan.subagents.reduce((sum, agent) => sum + agent.cli_calls.length, 0), violations: [] })),
   };
 }
 
 describe("AI office", () => {
+  it("allows an installed CLI to be selected for native arguments without an automatic adapter", async () => {
+    const api = apiFixture();
+    api.discoverCli = vi.fn(async () => [{ providerId: "manual-cli", label: "Native CLI", installed: true, native: true, adapterAvailable: false, status: "adapter_required", message: "可使用原生参数调用" }]);
+    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, providers: [] } }} api={api} onSaved={vi.fn()} />);
+    await screen.findByLabelText("启用 Native CLI");
+    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
+    expect(screen.getByLabelText("启用 Native CLI")).toBeEnabled();
+    fireEvent.click(screen.getByLabelText("启用 Native CLI"));
+    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
+    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 7, expect.objectContaining({ providers: [expect.objectContaining({ provider_id: "manual-cli", enabled: true })] })));
+    expect(api.refreshCli).not.toHaveBeenCalled();
+  });
+  it("renders discovered third-party CLIs and keeps missing saved selections explicit", async () => {
+    const api = apiFixture();
+    api.discoverCli = vi.fn(async () => [{ providerId: "custom-cli", label: "Custom CLI", installed: true, native: true, adapterAvailable: true, status: "discovered", message: "已发现" }]);
+    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, providers: [] } }} api={api} onSaved={vi.fn()} />);
+    await screen.findByText("Custom CLI");
+    expect(screen.queryByText("WorkBuddy")).not.toBeInTheDocument();
+    expect(screen.queryByText("Antigravity")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
+    fireEvent.click(screen.getByLabelText("启用 Custom CLI"));
+    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
+    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 7, expect.objectContaining({ providers: [expect.objectContaining({ provider_id: "custom-cli", enabled: true })] })));
+  });
+
+  it("reports an empty or failed scan without inventing a provider", async () => {
+    const api = apiFixture();
+    api.discoverCli = vi.fn().mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("扫描失败"));
+    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, providers: [] } }} api={api} onSaved={vi.fn()} />);
+    await screen.findByText(/未发现本机 CLI/);
+    expect(screen.queryByLabelText(/启用 /)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新扫描本机 CLI" }));
+    await screen.findByText("扫描失败");
+  });
   it("opens real team observations using the selected project identity", async () => {
     const api = apiFixture();
     api.team = vi.fn(async () => ({ plans: [], total_count: 0, next_offset: null }));
@@ -191,7 +226,7 @@ describe("office policy", () => {
     api.refreshCli = vi.fn(() => new Promise<CliCatalog>((resolve) => { finish = resolve; }));
     render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    fireEvent.click(screen.getByRole("button", { name: "刷新 WorkBuddy 模型列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "刷新 WorkBuddy 模型列表" }));
     expect(screen.getByRole("button", { name: "刷新 WorkBuddy 模型列表" })).toBeDisabled();
     expect(screen.getByText("发现中…")).toBeInTheDocument();
     await act(async () => finish({ providerId: "workbuddy", label: "WorkBuddy", installed: true, version: "1.2", models: ["actual-model"], efforts: ["actual-effort"], source: "installed_help", status: "ready", message: "已读取本机帮助", checkedAt: "now", accountAvailabilityVerified: false }));
@@ -206,7 +241,7 @@ describe("office policy", () => {
     const api = apiFixture();
     api.refreshCli = vi.fn(async () => { throw new Error("未发现可用 CLI 程序"); });
     render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "刷新 Antigravity 模型列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "刷新 Antigravity 模型列表" }));
     await screen.findByText("未发现可用 CLI 程序");
     expect(within(screen.getByLabelText("Antigravity 模型")).getAllByRole("option")).toHaveLength(1);
   });

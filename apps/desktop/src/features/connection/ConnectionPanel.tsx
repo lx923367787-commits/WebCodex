@@ -93,7 +93,8 @@ export function ConnectionPanel({
   const chatgptObserved = state.readiness.runtime_ready &&
     Boolean(state.chatgpt_activity?.observed) &&
     !tunnelError;
-  const canStart = state.readiness.runtime_ready && state.openai_tunnel_configured && provider === "openai";
+  const servicesReady = state.readiness.server === "ready" && state.readiness.runner === "ready";
+  const canStart = servicesReady && state.openai_tunnel_configured && provider === "openai";
 
   return (
     <section
@@ -110,7 +111,7 @@ export function ConnectionPanel({
           <i className={`status-dot ${chatgptObserved ? "ready" : tunnelLocallyReady ? "ready" : tunnelError ? "error" : state.regular_tunnel ? "pending" : "unknown"}`} aria-hidden="true" />
           <strong>{!state.readiness.runtime_ready ? runtimeLabel(state, t) : chatgptObserved ? t("connection.observed") : tunnelLocallyReady ? t("connection.tunnelReady") : currentConnection(state, t)}</strong>
         </div>
-        <p>{!state.readiness.runtime_ready ? t("workspace.afterStart") : chatgptObserved ? t("connection.observedDescription") : tunnelLocallyReady ? t("connection.waitingForChatGpt") : tunnelEstablished ? t("connection.tunnelHandoffNeedsAction") : t("connection.notVerified")}</p>
+        <p>{!servicesReady ? t("workspace.afterStart") : chatgptObserved ? t("connection.observedDescription") : tunnelLocallyReady ? t("connection.waitingForChatGpt") : tunnelEstablished ? t("connection.tunnelHandoffNeedsAction") : t("connection.notVerified")}</p>
       </article>
 
       {error && <LocalizedError error={error} />}
@@ -156,7 +157,7 @@ export function ConnectionPanel({
             />
           </fieldset>
 
-          {!state.readiness.runtime_ready && <p className="inline-note">{t("connection.runtimeRequired")}</p>}
+          {!servicesReady && <p className="inline-note">{t("connection.runtimeRequired")}</p>}
 
           {provider === "openai" && (
             <button className="primary-button" disabled={mutationBusy || !canStart} onClick={() => void run(desktopApi.startRegularTunnel)} data-webcodex-action="start-regular-tunnel">

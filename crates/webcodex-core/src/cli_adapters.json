@@ -1,0 +1,135 @@
+[
+  {
+    "id": "workbuddy",
+    "label": "CodeBuddy / WorkBuddy",
+    "executables": [
+      "codebuddy.exe",
+      "codebuddy"
+    ],
+    "user_paths": [
+      {
+        "root": "local_app_data",
+        "path": "codebuddy/bin/codebuddy.exe"
+      }
+    ],
+    "metadata": "codebuddy_help",
+    "invocation": {
+      "model_flag": "--model",
+      "effort_flag": "--effort",
+      "effort_required": true,
+      "fixed_args": [
+        "--print",
+        "--input-format",
+        "text",
+        "--output-format",
+        "json"
+      ],
+      "input": "text",
+      "result": {
+        "format": "json",
+        "failure_flag": "is_error",
+        "terminal_field": "type",
+        "terminal_value": "result"
+      }
+    }
+  },
+  {
+    "id": "antigravity",
+    "label": "Antigravity",
+    "executables": [
+      "agy.exe",
+      "agy"
+    ],
+    "user_paths": [
+      {
+        "root": "local_app_data",
+        "path": "agy/bin/agy.exe"
+      }
+    ],
+    "metadata": "antigravity_models",
+    "invocation": {
+      "model_flag": "--model",
+      "effort_flag": "--effort",
+      "fixed_args": [
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json"
+      ],
+      "input": "user_message_json_line"
+    }
+  },
+  {
+    "id": "codex",
+    "label": "Codex CLI",
+    "executables": [
+      "codex.exe",
+      "codex",
+      "codex.cmd",
+      "codex.ps1"
+    ],
+    "user_paths": [
+      {
+        "root": "app_data",
+        "path": "npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+      }
+    ],
+    "metadata": "help",
+    "invocation": null
+  },
+  {
+    "id": "claude",
+    "label": "Claude Code",
+    "executables": [
+      "claude.exe",
+      "claude",
+      "claude.cmd",
+      "claude.ps1"
+    ],
+    "user_paths": [
+      {
+        "root": "home",
+        "path": ".local/bin/claude.exe"
+      },
+      {
+        "root": "home",
+        "path": ".local/bin/claude"
+      }
+    ],
+    "metadata": "help",
+    "invocation": null
+  },
+  {
+    "id": "gemini",
+    "label": "Gemini CLI",
+    "executables": [
+      "gemini.exe",
+      "gemini",
+      "gemini.cmd",
+      "gemini.ps1"
+    ],
+    "metadata": "help",
+    "invocation": null
+  },
+  {
+    "id": "ollama",
+    "label": "Ollama",
+    "executables": [
+      "ollama.exe",
+      "ollama"
+    ],
+    "metadata": "help",
+    "invocation": null
+  },
+  {
+    "id": "opencode",
+    "label": "OpenCode",
+    "executables": [
+      "opencode.exe",
+      "opencode",
+      "opencode.cmd"
+    ],
+    "metadata": "help",
+    "invocation": null
+  }
+]

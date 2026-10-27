@@ -1,6 +1,6 @@
-//! Narrow logical-Agent adapter to B's original attempt and D2's isolated Job.
-//! Catalog/resource facts are injected by a trusted controller, never model JSON.
-//! No fallback to a user AuthContext, generic process Job or another identity.
+//! Unified CLI entry and the retained explicit isolated team protocol.
+//! Local calls use task-owned native jobs. Isolated calls retain their original
+//! resource/attempt fences; neither path manufactures a user AuthContext.
 use crate::tool_runtime::{ToolResult, ToolRuntime};
 use crate::Database;
 use serde::{Deserialize, Serialize};
@@ -25,13 +25,20 @@ use webcodex_store::{
     TeamCliDispatchState, TeamCliObservation, VerifiedAgentRun,
 };
 
-type AssetFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+pub(crate) type AssetFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
 /// Root-controlled boundary for the real D resource directory and Host catalogs.
 /// No production constructor from model Value and no fabricated default list.
 /// Provider controls must have been exercised on this exact installed binary.
 pub(crate) trait AgentTeamAssets: Send + Sync {
     fn catalog<'a>(&'a self, caller: &'a VerifiedAgentRun) -> AssetFuture<'a, AgentTeamCatalog>;
+    fn inventory<'a>(
+        &'a self,
+        _caller: &'a VerifiedAgentRun,
+        _provider: Option<AgentCliProvider>,
+    ) -> AssetFuture<'a, webcodex_core::agent_cli::AgentCliInventory> {
+        Box::pin(async { Err("agent_cli_inventory_unavailable".into()) })
+    }
     fn host_catalog<'a>(
         &'a self,
         caller: &'a VerifiedAgentRun,
@@ -63,9 +70,17 @@ pub(crate) struct AgentTeamCatalog {
     pub observed_at_ms: i64,
     pub expires_at_ms: i64,
     pub providers: Vec<ObservedCliProvider>,
+    pub unavailable_providers: Vec<UnavailableCliProvider>,
     pub host_profile_ids: Vec<String>,
     pub host_catalog_ref: String,
     pub host_profiles_expires_at_ms: i64,
+}
+
+/// Fixed diagnostics only; no provider stderr, host paths or credentials.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct UnavailableCliProvider {
+    pub provider_id: String,
+    pub reason_code: &'static str,
 }
 
 impl ToolRuntime {
@@ -78,10 +93,14 @@ impl ToolRuntime {
 }
 
 fn denied(code: &str) -> ToolResult {
-    ToolResult::err_with_output(
+    let mut result = ToolResult::err_with_output(
         code,
         json!({"error_kind":code,"state_changed":false,"dispatched":false,"dispatch_certainty":"not_started"}),
-    )
+    );
+    if code == "team_plan_required" {
+        result.output["next_action"] = json!("For trusted local CLI execution, use cli start in its default local mode with the authorized project and discovered native program. Explicit isolated team execution requires its intended frozen plan before starting a slot. The assigned task still exists; do not create a replacement manager or retry an uncertain prior execution through a different mode.");
+    }
+    result
 }
 fn catalog_unavailable(reason: &str) -> ToolResult {
     // Only fixed local failure codes cross this boundary. Provider diagnostics,
@@ -449,7 +468,13 @@ fn cli_selection_discovered(
             // Antigravity's exact live slug already pins reasoning (e.g.
             // gemini-3.8-flash-high); --effort is an optional override.
             None => {
-                provider.efforts.is_empty()
+                provider
+                    .controls
+                    .as_ref()
+                    .and_then(|record| record.adapter.as_ref())
+                    .and_then(|adapter| adapter.invocation.as_ref())
+                    .is_some_and(|invocation| !invocation.effort_required)
+                    || provider.efforts.is_empty()
                     || (provider.provider_id == "antigravity"
                         && provider
                             .efforts
@@ -515,11 +540,8 @@ fn validate_provider_controls_binding(
         .controls
         .as_ref()
         .ok_or("agent_cli_delegation_controls_unverified")?;
-    let expected_provider = match provider.provider_id.as_str() {
-        "workbuddy" => AgentCliProvider::WorkBuddy,
-        "antigravity" => AgentCliProvider::Antigravity,
-        _ => return Err("agent_cli_controls_resource_mismatch".into()),
-    };
+    let expected_provider = AgentCliProvider::parse(&provider.provider_id)
+        .map_err(|_| "agent_cli_provider_unavailable")?;
     if controls.cli_version != provider.version {
         return Err("agent_cli_controls_version_mismatch".into());
     }
@@ -543,6 +565,8 @@ fn require_provider_controls(
 fn catalog_projection(catalog: &AgentTeamCatalog) -> Value {
     json!({"project":catalog.project,"observed_at_ms":catalog.observed_at_ms,"expires_at_ms":catalog.expires_at_ms,
         "providers":catalog.providers.iter().map(|p|json!({"provider_id":p.provider_id,"version":p.version,"models":p.models,"efforts":p.efforts,"source":p.source,"execution_controls_verified":require_provider_controls(p).is_ok()})).collect::<Vec<_>>(),
+        "unavailable_providers":catalog.unavailable_providers,
+        "ordinary_local_cli_tool":"cli","ordinary_local_cli_requires_isolation_resources":false,
         "thinking_profile_ids":catalog.host_profile_ids,"host_profiles_expires_at_ms":catalog.host_profiles_expires_at_ms,
         "selection_required":true,"account_availability_verified":false})
 }
@@ -588,10 +612,11 @@ struct CatalogRequest {
 pub(crate) fn tool_specs() -> Vec<Value> {
     let attempt = json!({"type":"object","properties":{"source_attempt_id":{"type":"string","minLength":1,"maxLength":128}},"required":["source_attempt_id"],"additionalProperties":false});
     vec![
+        json!({"description":"Discover and invoke CLIs installed on the assigned Runner. Default execution_mode=local uses its user login/environment and durable native jobs; it requires the authorized project and current task CLI budget, not fixed product/version/hash approval or a frozen plan. This trusted local mode is not an OS filesystem sandbox. discover request:{task_id} lists installed CLIs and stable commands; models request:{task_id,cli_id} reads native model/effort options. An arbitrary command uses discover request:{project,commands:[name_or_absolute_path]}. start request:{project,cli_id,model,effort?,instruction,idempotency_key,timeout_secs?} uses the discovered adapter, or {project,executable,args,stdin?,model?,effort?,idempotency_key,timeout_secs?} uses explicit native argv after inspecting actual CLI help. Select supported model/effort explicitly; metadata is not account entitlement. status/cancel request:{call_id} observes/stops your original Job; status request:{} lists this Agent task receipts after a lost response or update. Preserve keys on unknown outcomes; validate output, not only exit code. Explicit execution_mode=isolated retains frozen team slot start and source_attempt_id status/cancel through the existing isolated resource contract.","inputSchema":{"properties":{"request":{"type":"object"},"action":{"type":"string","enum":["discover","models","start","status","cancel"]},"execution_mode":{"enum":["local","isolated"]}},"required":["action","request"],"type":"object","additionalProperties":false},"name":"cli"}),
         json!({"name":"team_cli_observe","description":"Purely read an authorized original CLI attempt, its worker task state/revision and exact executor Job. Use the current worker revision for an explicit delivery decision; terminal workers need no new decision, and completion_expected_revision is only for identical-key replay. This never starts, closes, reconciles or resends execution. Missing Runner state stays unknown even when a durable worker task is readable; task state is not physical-stop proof. No private completion text or logs are exposed.","inputSchema":attempt}),
         json!({"name":"team_cli_close","description":"Request a durable close of the original worker execution authorized by this attempt. A request or transport acknowledgment is not stopped proof. It does not refund the original caller slot or recreate a worker.","inputSchema":attempt}),
         json!({"name":"team_cli_delivery_collect","description":"Collect and persist the original stopped worker's explicitly published UTF-8 deliverables for review. Only the original caller or authorized root manager can request this effect. Existing published artifacts are reused; no private path, raw log or new CLI execution is accepted. This does not approve the work or complete any task. Use the original attempt ID to recover a missing delivery, then read and review its exact version; do not restart the CLI or change its key.","inputSchema":attempt}),
-        json!({"name":"team_cli_catalog","description":"Read trusted current Runner CLI models/efforts and Host thinking profile IDs for this exact assigned task. Select explicit discovered values; catalog visibility is not account entitlement or provider execution readiness.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"],"additionalProperties":false}}),
+        json!({"name":"team_cli_catalog","description":"Read trusted current Runner CLI models/efforts and Host thinking profile IDs for this exact assigned task. Omitted providers have fixed reason codes in unavailable_providers; missing Runner capabilities/resources need local setup, not a replacement task or guessed model. Select explicit discovered values; catalog visibility is not account entitlement or provider execution readiness.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"],"additionalProperties":false}}),
     ]
 }
 
@@ -612,6 +637,120 @@ pub(crate) async fn call(
         return crate::agent_team_delivery::call(db, binding, name, arguments);
     }
     match name {
+        "cli" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Request {
+                action: String,
+                request: Value,
+                execution_mode: Option<String>,
+            }
+            let request: Request = match serde_json::from_value(arguments) {
+                Ok(request) => request,
+                Err(_) => return denied("agent_team_invalid_input"),
+            };
+            let isolated = match request.execution_mode.as_deref() {
+                None | Some("local") => false,
+                Some("isolated") => true,
+                _ => return denied("agent_cli_execution_mode_invalid"),
+            };
+            if !isolated
+                && request.action == "discover"
+                && request.request.get("commands").is_some()
+            {
+                let mut native = request.request;
+                let Some(object) = native.as_object_mut() else {
+                    return denied("agent_team_invalid_input");
+                };
+                object.insert("action".into(), json!("discover"));
+                return crate::tool_runtime::local_cli::call(runtime, binding, native).await;
+            }
+            if request.action == "discover" || request.action == "models" {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Query {
+                    task_id: String,
+                    cli_id: Option<String>,
+                }
+                let query: Query = match serde_json::from_value(request.request) {
+                    Ok(query) => query,
+                    Err(_) => return denied("agent_team_invalid_input"),
+                };
+                if request.action == "discover" && query.cli_id.is_some() {
+                    return denied("agent_team_invalid_input");
+                }
+                if request.action == "models" && query.cli_id.is_none() {
+                    if !isolated {
+                        return denied("agent_cli_id_required");
+                    }
+                    return Box::pin(call(
+                        runtime,
+                        binding,
+                        "team_cli_catalog",
+                        json!({"task_id":query.task_id}),
+                    ))
+                    .await;
+                }
+                let provider = match query
+                    .cli_id
+                    .as_deref()
+                    .map(AgentCliProvider::parse)
+                    .transpose()
+                {
+                    Ok(provider) => provider,
+                    Err(_) => return denied("agent_cli_invalid_provider_id"),
+                };
+                if let Err(error) = db.authorize_agent_assignment(
+                    binding,
+                    &query.task_id,
+                    AgentAssignmentOperation::Read,
+                ) {
+                    return denied(error.code());
+                }
+                let Some(assets) = &runtime.agent_team_assets else {
+                    return denied("agent_team_catalog_source_missing");
+                };
+                return match assets.inventory(binding, provider).await {
+                    Ok(inventory) => ToolResult::ok(
+                        json!({"installations":inventory.installations,"capabilities":inventory.capabilities,"observed_at_ms":inventory.observed_at_ms,"expires_at_ms":inventory.expires_at_ms,"execution_granted":false,"state_changed":false}),
+                    ),
+                    Err(_) => denied("agent_cli_inventory_unavailable"),
+                };
+            }
+            if !isolated {
+                if request.action == "start" && request.request.get("cli_id").is_some() {
+                    return crate::tool_runtime::local_cli::start_selected(
+                        runtime,
+                        binding,
+                        request.request,
+                    )
+                    .await;
+                }
+                let action = match request.action.as_str() {
+                    "start" => "start",
+                    "status" => "observe",
+                    "cancel" => "stop",
+                    _ => return denied("agent_cli_action_invalid"),
+                };
+                let mut native = request.request;
+                let Some(object) = native.as_object_mut() else {
+                    return denied("agent_team_invalid_input");
+                };
+                if object.contains_key("action") {
+                    return denied("agent_team_invalid_input");
+                }
+                object.insert("action".into(), json!(action));
+                return crate::tool_runtime::local_cli::call(runtime, binding, native).await;
+            }
+            let target = match request.action.as_str() {
+                "models" => "team_cli_catalog",
+                "start" => "team_cli_start",
+                "status" => "team_cli_observe",
+                "cancel" => "team_cli_close",
+                _ => return denied("agent_cli_action_invalid"),
+            };
+            Box::pin(call(runtime, binding, target, request.request)).await
+        }
         "team_cli_catalog" => {
             let request: CatalogRequest = match serde_json::from_value(arguments) {
                 Ok(v) => v,
@@ -889,6 +1028,15 @@ async fn start(
             );
         }
     }
+    let slot = match db.read_agent_cli_planned_slot(
+        caller,
+        &request.root_task_id,
+        &request.source_task_id,
+        request.call_index,
+    ) {
+        Ok(value) => value,
+        Err(error) => return denied(error.code()),
+    };
     let Some(assets) = &runtime.agent_team_assets else {
         return denied("agent_team_catalog_source_missing");
     };
@@ -905,15 +1053,6 @@ async fn start(
     {
         return denied("agent_team_profile_not_discovered");
     }
-    let slot = match db.read_agent_cli_planned_slot(
-        caller,
-        &request.root_task_id,
-        &request.source_task_id,
-        request.call_index,
-    ) {
-        Ok(value) => value,
-        Err(error) => return denied(error.code()),
-    };
     let Some(provider) = catalog
         .providers
         .iter()
@@ -973,7 +1112,8 @@ async fn start(
             Ok(value) => value,
             Err(code) => return denied(&code),
         };
-    let (_, _, wire_input) = match crate::tool_runtime::fixed_cli_process(
+    let (_, _, wire_input) = match crate::tool_runtime::cli_process_with_adapter(
+        controls.adapter.as_ref(),
         &slot.provider_id,
         &slot.model,
         slot.effort.as_deref(),
@@ -1061,7 +1201,8 @@ async fn start(
         Ok(v) => v,
         Err(e) => return unresolved(e.code(), Some(&original_attempt)),
     };
-    let (_, args, stdin) = match crate::tool_runtime::fixed_cli_process(
+    let (_, args, stdin) = match crate::tool_runtime::cli_process_with_adapter(
+        controls.adapter.as_ref(),
         &prepared.receipt.provider_id,
         &prepared.receipt.model,
         prepared.receipt.effort.as_deref(),

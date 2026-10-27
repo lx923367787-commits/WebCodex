@@ -173,7 +173,21 @@ impl Database {
             current.project(),
             source_task_id,
         )?;
-        let plan = execution_plan_on(&tx, &auth.communication_principal, root_task_id)?;
+        // Both task ownership and the caller's exact assignment were checked
+        // above. A missing plan here is an unmet prerequisite, not a missing
+        // task; preserve existence hiding for callers rejected before this.
+        let plan = execution_plan_on(&tx, &auth.communication_principal, root_task_id).map_err(
+            |cause| {
+                if cause.code() == "team_task_not_found" {
+                    error(
+                        "team_plan_required",
+                        "Register the team's frozen plan before starting a CLI slot",
+                    )
+                } else {
+                    cause
+                }
+            },
+        )?;
         if plan.project_id != current.project() {
             return Err(denied());
         }

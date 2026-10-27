@@ -99,3 +99,6 @@ impl SpawnOptions {
 /// Fixed, bounded native CLI metadata discovery for trusted controllers.
 #[cfg(feature = "cli-catalog")]
 pub mod cli_catalog;
+
+#[cfg(feature = "cli-catalog")]
+pub mod cli_registry;

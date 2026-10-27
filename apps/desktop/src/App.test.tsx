@@ -15,6 +15,8 @@ const api = vi.hoisted(() => ({
   configureLocal: vi.fn(),
   activateLocalProject: vi.fn(),
   listProjects: vi.fn(),
+  listNamedProjects: vi.fn(),
+  saveNamedProjects: vi.fn(),
   addProject: vi.fn(),
   switchProject: vi.fn(),
   mutateProject: vi.fn(),
@@ -209,6 +211,7 @@ describe("semantic Desktop UI", () => {
     );
     api.activity.mockResolvedValue([]);
     api.listProjects.mockResolvedValue({ projects: [], can_manage: true });
+    api.listNamedProjects.mockResolvedValue({ host_id: "fixture-host", revision: 1, projects: [] });
     api.getLaunchAtLogin.mockResolvedValue(false);
     api.openPowerShellInstallGuide.mockResolvedValue(undefined);
     api.setLaunchAtLogin.mockImplementation(async (enabled: boolean) => enabled);
@@ -289,6 +292,26 @@ describe("semantic Desktop UI", () => {
     fireEvent.click(start);
     await waitFor(() => expect(api.startRegularTunnel).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
+  it("can connect before registering the first named project without selecting a legacy folder", async () => {
+    const unselected: DesktopState = { ...readyState, project: null, preferred_connection: "open_ai_tunnel",
+      readiness: { ...readyState.readiness, project: "none", runtime_ready: false, ready_for_chatgpt: false } };
+    api.getState.mockResolvedValue(unselected);
+    api.startRegularTunnel.mockResolvedValue({ ...unselected, regular_tunnel: {
+      provider: "openai", status: "ready", clipboard_state: "copied", clipboard_contains: "tunnel_id", ready_for_chatgpt: true,
+    } });
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "连接" }));
+    const start = screen.getByRole("button", { name: "启动安全隧道" });
+    expect(start).toBeEnabled();
+    fireEvent.click(start);
+    await waitFor(() => expect(api.startRegularTunnel).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "项目" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "新建项目" })).toBeEnabled());
+    expect(api.addProject).not.toHaveBeenCalled();
+    expect(api.configureLocal).not.toHaveBeenCalled();
+    expect(api.activateLocalProject).not.toHaveBeenCalled();
   });
 
   it("keeps stop failures visible and never duplicates a failed tunnel", async () => {
@@ -398,7 +421,7 @@ describe("semantic Desktop UI", () => {
     expect(screen.getByRole("main")).toHaveFocus();
   });
 
-  it("switches a local project in place while preserving an active Tunnel", async () => {
+  it("shows named projects without switching the local project or restarting an active Tunnel", async () => {
     const tunneledState: DesktopState = {
       ...readyState,
       topology: { ...readyState.topology!, exposure: { kind: "open_ai_tunnel" } },
@@ -417,10 +440,13 @@ describe("semantic Desktop UI", () => {
       is_git_repository: true,
       runtime_project_id: "agent:desktop:next",
     };
-    const switched: DesktopState = { ...tunneledState, project: projectC };
     api.getState.mockResolvedValue(tunneledState);
     api.observeChatgptActivity.mockResolvedValue(tunneledState);
-    api.switchProject.mockResolvedValue(switched);
+    api.listNamedProjects.mockResolvedValue({ host_id: "fixture-host", revision: 2, projects: [
+      { id: "wc_workspace_next", name: "Next", enabled: true, folders: [
+        { project: projectC.runtime_project_id, name: "Next", path: projectC.path },
+      ], team_project: projectC.runtime_project_id },
+    ] });
     api.listProjects.mockResolvedValue({ can_manage: true, projects: [
       { id: readyState.project!.runtime_project_id, name: "Current", path: readyState.project!.path, revision: "sha256:current", enabled: true, connected: true, agent_status: "online", active_jobs: 0 },
       { id: projectC.runtime_project_id, name: "Next", path: projectC.path, revision: "sha256:next", enabled: true, connected: true, agent_status: "online", active_jobs: 0 },
@@ -428,29 +454,30 @@ describe("semantic Desktop UI", () => {
 
     renderApp();
     fireEvent.click(await screen.findByRole("button", { name: "项目" }));
-    expect(screen.getByRole("heading", { level: 1, name: "此电脑上的项目" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "我的项目" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveFocus();
-    fireEvent.click(await screen.findByRole("button", { name: "设为当前" }));
-
-    await waitFor(() => expect(api.switchProject).toHaveBeenCalledWith(projectC.runtime_project_id, "sha256:next"));
+    expect(await screen.findByText(projectC.path)).toBeVisible();
+    expect(api.listNamedProjects).toHaveBeenCalled();
+    expect(api.switchProject).not.toHaveBeenCalled();
     expect(api.configureLocal).not.toHaveBeenCalled();
-    await waitFor(() => expect(within(screen.getByRole("article", { name: "Next" })).getByRole("button", { name: "当前项目" })).toBeDisabled());
-    expect(screen.getByText(projectC.path)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "设为当前" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /在此电脑使用 WebCodex/ })).not.toBeInTheDocument();
     expect(screen.getByText("Tunnel 已就绪，等待 ChatGPT")).toBeInTheDocument();
     expect(api.startRegularTunnel).not.toHaveBeenCalled();
   });
 
-  it("uses full setup when the local runtime has not been prepared", async () => {
+  it("keeps named project management disabled until the local runtime is ready", async () => {
     const noProject: DesktopState = { ...readyState, project: null, readiness: { ...readyState.readiness, server: "stopped", runner: "stopped", runtime_ready: false, ready_for_chatgpt: false } };
     api.getState.mockResolvedValue(noProject);
     api.observeChatgptActivity.mockResolvedValue(noProject);
 
     renderApp();
     fireEvent.click(await screen.findByRole("button", { name: "项目" }));
-    fireEvent.click(screen.getByRole("button", { name: /添加项目/ }));
-
-    expect(await screen.findByRole("button", { name: /在此电脑使用 WebCodex/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "我的项目" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "刷新列表" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("请先启动本机 Server 和 Runner，再管理项目。");
+    expect(api.listNamedProjects).not.toHaveBeenCalled();
     expect(api.activateLocalProject).not.toHaveBeenCalled();
     expect(api.configureLocal).not.toHaveBeenCalled();
   });

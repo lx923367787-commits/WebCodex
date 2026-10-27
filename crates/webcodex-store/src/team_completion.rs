@@ -124,6 +124,9 @@ pub(crate) fn completion_on(
         {
             return Err(invariant());
         }
+        let (native_consumed, native_confirmed) =
+            crate::local_cli::completion_counts(conn, principal, &plan.project_id, &member.task_id)
+                .map_err(store_error)?;
         let dispatch_confirmed = index != 0 && conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM wc_team_agent_attempts WHERE root_task_id=?1
                 AND project=?2 AND source_task_id=?3 AND owner_principal_kind=?4 AND owner_principal_digest=?5
@@ -147,8 +150,9 @@ pub(crate) fn completion_on(
                 AND json_extract(record_json,'$.execution_state') IN ('completed','timed_out')",
                 params![plan.root_task_id,plan.project_id,member.task_id,principal.kind,principal.digest,first,end], |r| r.get(0)).map_err(store_error)
         };
-        let mut minimum_met =
-            !custom || confirmed_in(0, original_calls)? >= plan.policy.settings.cli_per_agent.min;
+        let mut minimum_met = !custom
+            || confirmed_in(0, original_calls)?.saturating_add(native_confirmed)
+                >= plan.policy.settings.cli_per_agent.min;
         for round in &rounds {
             let first = *round
                 .first_call_indices
@@ -167,8 +171,8 @@ pub(crate) fn completion_on(
             task_id: member.task_id.clone(),
             role: if index == 0 { "manager" } else { "subagent" },
             planned_cli_calls: member.cli_calls.len() as u32,
-            consumed_cli_calls: consumed,
-            confirmed_cli_calls: confirmed,
+            consumed_cli_calls: consumed.saturating_add(native_consumed),
+            confirmed_cli_calls: confirmed.saturating_add(native_confirmed),
             required_cli_calls,
             dispatch_confirmed,
             minimum_met,

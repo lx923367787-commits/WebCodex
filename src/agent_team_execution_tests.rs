@@ -105,6 +105,7 @@ fn controls(id: &str) -> ReviewedAgentCliControls {
         }],
         verification_evidence_sha256: "c".repeat(64),
         independent_review_sha256: "d".repeat(64),
+        adapter: None,
     }
 }
 
@@ -152,6 +153,7 @@ fn catalog(project: &str, providers: Vec<ObservedCliProvider>) -> AgentTeamCatal
         observed_at_ms: 1_000,
         expires_at_ms: 2_000,
         providers,
+        unavailable_providers: vec![],
         host_profile_ids: vec!["explicit-host-profile".into()],
         host_catalog_ref: "private-host-catalog-ref".into(),
         host_profiles_expires_at_ms: 2_000,
@@ -692,6 +694,29 @@ fn agent_team_execution_catalog_projection_omits_private_resources_controls_and_
     for hash in private_hashes {
         assert!(!serialized.contains(&hash));
     }
+}
+
+#[test]
+fn agent_team_execution_reports_missing_cli_prerequisites_without_dispatch() {
+    let mut observed = catalog("agent:test-runner:project", vec![]);
+    observed.unavailable_providers.push(UnavailableCliProvider {
+        provider_id: "workbuddy".into(),
+        reason_code: "agent_isolated_execution_unavailable",
+    });
+    let output = catalog_projection(&observed);
+    assert_eq!(output["providers"], json!([]));
+    assert_eq!(
+        output["unavailable_providers"][0]["reason_code"],
+        "agent_isolated_execution_unavailable"
+    );
+    let denial = denied("team_plan_required");
+    assert!(!denial.success);
+    assert_eq!(denial.output["state_changed"], false);
+    assert_eq!(denial.output["dispatch_certainty"], "not_started");
+    assert!(denial.output["next_action"]
+        .as_str()
+        .unwrap()
+        .contains("do not create a replacement manager"));
 }
 
 #[test]

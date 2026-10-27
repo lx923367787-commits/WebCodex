@@ -1,10 +1,5 @@
-import { useEffect, useId, useState } from "react";
-import type { AiOfficeApi, CliCatalog, CliProviderId, OfficePlan, OfficePlanEvaluation, OfficePolicy, OfficePolicyInput, OfficeProject, OfficeProvider } from "./types";
-
-const PROVIDERS: { id: CliProviderId; name: string; mark: string }[] = [
-  { id: "workbuddy", name: "WorkBuddy", mark: "W" },
-  { id: "antigravity", name: "Antigravity", mark: "A" },
-];
+import { useEffect, useId, useRef, useState } from "react";
+import type { AiOfficeApi, CliCatalog, CliInstallation, CliProviderId, OfficePlan, OfficePlanEvaluation, OfficePolicy, OfficePolicyInput, OfficeProject, OfficeProvider } from "./types";
 
 export function officeError(error: unknown, nextActionPrefix = ""): string {
   if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
@@ -27,13 +22,39 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [reloading, setReloading] = useState(false);
+  const [installed, setInstalled] = useState<CliInstallation[]>([]);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState("");
+  const discoveryGeneration = useRef(0);
+  const catalogGeneration = useRef<Record<string, number>>({});
+  async function discover() {
+    const generation = ++discoveryGeneration.current;
+    setDiscovering(true); setDiscoveryError(""); setRefreshing({}); setCatalogErrors({});
+    try {
+      const found = await api.discoverCli();
+      if (generation !== discoveryGeneration.current) return;
+      setInstalled(found);
+      setCatalogs({});
+      catalogGeneration.current = {};
+      setPlanProvider((current) => found.some((entry) => entry.providerId === current) ? current : "");
+      setPlanModel(""); setPlanEffort(""); setEvaluation(null);
+    } catch (cause) {
+      if (generation === discoveryGeneration.current) setDiscoveryError(officeError(cause));
+    } finally {
+      if (generation === discoveryGeneration.current) setDiscovering(false);
+    }
+  }
+  useEffect(() => {
+    void discover();
+    return () => { discoveryGeneration.current += 1; catalogGeneration.current = {}; };
+  }, [api, project.id]);
   const [catalogs, setCatalogs] = useState<Partial<Record<CliProviderId, CliCatalog>>>({});
   const [refreshing, setRefreshing] = useState<Partial<Record<CliProviderId, boolean>>>({});
   const [catalogErrors, setCatalogErrors] = useState<Partial<Record<CliProviderId, string>>>({});
   const [planTask, setPlanTask] = useState("完成当前项目任务，并检查交付结果");
   const [planAgents, setPlanAgents] = useState(2);
   const [planCliCalls, setPlanCliCalls] = useState(0);
-  const [planProvider, setPlanProvider] = useState<CliProviderId>("workbuddy");
+  const [planProvider, setPlanProvider] = useState<CliProviderId>("");
   const [planModel, setPlanModel] = useState("");
   const [planEffort, setPlanEffort] = useState("");
   const [evaluating, setEvaluating] = useState(false);
@@ -58,15 +79,21 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
     change({ ...draft, providers: [...draft.providers.filter((item) => item.provider_id !== id), provider] });
   }
   async function refreshCatalog(id: CliProviderId) {
+    const inventoryGeneration = discoveryGeneration.current;
+    const generation = (catalogGeneration.current[id] ?? 0) + 1;
+    catalogGeneration.current[id] = generation;
+    const current = () => inventoryGeneration === discoveryGeneration.current && catalogGeneration.current[id] === generation;
     setRefreshing((current) => ({ ...current, [id]: true }));
     setCatalogErrors((current) => ({ ...current, [id]: "" }));
     try {
       const catalog = await api.refreshCli(id);
-      setCatalogs((current) => ({ ...current, [id]: catalog }));
+      if (!current()) return;
+      if (catalog.providerId !== id) throw new Error("CLI 能力返回的标识不一致，请重新扫描。");
+      setCatalogs((previous) => ({ ...previous, [id]: catalog }));
     } catch (cause) {
-      setCatalogErrors((current) => ({ ...current, [id]: officeError(cause) }));
+      if (current()) setCatalogErrors((previous) => ({ ...previous, [id]: officeError(cause) }));
     } finally {
-      setRefreshing((current) => ({ ...current, [id]: false }));
+      if (current()) setRefreshing((previous) => ({ ...previous, [id]: false }));
     }
   }
   const invalidRange = draft.mode === "custom" && (draft.subagents.min > draft.subagents.max || draft.cli_per_agent.min > draft.cli_per_agent.max);
@@ -108,6 +135,7 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
     catch (cause) { setEvaluationError(officeError(cause)); }
     finally { setEvaluating(false); }
   }
+  const choices = [...installed, ...draft.providers.filter((saved) => !installed.some((entry) => entry.providerId === saved.provider_id)).map((saved) => ({ providerId: saved.provider_id, label: saved.provider_id, installed: false, native: false, adapterAvailable: false, status: "missing", message: "已保存的 CLI 当前未发现，请重新扫描或选择其它工具。" }))];
   const planCatalog = catalogs[planProvider];
   const policyChangedElsewhere = project.policy.revision !== revision;
 
@@ -131,16 +159,21 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
       </section>
       <section className="ao-card ao-policy-card">
         <div className="ao-card-heading"><div><span className="ao-small-kicker">CLI TOOLBOX</span><h3>为团队配好工具</h3></div><span className="ao-tag">模型来自 CLI 发现</span></div>
-        <p className="ao-muted">刷新会查询本机 CLI 的模型与思考选项。帮助目录不代表账号可用性。</p>{draft.mode === "auto" && <p className="ao-inline-note">当前由总经理自主选择模型。想固定模型，请先选择上方的「我来设定边界」。</p>}
-        <div className="ao-provider-list">{PROVIDERS.map(({ id, name, mark }) => {
+        <p className="ao-muted">使用本机已安装 CLI 和本机登录状态。刷新会查询模型与思考选项；未提供自动选项的工具可按本机帮助使用原生参数调用。</p>{draft.mode === "auto" && <p className="ao-inline-note">当前由总经理自主选择模型。想固定模型，请先选择上方的「我来设定边界」。</p>}
+        <button type="button" className="ao-button ao-button-subtle" disabled={discovering} onClick={() => void discover()}>{discovering ? "扫描本机 CLI 中…" : "重新扫描本机 CLI"}</button>
+        {discoveryError && <p role="alert" className="ao-error">{discoveryError}</p>}
+        {!discovering && installed.length === 0 && !discoveryError && <p className="ao-inline-note">未发现本机 CLI。安装并完成本机登录后，点击重新扫描。</p>}
+        <div className="ao-provider-list">{choices.map((installation) => {
+          const id = installation.providerId, name = installation.label, mark = name.slice(0, 1);
           const provider = draft.providers.find((item) => item.provider_id === id);
           const catalog = catalogs[id];
           const models = catalog?.models ?? [];
           const efforts = catalog?.efforts ?? [];
           return <div className="ao-provider" key={id}>
-            <div className="ao-provider-heading"><span className={`ao-provider-mark is-${id}`}>{mark}</span><div><strong>{name}</strong><span>{catalog ? catalog.installed ? catalog.version ? `已发现 · ${catalog.version}` : "已发现本机 CLI" : "本机不可用" : "尚未发现"}</span></div><label className="ao-toggle"><input type="checkbox" aria-label={`启用 ${name}`} checked={provider?.enabled ?? false} disabled={draft.mode === "auto" || saving} onChange={(event) => updateProvider(id, { enabled: event.target.checked })} /><span /></label></div>
-            <div className="ao-provider-fields"><label>模型<select aria-label={`${name} 模型`} value={provider?.model ?? ""} disabled={draft.mode === "auto" || !provider?.enabled || saving} onChange={(event) => updateProvider(id, { model: event.target.value || null })}><option value="">由总经理选择</option>{provider?.model && !models.includes(provider.model) && <option value={provider.model}>{provider.model} · 待发现验证</option>}{models.map((model) => <option value={model} key={model}>{model}</option>)}</select></label><button type="button" className="ao-button ao-button-subtle" disabled={Boolean(refreshing[id])} onClick={() => void refreshCatalog(id)} aria-label={`刷新 ${name} 模型列表`}><span className={refreshing[id] ? "ao-spin" : ""}>↻</span>{refreshing[id] ? "发现中…" : "刷新模型"}</button></div>
+            <div className="ao-provider-heading"><span className={`ao-provider-mark is-${id}`}>{mark}</span><div><strong>{name}</strong><span>{catalog ? catalog.installed ? catalog.version ? `已发现 · ${catalog.version}` : "已发现本机 CLI" : "本机不可用" : installation.installed ? "已发现本机安装" : "当前未发现"}</span></div><label className="ao-toggle"><input type="checkbox" aria-label={`启用 ${name}`} checked={provider?.enabled ?? false} disabled={draft.mode === "auto" || saving || (!installation.installed && !provider?.enabled)} onChange={(event) => updateProvider(id, { enabled: event.target.checked })} /><span /></label></div>
+            <div className="ao-provider-fields"><label>模型<select aria-label={`${name} 模型`} value={provider?.model ?? ""} disabled={draft.mode === "auto" || !provider?.enabled || saving} onChange={(event) => updateProvider(id, { model: event.target.value || null, effort: null })}><option value="">由总经理选择</option>{provider?.model && !models.includes(provider.model) && <option value={provider.model}>{provider.model} · 待发现验证</option>}{models.map((model) => <option value={model} key={model}>{model}</option>)}</select></label><button type="button" className="ao-button ao-button-subtle" disabled={Boolean(refreshing[id]) || !installation.installed || !installation.native} onClick={() => void refreshCatalog(id)} aria-label={`刷新 ${name} 模型列表`}><span className={refreshing[id] ? "ao-spin" : ""}>↻</span>{refreshing[id] ? "发现中…" : "刷新模型"}</button></div>
             <label className="ao-effort-field">思考强度<select aria-label={`${name} 思考强度`} value={provider?.effort ?? ""} disabled={draft.mode === "auto" || !provider?.enabled || efforts.length === 0 || saving} onChange={(event) => updateProvider(id, { effort: event.target.value || null })}><option value="">{efforts.length ? "由总经理选择" : "未发现支持的思考选项"}</option>{provider?.effort && !efforts.includes(provider.effort) && <option value={provider.effort}>{provider.effort} · 待发现验证</option>}{efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label>
+            {!catalog && <p className="ao-catalog-note">{installation.message}</p>}
             {catalog && <p className={`ao-catalog-note ${catalog.status === "error" ? "ao-error" : ""}`}>{catalog.message}<span>{catalog.accountAvailabilityVerified ? "账号可用性已核验" : "账号可用性未核验"} · {catalog.source === "live_catalog" ? "实时目录" : catalog.source === "installed_help" ? "本机 CLI 帮助" : "无可用目录"}</span></p>}
             {catalogErrors[id] && <p className="ao-error" role="alert">{catalogErrors[id]}</p>}
           </div>;
@@ -152,7 +185,7 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
       <section className="ao-advanced-diagnostics">
         <button type="button" className="ao-advanced-toggle" aria-expanded={diagnosticsOpen} aria-controls={diagnosticsId} onClick={() => setDiagnosticsOpen((open) => !open)}><span>高级诊断</span><span aria-hidden="true">{diagnosticsOpen ? "收起 −" : "展开 +"}</span></button>
         {diagnosticsOpen && <div id={diagnosticsId} className="ao-plan-card"><h3>假设计划校验</h3><p className="ao-muted">仅检查下面的假设计划是否符合已保存策略，不修改设置或启动任务。</p><label>假设的总任务<input aria-label="验证计划的总任务" disabled={evaluating} value={planTask} onChange={(event) => { setPlanTask(event.target.value); setEvaluation(null); }} /></label><div className="ao-plan-counts"><label>假设的子 Agent 人数<input type="number" aria-label="计划子 Agent 数量" disabled={evaluating} min={0} max={32} value={planAgents} onChange={(event) => { setPlanAgents(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label><label>假设的每人 CLI 次数<input type="number" aria-label="计划每个 Agent CLI 次数" disabled={evaluating} min={0} max={32} value={planCliCalls} onChange={(event) => { setPlanCliCalls(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label></div>
-        {planCliCalls > 0 && <div className="ao-plan-cli"><label>假设的 CLI 工具<select aria-label="验证计划 CLI 工具" value={planProvider} onChange={(event) => { setPlanProvider(event.target.value as CliProviderId); setPlanModel(""); setPlanEffort(""); setEvaluation(null); }}><option value="workbuddy">WorkBuddy</option><option value="antigravity">Antigravity</option></select></label><label>假设的调用模型<select aria-label="验证计划模型" value={planModel} onChange={(event) => { setPlanModel(event.target.value); setEvaluation(null); }}><option value="">先刷新并选择模型</option>{planCatalog?.models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>{Boolean(planCatalog?.efforts.length) && <label>假设的思考强度<select aria-label="验证计划思考强度" value={planEffort} onChange={(event) => { setPlanEffort(event.target.value); setEvaluation(null); }}><option value="">请选择</option>{planCatalog?.efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label>}</div>}
+        {planCliCalls > 0 && <div className="ao-plan-cli"><label>假设的 CLI 工具<select aria-label="验证计划 CLI 工具" value={planProvider} onChange={(event) => { setPlanProvider(event.target.value as CliProviderId); setPlanModel(""); setPlanEffort(""); setEvaluation(null); }}><option value="">选择已发现的 CLI</option>{installed.map((entry) => <option key={entry.providerId} value={entry.providerId} disabled={!entry.adapterAvailable}>{entry.label}</option>)}</select></label><label>假设的调用模型<select aria-label="验证计划模型" value={planModel} onChange={(event) => { setPlanModel(event.target.value); setEvaluation(null); }}><option value="">先刷新并选择模型</option>{planCatalog?.models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>{Boolean(planCatalog?.efforts.length) && <label>假设的思考强度<select aria-label="验证计划思考强度" value={planEffort} onChange={(event) => { setPlanEffort(event.target.value); setEvaluation(null); }}><option value="">请选择</option>{planCatalog?.efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label>}</div>}
         <button type="button" className="ao-button ao-button-primary" onClick={() => void evaluate()} disabled={evaluating || dirty || revision === 0 || !planTask.trim() || (planCliCalls > 0 && (!planModel || (Boolean(planCatalog?.efforts.length) && !planEffort)))}>{evaluating ? "验证中…" : "验证委派计划"}<span>↗</span></button>
         {(dirty || revision === 0) && <p className="ao-inline-note">诊断使用已保存的策略，请先保存上方设置。</p>}
         {evaluation && <div className={`ao-evaluation ${evaluation.admitted ? "is-admitted" : "is-rejected"}`} role="status"><strong>{evaluation.admitted ? "✓ 计划符合已保存策略" : "计划未通过策略检查"}</strong><span>{evaluation.subagent_count} 位子 Agent · {evaluation.cli_call_count} 次 CLI · 策略 v{evaluation.policy_revision}</span>{evaluation.violations.length > 0 && <ul>{evaluation.violations.map((violation, index) => <li key={`${violation.code}-${index}`}>{violation.agent_id ? `${violation.agent_id}：` : ""}{violation.message}</li>)}</ul>}<small>仅验证，没有启动 Agent 或 CLI 进程。</small></div>}

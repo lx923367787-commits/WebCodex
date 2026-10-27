@@ -89,6 +89,7 @@ fn now_ms() -> i64 {
 fn target(operation: &RunnerOperation) -> Result<&AgentExecutionTarget, String> {
     match operation {
         RunnerOperation::AgentCliCatalog(query) => Ok(&query.target),
+        RunnerOperation::AgentCliInventory(query) => Ok(&query.target),
         RunnerOperation::AgentCliDelivery(query) => Ok(&query.target),
         _ => Err("agent_cli_fixed_query_required".into()),
     }
@@ -96,6 +97,7 @@ fn target(operation: &RunnerOperation) -> Result<&AgentExecutionTarget, String> 
 fn deadline_at_ms(operation: &RunnerOperation) -> Result<i64, String> {
     match operation {
         RunnerOperation::AgentCliCatalog(query) => Ok(query.deadline_at_ms),
+        RunnerOperation::AgentCliInventory(query) => Ok(query.deadline_at_ms),
         RunnerOperation::AgentCliDelivery(query) => Ok(query.deadline_at_ms),
         _ => Err("agent_cli_fixed_query_required".into()),
     }
@@ -103,7 +105,9 @@ fn deadline_at_ms(operation: &RunnerOperation) -> Result<i64, String> {
 pub(super) fn is_query(operation: &RunnerOperation) -> bool {
     matches!(
         operation,
-        RunnerOperation::AgentCliCatalog(_) | RunnerOperation::AgentCliDelivery(_)
+        RunnerOperation::AgentCliCatalog(_)
+            | RunnerOperation::AgentCliDelivery(_)
+            | RunnerOperation::AgentCliInventory(_)
     )
 }
 
@@ -265,6 +269,13 @@ fn observed_resource(
 ) -> Result<Option<AgentExecutionResourceDescriptor>, String> {
     let runner = current_target(inner, access, target(operation)?)?;
     match operation {
+        RunnerOperation::AgentCliInventory(query) => {
+            query.validate()?;
+            if store_delivery_proof.is_some() {
+                return Err("agent_cli_store_proof_not_catalog_authority".into());
+            }
+            Ok(None)
+        }
         RunnerOperation::AgentCliCatalog(query) => {
             if store_delivery_proof.is_some() {
                 return Err("agent_cli_store_proof_not_catalog_authority".into());
@@ -507,6 +518,44 @@ impl RunnerRegistry {
         };
         notify_runner_locked(&inner, &client_id);
         Ok(read)
+    }
+
+    pub async fn query_agent_cli_inventory(
+        &self,
+        access: &RunnerAccess,
+        target: &AgentExecutionTarget,
+        provider: Option<AgentCliProvider>,
+        requested_by: String,
+    ) -> Result<AgentCliInventory, String> {
+        let deadline = Instant::now() + Duration::from_secs(AGENT_CLI_CONTROL_TIMEOUT_SECS);
+        let query = AgentCliInventoryQuery {
+            version: 1,
+            target: target.clone(),
+            provider,
+            deadline_at_ms: now_ms() + (AGENT_CLI_CONTROL_TIMEOUT_SECS * 1000) as i64,
+        };
+        let mut read = self
+            .enqueue_agent_cli_read(
+                access,
+                RunnerOperation::AgentCliInventory(query.clone()),
+                deadline,
+                requested_by,
+            )
+            .await?;
+        let raw = read.response(AGENT_CLI_CATALOG_MAX_BYTES).await?;
+        let inventory: AgentCliInventory =
+            serde_json::from_str(&raw).map_err(|_| "agent_cli_inventory_invalid_response")?;
+        let inner = timeout_at(deadline, self.inner.lock())
+            .await
+            .map_err(|_| "agent_cli_query_timeout")?;
+        validate_fence(&inner, &read.operation, &read.fence)?;
+        inventory.validate_for(&query, now_ms())?;
+        if inventory.observed_at_ms
+            < query.deadline_at_ms - (AGENT_CLI_CONTROL_TIMEOUT_SECS * 1000) as i64
+        {
+            return Err("agent_cli_inventory_stale".into());
+        }
+        Ok(inventory)
     }
 
     /// Fixed read only: no executable path, argv, prompt or caller deadline.

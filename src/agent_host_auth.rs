@@ -208,7 +208,12 @@ pub(crate) fn tool_scope(name: &str, args: &Value) -> &'static str {
         };
     }
     match name {
-        "local_cli" if matches!(args["action"].as_str(), Some("discover" | "observe")) => {
+        "cli"
+            if matches!(
+                args["action"].as_str(),
+                Some("discover" | "models" | "status")
+            ) =>
+        {
             "project:read"
         }
         "agent_identity" | "agent_assignment" | "agent_projects" | "agent_select_project" => {

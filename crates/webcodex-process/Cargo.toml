@@ -6,9 +6,11 @@ edition.workspace = true
 publish = false
 
 [features]
-cli-catalog = ["dep:serde", "dep:tokio", "dep:tempfile", "dep:url"]
+cli-catalog = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tempfile", "dep:url", "dep:webcodex-core"]
 
 [dependencies]
+webcodex-core = { path = "../webcodex-core", optional = true }
+serde_json = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time"], optional = true }
 tempfile = { version = "3", optional = true }

@@ -119,8 +119,8 @@ test_support = []
 
 [packages.webcodex-process]
 layer = "leaf"
-role = "OS process-tree ownership and lifecycle primitives."
-normal = []
+role = "OS process-tree ownership plus optional local CLI discovery and protocol metadata."
+normal = ["webcodex-core"]
 dev = []
 build = []
 test_support = []

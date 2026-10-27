@@ -141,6 +141,56 @@ fn enrolled_model_team_entry_does_not_dispatch_or_consume_slots() {
     assert!(!agent_team::call(&db, &run, "team_policy_get", json!({"task_id":task})).success);
 }
 
+#[tokio::test]
+async fn enrolled_cli_start_reports_missing_plan_before_catalog_or_reservation() {
+    let f = team_fixture();
+    let db = std::sync::Arc::new(f.db);
+    db.create_user(&crate::models::UserRecord {
+        id: "synthetic-owner".into(),
+        username: "synthetic-owner".into(),
+        created_at: chrono::Utc::now().timestamp(),
+        disabled: 0,
+        display_name: None,
+        role: "user".into(),
+        disabled_at: None,
+        updated_at: None,
+    })
+    .unwrap();
+    let runtime =
+        crate::tool_runtime::ToolRuntime::new_for_tests().with_communication_database(db.clone());
+    let mut auth = crate::auth::AuthContext::new(crate::auth::AuthKind::ModelAgent);
+    auth.agent_run = Some(f.run);
+    // No asset source/Runner is configured. The local plan prerequisite must
+    // still be diagnosed without querying either catalog or reserving work.
+    let result = runtime
+        .isolated_model_call_async(
+            "team_cli_start",
+            json!({
+                "root_task_id":f.task,"source_task_id":f.task,"call_index":0,
+                "fallback_thinking_profile_id":"explicit-profile","idempotency_key":"cli-planless"
+            }),
+            Some(&auth),
+        )
+        .await;
+    assert!(!result.success);
+    assert_eq!(result.output["error_kind"], "team_plan_required");
+    assert_eq!(result.output["dispatch_certainty"], "not_started");
+    assert_eq!(result.output["state_changed"], false);
+    assert!(result.output["next_action"].is_string());
+    assert_eq!(
+        db.list_agent_team_receipts(auth.agent_run.as_ref().unwrap(), &f.task, 0, 20)
+            .unwrap()
+            .total_count,
+        0
+    );
+    assert_eq!(
+        db.read_agent_team_task(auth.agent_run.as_ref().unwrap(), &f.task)
+            .unwrap()
+            .state,
+        "ready"
+    );
+}
+
 fn member_request(task: &str) -> serde_json::Value {
     json!({
         "root_task_id": task,

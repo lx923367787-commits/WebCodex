@@ -22,6 +22,10 @@ pub struct LocalCliCall {
     pub request_sha256: String,
     pub state: String,
     pub job_id: Option<String>,
+    #[serde(default)]
+    pub execution_confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_contract: Option<webcodex_core::cli_adapter::CliResultContract>,
 }
 
 fn error(code: &'static str) -> AgentIsolationError {
@@ -47,6 +51,36 @@ pub(crate) fn call_count(conn: &Connection, task: &str) -> rusqlite::Result<u32>
         [task],
         |r| r.get(0),
     )
+}
+
+pub(crate) fn family_counts(conn: &Connection, root: &str) -> rusqlite::Result<(u32, u32)> {
+    let native:u32=conn.query_row("SELECT COUNT(*) FROM wc_local_cli_calls c
+        JOIN wc_agent_enrollments e ON e.agent_id=c.agent_id AND e.task_id=c.task_id
+        JOIN wc_agent_tasks t ON t.task_id=c.task_id JOIN wc_agent_tasks r ON r.task_id=?1
+        WHERE t.owner_principal_kind=r.owner_principal_kind AND t.owner_principal_digest=r.owner_principal_digest
+        AND t.referenced_project_id=r.referenced_project_id
+        AND (e.task_id=?1 OR e.source_agent_id IN (SELECT agent_id FROM wc_agent_enrollments WHERE task_id=?1 AND purpose='manager'))",
+        [root],|r|r.get(0))?;
+    let legacy: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM wc_team_cli_attempts WHERE root_task_id=?1",
+        [root],
+        |r| r.get(0),
+    )?;
+    Ok((native, legacy))
+}
+
+pub(crate) fn completion_counts(
+    conn: &Connection,
+    principal: &crate::CommunicationPrincipal,
+    project: &str,
+    task: &str,
+) -> rusqlite::Result<(u32, u32)> {
+    conn.query_row("SELECT COUNT(*),COALESCE(SUM(CASE WHEN json_extract(c.record_json,'$.execution_confirmed')=1
+        AND json_type(c.record_json,'$.job_id')='text' AND length(json_extract(c.record_json,'$.job_id'))>0
+        AND json_extract(c.record_json,'$.state') IN ('completed','failed','stopped') THEN 1 ELSE 0 END),0)
+        FROM wc_local_cli_calls c JOIN wc_agent_tasks t ON t.task_id=c.task_id
+        WHERE c.task_id=?1 AND t.referenced_project_id=?2 AND t.owner_principal_kind=?3 AND t.owner_principal_digest=?4",
+        params![task,project,principal.kind,principal.digest],|r|Ok((r.get(0)?,r.get(1)?)))
 }
 
 pub(crate) fn require_quiescent(conn: &Connection, task: &str) -> Result<(), AgentIsolationError> {
@@ -75,6 +109,7 @@ impl Database {
         project: &str,
         client_id: &str,
         root: &str,
+        result_contract: Option<webcodex_core::cli_adapter::CliResultContract>,
     ) -> Result<(LocalCliCall, bool), AgentIsolationError> {
         if key.trim().is_empty()
             || key.len() > 128
@@ -128,6 +163,18 @@ impl Database {
         {
             return Err(error("local_cli_budget_exhausted"));
         }
+        let root_task = if authority.purpose == crate::AgentEnrollmentPurpose::Manager {
+            assignment.task_id.clone()
+        } else {
+            tx.query_row("SELECT parent.task_id FROM wc_agent_enrollments child JOIN wc_agent_enrollments parent
+                ON parent.agent_id=child.source_agent_id WHERE child.agent_id=?1 AND child.task_id=?2
+                AND parent.owner_user=child.owner_user AND parent.project=child.project AND parent.purpose='manager'",
+                params![binding.agent_id(),assignment.task_id],|r|r.get::<_,String>(0)).map_err(unavailable)?
+        };
+        let (family_native, family_legacy) = family_counts(&tx, &root_task).map_err(unavailable)?;
+        if family_native.saturating_add(family_legacy) >= 32 {
+            return Err(error("local_cli_team_budget_exhausted"));
+        }
         let record = LocalCliCall {
             call_id: format!("wc_local_cli_{}", uuid::Uuid::new_v4().simple()),
             task_id: assignment.task_id,
@@ -137,6 +184,8 @@ impl Database {
             request_sha256: request_sha256.into(),
             state: "reserved".into(),
             job_id: None,
+            execution_confirmed: false,
+            result_contract,
         };
         tx.execute("INSERT INTO wc_local_cli_calls(call_id,agent_id,task_id,key_sha256,request_sha256,record_json)
             VALUES(?1,?2,?3,?4,?5,?6)", params![record.call_id,binding.agent_id(),record.task_id,key_sha256,
@@ -164,6 +213,28 @@ impl Database {
         serde_json::from_str(&raw).map_err(unavailable)
     }
 
+    pub fn list_local_cli_calls(
+        &self,
+        binding: &VerifiedAgentRun,
+    ) -> Result<Vec<LocalCliCall>, AgentIsolationError> {
+        let conn = self.conn.lock().map_err(unavailable)?;
+        let assignment = enrollment_projection_on_connection(&conn, binding)?;
+        authorize_agent_assignment_on_connection(
+            &conn,
+            binding,
+            &assignment.task_id,
+            AgentAssignmentOperation::Read,
+        )?;
+        let mut statement=conn.prepare("SELECT record_json FROM wc_local_cli_calls WHERE agent_id=?1 AND task_id=?2 ORDER BY rowid DESC LIMIT 32").map_err(unavailable)?;
+        let rows = statement
+            .query_map(params![binding.agent_id(), assignment.task_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(unavailable)?;
+        rows.map(|row| serde_json::from_str(&row.map_err(unavailable)?).map_err(unavailable))
+            .collect()
+    }
+
     /// Only trusted registry observations may settle a receipt. Model inputs never
     /// supply a status, exit code or replacement Job id to this method.
     pub fn record_local_cli_job(
@@ -172,6 +243,17 @@ impl Database {
         id: &str,
         job_id: &str,
         state: &str,
+    ) -> Result<LocalCliCall, AgentIsolationError> {
+        self.record_local_cli_observation(binding, id, job_id, state, false)
+    }
+
+    pub fn record_local_cli_observation(
+        &self,
+        binding: &VerifiedAgentRun,
+        id: &str,
+        job_id: &str,
+        state: &str,
+        execution_confirmed: bool,
     ) -> Result<LocalCliCall, AgentIsolationError> {
         if !matches!(
             state,
@@ -197,9 +279,13 @@ impl Database {
         if record.job_id.as_deref().is_some_and(|old| old != job_id) {
             return Err(error("local_cli_job_identity_conflict"));
         }
-        if !matches!(record.state.as_str(), "completed" | "failed" | "stopped") {
+        let terminal = matches!(record.state.as_str(), "completed" | "failed" | "stopped");
+        if !terminal || (execution_confirmed && !record.execution_confirmed) {
             record.job_id = Some(job_id.into());
-            record.state = state.into();
+            if !terminal {
+                record.state = state.into();
+            }
+            record.execution_confirmed |= execution_confirmed;
             tx.execute(
                 "UPDATE wc_local_cli_calls SET record_json=?2 WHERE call_id=?1",
                 params![id, serde_json::to_string(&record).map_err(unavailable)?],
