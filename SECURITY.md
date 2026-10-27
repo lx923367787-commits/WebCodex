@@ -1,5 +1,10 @@
 # Security Policy
 
+For local checks of API keys, tokens, private configuration and available Git
+history before publication, see [Secret scanning](docs/SECRET_SCAN.md). Keep scan
+reports private and redacted. This check does not replace the runtime security
+model described below.
+
 WebCodex is a remote tool execution system for private code. Deploy it as a permissioned bridge: online clients can request bounded tool calls, but repository access and command execution stay behind your self-hosted server and connected agent.
 
 ## Supported Versions
