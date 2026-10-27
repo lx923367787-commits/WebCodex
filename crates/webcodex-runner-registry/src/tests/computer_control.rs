@@ -95,6 +95,7 @@ async fn computer_scroll_to_element_requires_independent_capability() {
 
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -173,6 +174,7 @@ async fn computer_key_input_requires_independent_capability() {
 
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -229,6 +231,7 @@ async fn computer_pointer_enqueue_requires_independent_capability_and_typed_enve
 
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -271,6 +274,7 @@ async fn computer_pointer_enqueue_requires_independent_capability_and_typed_enve
 
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -326,6 +330,7 @@ async fn computer_clipboard_enqueue_requires_independent_capabilities_and_typed_
 
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -376,6 +381,7 @@ async fn computer_clipboard_enqueue_requires_independent_capabilities_and_typed_
 
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -438,6 +444,7 @@ async fn computer_clipboard_enqueue_requires_independent_capabilities_and_typed_
 
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -529,6 +536,7 @@ async fn computer_window_activation_requires_its_own_additive_capability() {
 
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,

@@ -155,7 +155,13 @@ pub(super) fn mcp_artifact_export_caller_binding(
     auth: Option<&AuthContext>,
 ) -> Result<McpArtifactExportCallerBinding, &'static str> {
     let auth = auth.ok_or("authenticated caller identity is unavailable")?;
+    if auth.is_native_host() {
+        return Err("native_host_resource_denied");
+    }
     match auth.kind {
+        crate::auth::AuthKind::ModelAgent | crate::auth::AuthKind::NativeHost => {
+            Err("agent_resource_not_isolated")
+        }
         crate::auth::AuthKind::Bootstrap => Ok(McpArtifactExportCallerBinding::Bootstrap),
         crate::auth::AuthKind::ApiToken => auth
             .api_key_id

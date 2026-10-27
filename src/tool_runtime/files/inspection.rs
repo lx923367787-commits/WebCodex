@@ -1080,16 +1080,28 @@ impl ToolRuntime {
         max_depth: Option<usize>,
         limit: Option<usize>,
     ) -> ToolResult {
+        let proj = match self.execution().resolve_project(&project).await {
+            Ok(project) => project,
+            Err(error) => return ToolResult::err(error),
+        };
+        self.project_overview_resolved(&proj, project, path, max_depth, limit)
+            .await
+    }
+
+    pub(crate) async fn project_overview_resolved(
+        &self,
+        proj: &ProjectConfig,
+        project: String,
+        path: Option<String>,
+        max_depth: Option<usize>,
+        limit: Option<usize>,
+    ) -> ToolResult {
         let rel_path = match normalize_project_overview_path(path.as_deref().unwrap_or("")) {
             Ok(path) => path,
             Err(error) => return ToolResult::err(error),
         };
         let max_depth = effective_project_overview_max_depth(max_depth);
         let limit = effective_project_overview_limit(limit);
-        let proj = match self.execution().resolve_project(&project).await {
-            Ok(project) => project,
-            Err(error) => return ToolResult::err(error),
-        };
         let client_id = proj.client_id.clone();
         let wait_timeout = 30;
         let runner_path = if rel_path.is_empty() {

@@ -20,6 +20,7 @@ mod share_service;
 #[path = "project_entry_windows.rs"]
 mod windows_private_state;
 
+pub(crate) use openai_tunnel_service::native_tunnel_binary_digest;
 pub(crate) use regular_tunnel_service::{run_regular_server_tunnel, RegularServerTunnelOptions};
 use setup_service::{
     create_private_dir, local_readiness, prepare_runtime_private_state, read_private_value,

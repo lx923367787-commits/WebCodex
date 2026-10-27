@@ -1,6 +1,12 @@
 # WebCodex
 
-[English](README.md) | **简体中文**
+**外部工具与账号：** 模型 CLI 由用户在每台 Runner 电脑自行安装、登录或配置自己的 key，再配置并验证 Runner。WebCodex 交付对接代码和通用运行依赖，不交付另一用户配置好的工具环境。见[工具、账号与迁移规则](docs/EXTERNAL_TOOLS.md#简体中文)。
+
+**Windows 当前版本（含 2026-10-25 连接修复）：[完整源码、工具、依赖和复刻步骤](windows/README.md)。**
+
+**换电脑继续开发：[源码构建、本机账号配置与历史迁移记录](windows/HOME-DEVELOPMENT.zh-CN.md)。**
+
+[English](README.md) | [简体中文](README.zh-CN.md)
 
 **让 ChatGPT、Claude 和其他 AI Agent 使用你自己机器上的代码、开发工具和办公文件。**
 

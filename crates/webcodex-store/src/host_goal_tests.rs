@@ -13,6 +13,8 @@ mod review_tests;
 
 #[path = "host_goal_task_directory_tests.rs"]
 mod task_directory_tests;
+#[path = "agent_task_scope_tests.rs"]
+mod task_scope_tests;
 
 fn database() -> (tempfile::TempDir, Database) {
     let dir = tempfile::tempdir().unwrap();
@@ -484,7 +486,7 @@ fn host_goal_tests_restart_preserves_draft_current_pointer_and_history() {
             goal.revision,
             None,
             &state,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "Planning discussion saved",
             "draft",
             NOW + 1,
@@ -1033,7 +1035,7 @@ fn host_goal_tests_failed_checkpoint_is_atomic() {
             goal.revision,
             None,
             &state,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "Save and switch",
             "fail",
             NOW + 1
@@ -1299,7 +1301,7 @@ fn host_goal_tests_explicit_contract_change_preserves_history_and_requires_new_c
 }
 
 #[test]
-fn host_goal_tests_handoff_saves_state_without_advancing_node_or_execution_authority() {
+fn host_goal_tests_progress_saves_state_without_advancing_node_or_execution_authority() {
     let (_dir, db) = database();
     let (goal, binding) = claimed(&db);
     let mut state = goal.state.clone();
@@ -1313,7 +1315,7 @@ fn host_goal_tests_handoff_saves_state_without_advancing_node_or_execution_autho
             goal.revision,
             Some(&binding),
             &state,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "Saved before switching conversations",
             "handoff",
             NOW + 5,
@@ -1667,7 +1669,7 @@ fn host_goal_tests_checkpoint_raw_receipt_survives_missing_state_and_changed_cur
             goal.revision,
             None,
             &goal.state,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "Save the current state",
             "raw-checkpoint",
             "raw-patch-with-no-state",
@@ -1870,7 +1872,7 @@ fn host_goal_tests_operation_resolution_is_atomic_with_binding_state_and_receipt
             goal.revision,
             Some(&stale),
             &goal.state,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "Resolve",
             "stale",
             "request-a",
@@ -1892,7 +1894,7 @@ fn host_goal_tests_operation_resolution_is_atomic_with_binding_state_and_receipt
             goal.revision,
             Some(&binding),
             &invalid,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "Resolve",
             "invalid",
             "request-b",
@@ -1908,7 +1910,7 @@ fn host_goal_tests_operation_resolution_is_atomic_with_binding_state_and_receipt
             goal.revision,
             Some(&binding),
             &goal.state,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "Resolve",
             "receipt-fails",
             "request-c",
@@ -1935,7 +1937,7 @@ fn host_goal_tests_operation_resolution_is_atomic_with_binding_state_and_receipt
             goal.revision,
             Some(&binding),
             &goal.state,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "Resolve",
             "duplicate",
             "request-d",
@@ -1955,7 +1957,7 @@ fn host_goal_tests_operation_resolution_is_atomic_with_binding_state_and_receipt
             goal.revision,
             Some(&binding),
             &goal.state,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "Resolve",
             "accepted",
             "request-e",
@@ -2092,7 +2094,7 @@ fn host_goal_tests_abandoned_business_intent_can_be_explicitly_resolved_atomical
             goal.revision,
             Some(&binding),
             &goal.state,
-            HostGoalCheckpointAction::Handoff,
+            HostGoalCheckpointAction::Progress,
             "User reconciled pre-crash intent",
             "reconcile-intent",
             "exact-request",
@@ -2338,7 +2340,7 @@ fn host_goal_tests_node_command_paths_override_or_inherit_plan_defaults() {
 fn managed_context(db: &Database, epoch: &str) -> HostGoalInvocationContext {
     let context = HostGoalInvocationContext {
         context_epoch: epoch.into(),
-        identity_source: "explicit_context_only".into(),
+        identity_source: "window_bound".into(),
     };
     db.ensure_host_context_identity(OWNER, &context).unwrap();
     context
@@ -2389,8 +2391,53 @@ fn managed_handoff(
     )
 }
 
+fn managed_takeover(
+    db: &Database,
+    goal_id: &str,
+    context: &HostGoalInvocationContext,
+) -> HostGoalRecord {
+    let h = db.read_host_goal_handoff(OWNER, goal_id).unwrap().unwrap();
+    let h = db
+        .begin_host_goal_handoff_attempt(
+            OWNER,
+            goal_id,
+            &h.handoff_id,
+            h.attempt_id.as_deref(),
+            NOW + 21,
+            300,
+        )
+        .unwrap();
+    let attempt = h.attempt_id.as_deref().unwrap();
+    db.bind_host_goal_handoff_candidate(OWNER, goal_id, &h.handoff_id, attempt, context, NOW + 22)
+        .unwrap();
+    let digest = "a".repeat(64);
+    db.record_host_goal_handoff_prepared(
+        OWNER,
+        goal_id,
+        &h.handoff_id,
+        attempt,
+        h.checkpoint_sequence,
+        &digest,
+        context,
+        NOW + 23,
+    )
+    .unwrap();
+    db.commit_host_goal_handoff_ready(
+        OWNER,
+        goal_id,
+        &h.handoff_id,
+        attempt,
+        h.checkpoint_sequence,
+        &digest,
+        context,
+        NOW + 24,
+    )
+    .unwrap();
+    db.get_host_goal(OWNER, goal_id).unwrap().unwrap()
+}
+
 #[test]
-fn host_goal_tests_managed_handoff_atomic_retirement_replay_and_new_epoch_binding() {
+fn host_goal_tests_managed_handoff_waits_for_takeover_before_retirement() {
     let (dir, db) = database();
     let goal = confirmed(&db);
     let a = managed_context(&db, "source-a");
@@ -2400,7 +2447,7 @@ fn host_goal_tests_managed_handoff_atomic_retirement_replay_and_new_epoch_bindin
         .read_host_context_state(OWNER, "source-a")
         .unwrap()
         .unwrap();
-    assert_eq!(source.state, "retired");
+    assert_eq!(source.state, "draining");
     assert_eq!(
         source.retirement_goal_id.as_deref(),
         Some(goal.goal_id.as_str())
@@ -2428,6 +2475,12 @@ fn host_goal_tests_managed_handoff_atomic_retirement_replay_and_new_epoch_bindin
     drop(db);
     let db = Database::open(&dir.path().join("state.db")).unwrap();
     db.ensure_host_context_identity(OWNER, &a).unwrap();
+    let b = managed_context(&db, "target-b");
+    let handed_goal = managed_takeover(&db, &handed.goal.goal_id, &b);
+    let source = db
+        .read_host_context_state(OWNER, "source-a")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         db.gate_host_context(OWNER, Some(&a), true)
             .unwrap_err()
@@ -2448,7 +2501,6 @@ fn host_goal_tests_managed_handoff_atomic_retirement_replay_and_new_epoch_bindin
         .code(),
         "goal_chat_retired"
     );
-    let b = managed_context(&db, "target-b");
     assert_eq!(
         db.begin_host_goal_operation_with_manifest_in_context(
             OWNER,
@@ -2463,9 +2515,9 @@ fn host_goal_tests_managed_handoff_atomic_retirement_replay_and_new_epoch_bindin
         )
         .unwrap_err()
         .code(),
-        "goal_context_attempt_mismatch"
+        "goal_conflict"
     );
-    let next = managed_claim(&db, &handed.goal, &b, "claim-b");
+    let next = managed_claim(&db, &handed_goal, &b, "claim-b");
     assert!(next.goal.fence > claim.goal.fence);
     assert_eq!(next.attempt.context_epoch.as_deref(), Some("target-b"));
     db.record_host_goal_context_ref(OWNER, &goal.goal_id, "target-b")
@@ -2491,6 +2543,103 @@ fn host_goal_tests_managed_handoff_atomic_retirement_replay_and_new_epoch_bindin
 }
 
 #[test]
+fn host_goal_tests_resume_started_is_durable_scoped_and_does_not_claim() {
+    let (dir, db) = database();
+    let goal = confirmed(&db);
+    let a = managed_context(&db, "resume-source-a");
+    let claim = managed_claim(&db, &goal, &a, "resume-claim-a");
+    assert!(db
+        .latest_host_goal_handoff(OWNER, &goal.goal_id)
+        .unwrap()
+        .is_none());
+    let handed = managed_handoff(&db, &claim, &a, "resume-handoff-a", &[]).unwrap();
+    let latest = db
+        .latest_host_goal_handoff(OWNER, &goal.goal_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.0, a.context_epoch);
+    assert_eq!(latest.2, NOW + 20);
+    // Opening an old schema must preserve the handoff without inventing a receipt.
+    db.conn_for_tests()
+        .execute_batch("ALTER TABLE wc_host_context_states DROP COLUMN resume_started_json;")
+        .unwrap();
+    drop(db);
+    let db = Database::open(&dir.path().join("state.db")).unwrap();
+    let b = managed_context(&db, "resume-target-b");
+    assert!(db
+        .record_host_goal_resume_started(OTHER, &goal.goal_id, handed.goal.revision, &b, NOW + 21)
+        .is_err());
+    assert!(db
+        .record_host_goal_resume_started(OWNER, &goal.goal_id, claim.goal.revision, &b, NOW + 21)
+        .is_err());
+    assert!(db
+        .record_host_goal_resume_started(OWNER, &goal.goal_id, handed.goal.revision, &a, NOW + 21)
+        .is_err());
+    assert!(db
+        .read_host_goal_handoff_snapshot(OWNER, &goal.goal_id, &a.context_epoch)
+        .unwrap()
+        .resume_started
+        .is_none());
+    db.record_host_goal_resume_started(OWNER, &goal.goal_id, handed.goal.revision, &b, NOW + 21)
+        .unwrap();
+    assert!(db
+        .read_host_goal_handoff_snapshot(OWNER, &goal.goal_id, &a.context_epoch)
+        .unwrap()
+        .resume_started
+        .is_none());
+    let committed_goal = managed_takeover(&db, &goal.goal_id, &b);
+    let snapshot = db
+        .read_host_goal_handoff_snapshot(OWNER, &goal.goal_id, &a.context_epoch)
+        .unwrap();
+    let receipt = snapshot.resume_started.unwrap();
+    assert_eq!(receipt.context_epoch, b.context_epoch);
+    assert_eq!(receipt.started_at, NOW + 24);
+    assert_eq!(snapshot.goal.revision, committed_goal.revision);
+    assert_eq!(snapshot.attempt.unwrap().binding, claim.attempt.binding);
+    let c = managed_context(&db, "resume-target-c");
+    db.record_host_goal_resume_started(OWNER, &goal.goal_id, committed_goal.revision, &c, NOW + 25)
+        .unwrap();
+    drop(db);
+    let db = Database::open(&dir.path().join("state.db")).unwrap();
+    assert_eq!(
+        db.read_host_goal_handoff_snapshot(OWNER, &goal.goal_id, &a.context_epoch)
+            .unwrap()
+            .resume_started,
+        Some(receipt.clone())
+    );
+    let next = managed_claim(&db, &committed_goal, &b, "resume-claim-b");
+    let handed_b = managed_handoff(&db, &next, &b, "resume-handoff-b", &[]).unwrap();
+    let latest_b = db
+        .latest_host_goal_handoff(OWNER, &goal.goal_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest_b.0, b.context_epoch);
+    assert!(latest_b.1 > latest.1);
+    assert!(db
+        .read_host_goal_handoff_snapshot(OWNER, &goal.goal_id, &b.context_epoch)
+        .unwrap()
+        .resume_started
+        .is_none());
+    db.record_host_goal_resume_started(OWNER, &goal.goal_id, handed_b.goal.revision, &c, NOW + 30)
+        .unwrap();
+    managed_takeover(&db, &goal.goal_id, &c);
+    assert_eq!(
+        db.read_host_goal_handoff_snapshot(OWNER, &goal.goal_id, &a.context_epoch)
+            .unwrap()
+            .resume_started,
+        Some(receipt)
+    );
+    assert_eq!(
+        db.read_host_goal_handoff_snapshot(OWNER, &goal.goal_id, &b.context_epoch)
+            .unwrap()
+            .resume_started
+            .unwrap()
+            .context_epoch,
+        c.context_epoch
+    );
+}
+
+#[test]
 fn host_goal_tests_managed_handoff_failure_rolls_back_checkpoint_retirement_and_receipt() {
     let (_dir, db) = database();
     let goal = confirmed(&db);
@@ -2500,7 +2649,7 @@ fn host_goal_tests_managed_handoff_failure_rolls_back_checkpoint_retirement_and_
         .latest_host_goal_checkpoint(OWNER, &goal.goal_id)
         .unwrap()
         .unwrap();
-    db.conn_for_tests().execute_batch("CREATE TRIGGER handoff_failure BEFORE UPDATE OF state ON wc_host_context_states WHEN NEW.state=3 BEGIN SELECT RAISE(ABORT,'injected retirement write failure'); END;").unwrap();
+    db.conn_for_tests().execute_batch("CREATE TRIGGER handoff_failure BEFORE UPDATE OF state ON wc_host_context_states WHEN NEW.state=2 BEGIN SELECT RAISE(ABORT,'injected handoff preparation write failure'); END;").unwrap();
     assert!(managed_handoff(&db, &claim, &a, "handoff-a", &[]).is_err());
     assert_eq!(
         db.get_host_goal(OWNER, &goal.goal_id)
@@ -2603,7 +2752,8 @@ fn host_goal_tests_managed_handoff_unknown_and_changed_job_snapshots_block() {
         NOW + 30,
     )
     .unwrap();
-    let next = managed_claim(&db, &handed.goal, &b, "claim-b");
+    let handed_goal = managed_takeover(&db, &handed.goal.goal_id, &b);
+    let next = managed_claim(&db, &handed_goal, &b, "claim-b");
     assert!(next.goal.fence > claim.goal.fence);
     assert_eq!(
         db.list_host_goal_operations(OWNER, &goal.goal_id, 0, 100, false)
@@ -2740,9 +2890,9 @@ fn host_goal_tests_twenty_synthetic_cold_recoveries_preserve_goal_and_do_not_rep
             NOW,
         )
         .unwrap();
-        goal = managed_handoff(&db, &claim, &context, &format!("handoff-{index}"), &[])
-            .unwrap()
-            .goal;
+        managed_handoff(&db, &claim, &context, &format!("handoff-{index}"), &[]).unwrap();
+        let successor = managed_context(&db, &format!("synthetic-test-driver-{}", index + 1));
+        goal = managed_takeover(&db, &goal_id, &successor);
         assert_eq!(goal.goal_id, goal_id);
         assert!(serde_json::to_vec(&goal).unwrap().len() < 4096);
         drop(db);
@@ -2779,6 +2929,7 @@ fn host_goal_tests_two_new_context_claims_have_one_winner() {
     let handed = managed_handoff(&db, &claim, &a, "handoff-a", &[]).unwrap();
     let b = managed_context(&db, "target-b");
     let c = managed_context(&db, "target-c");
+    let handed_goal = managed_takeover(&db, &handed.goal.goal_id, &b);
     let db = std::sync::Arc::new(db);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
     let handles = [b, c]
@@ -2787,7 +2938,7 @@ fn host_goal_tests_two_new_context_claims_have_one_winner() {
         .map(|(i, ctx)| {
             let db = db.clone();
             let barrier = barrier.clone();
-            let goal = handed.goal.clone();
+            let goal = handed_goal.clone();
             std::thread::spawn(move || {
                 barrier.wait();
                 db.claim_host_goal_node_for_plan_in_context(
@@ -2872,13 +3023,13 @@ fn host_goal_tests_dispatch_and_retirement_serialize_across_database_connections
         .unwrap()
         .unwrap();
     if handoff.is_ok() {
-        assert_eq!(state.state, "retired");
+        assert_eq!(state.state, "draining");
         assert_eq!(
             db.count_unresolved_host_goal_operations(OWNER, &goal.goal_id)
                 .unwrap(),
             0
         );
-        assert_eq!(dispatch.unwrap_err().code(), "goal_chat_retired");
+        assert_eq!(dispatch.unwrap_err().code(), "goal_handoff_pending");
     } else {
         assert_eq!(state.state, "active");
         assert_eq!(
@@ -2968,7 +3119,7 @@ fn host_goal_tests_draining_closeout_cannot_mutate_another_owned_goal() {
         .goal;
     let a = HostGoalInvocationContext {
         context_epoch: "draining-source".into(),
-        identity_source: "explicit_context_only".into(),
+        identity_source: "window_bound".into(),
     };
     db.observe_host_context(
         OWNER,
@@ -3039,22 +3190,25 @@ fn host_goal_tests_handoff_projection_is_coherent_during_claims_on_another_conne
     let a = managed_context(&db, "source-a");
     let claim = managed_claim(&db, &goal, &a, "claim-a");
     let handed = managed_handoff(&db, &claim, &a, "handoff-a", &[]).unwrap();
+    let successor = managed_context(&db, "reader-race-successor");
+    let committed = managed_takeover(&db, &handed.goal.goal_id, &successor);
+    let current = managed_claim(&db, &committed, &successor, "reader-race-initial").goal;
     let expected_checkpoint = db
-        .latest_host_goal_checkpoint(OWNER, &goal.goal_id)
+        .read_host_goal_handoff_snapshot(OWNER, &goal.goal_id, "source-a")
         .unwrap()
+        .checkpoint
         .unwrap();
     let writer = Database::open(&dir.path().join("state.db")).unwrap();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let writer_barrier = barrier.clone();
     let thread = std::thread::spawn(move || {
         writer_barrier.wait();
-        let mut current = handed.goal;
+        let mut current = current;
         for index in 0..30 {
-            let context = managed_context(&writer, &format!("reader-race-{index}"));
             current = managed_claim(
                 &writer,
                 &current,
-                &context,
+                &successor,
                 &format!("reader-race-claim-{index}"),
             )
             .goal;

@@ -6,12 +6,9 @@ use crate::{Config, Database};
 use salvo::prelude::*;
 
 use super::context::{AuthContext, AuthError};
-use super::shared_key::{
-    allow_anonymous_enabled, is_managed_token_prefix, open_anonymous_context, shared_key_context,
-    shared_key_enabled,
-};
+use super::scopes;
+use super::shared_key::{is_managed_token_prefix, shared_key_context, shared_key_enabled};
 use super::tokens::{authenticate, is_oauth2_access_token};
-use super::{bootstrap_context, scopes};
 
 // ---------------------------------------------------------------------------
 // Token extraction helpers
@@ -190,6 +187,37 @@ pub(crate) fn enforce_token_surface(
     ctx: &AuthContext,
     path: &str,
 ) -> Result<(), (StatusCode, &'static str)> {
+    if ctx.is_native_host() {
+        return if path == "/mcp" && ctx.native_host.is_some() {
+            Ok(())
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                "native_host_credential_audience_denied",
+            ))
+        };
+    }
+    if ctx.kind == super::AuthKind::ModelAgent && ctx.agent_run.is_none() {
+        return Err((StatusCode::FORBIDDEN, "agent_identity_required"));
+    }
+    if ctx.agent_run.is_some() {
+        return if crate::agent_isolation::run_route(path) {
+            Ok(())
+        } else {
+            Err((StatusCode::FORBIDDEN, "agent_credential_audience_denied"))
+        };
+    }
+    if crate::agent_isolation::human_operator_route(path)
+        && !(ctx.kind == super::AuthKind::ApiToken
+            && ctx.token_kind.as_deref() == Some("user")
+            && ctx.user_id.as_deref().is_some_and(|id| !id.is_empty())
+            && !ctx.is_bootstrap())
+    {
+        return Err((StatusCode::FORBIDDEN, "human_operator_pat_required"));
+    }
+    if crate::agent_isolation::model_route(path) {
+        return Err((StatusCode::FORBIDDEN, "agent_identity_required"));
+    }
     // Lightweight principals, project credentials, and project/lightweight
     // OAuth subjects must never reach account-control management surfaces.
     if (ctx.is_lightweight()
@@ -319,51 +347,138 @@ impl Handler for AuthMiddleware {
             return;
         };
 
+        // Salvo normalizes repeated separators, trailing slashes and encoded
+        // segments. Reject aliases before audience checks so routing cannot
+        // reinterpret a path that authorization classified differently.
+        let path = req.uri().path();
+        if path.contains('%')
+            || path.contains('\\')
+            || path.contains("//")
+            || (path.len() > 1 && path.ends_with('/'))
+        {
+            if let Some(db) = get_db(depot) {
+                let _ = db.record_agent_access_denied(None, "noncanonical_authenticated_route");
+            }
+            reject(
+                res,
+                ctrl,
+                StatusCode::BAD_REQUEST,
+                "noncanonical_authenticated_route",
+            );
+            return;
+        }
+
         let db = get_db(depot);
         let project_mode = project_connector_enabled(depot);
         let project_share_query_token = project_share_mcp_query_token(req, project_mode);
         let project_share_query_token_used = project_share_query_token.is_some();
         let token = project_share_query_token.or_else(|| bearer_token(req));
 
-        // When no token is present and auth is enabled, reject immediately
-        // unless the server was explicitly started with `--open`
-        // (WEBCODEX_ALLOW_ANONYMOUS=true), in which case the anonymous caller
-        // is granted a non-admin open-group context.
-        // When auth is disabled, the verifier chain handles the bootstrap
-        // fallback — we still call authenticate with a dummy token so the
-        // code path stays uniform.
+        // Model surfaces never inherit auth-disabled, anonymous, shared-user or
+        // bootstrap authority. Authenticate an issued run even in local mode.
+        if crate::agent_isolation::model_route(req.uri().path()) {
+            // A control-registered OAuth host may reach only the narrow MCP
+            // window broker. That broker resolves a server-owned Agent/run
+            // mapping; OAuth alone never becomes an Agent identity.
+            if req.uri().path() == "/mcp"
+                && req.method() == salvo::http::Method::POST
+                && config.is_auth_enabled()
+                && !project_share_query_token_used
+            {
+                if let (Some(db), Some(token)) = (db.as_ref(), token.as_deref()) {
+                    if is_oauth2_access_token(token)
+                        || token.starts_with(webcodex_store::NATIVE_AGENT_HOST_TOKEN_PREFIX)
+                    {
+                        if let Ok(Some(ctx)) = authenticate(&config, Some(db), token).await {
+                            if ctx.has_scope("runtime:read")
+                                && crate::agent_host_auth::authorized(db, &ctx)
+                            {
+                                depot.inject(ctx);
+                                ctrl.call_next(req, depot, res).await;
+                                return;
+                            }
+                            if ctx.is_native_host() {
+                                let _ = db.record_agent_access_denied(
+                                    None,
+                                    "native_host_window_authorization_required",
+                                );
+                                reject(
+                                    res,
+                                    ctrl,
+                                    StatusCode::FORBIDDEN,
+                                    "native_host_window_authorization_required",
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            let verified = match token.as_deref() {
+                Some(token) if token.starts_with("wc_ar_") => {
+                    authenticate(&config, db.as_ref(), token)
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                _ => None,
+            };
+            let Some(ctx) = verified.filter(|ctx| ctx.agent_run.is_some()) else {
+                if let Some(db) = db.as_ref() {
+                    let _ = db.record_agent_access_denied(None, "agent_identity_required");
+                }
+                if let Some(challenge) = oauth2_bearer_challenge(&config) {
+                    if let Ok(value) = salvo::http::HeaderValue::from_str(&challenge) {
+                        res.headers_mut().insert("www-authenticate", value);
+                    }
+                } else {
+                    res.headers_mut().insert(
+                        "www-authenticate",
+                        salvo::http::HeaderValue::from_static("Bearer"),
+                    );
+                }
+                reject(
+                    res,
+                    ctrl,
+                    StatusCode::UNAUTHORIZED,
+                    "agent_identity_required",
+                );
+                return;
+            };
+            if !crate::agent_isolation::run_route(req.uri().path()) {
+                if let Some(db) = db.as_ref() {
+                    let _ = db.record_agent_access_denied(
+                        ctx.agent_run.as_ref(),
+                        "agent_credential_audience_denied",
+                    );
+                }
+                reject(
+                    res,
+                    ctrl,
+                    StatusCode::FORBIDDEN,
+                    "agent_credential_audience_denied",
+                );
+                return;
+            }
+            depot.inject(ctx);
+            ctrl.call_next(req, depot, res).await;
+            return;
+        }
+        if !config.is_auth_enabled() {
+            reject(
+                res,
+                ctrl,
+                StatusCode::UNAUTHORIZED,
+                "explicit_control_authentication_required",
+            );
+            return;
+        }
+
+        // Protected control surfaces require an explicit credential. Neither
+        // --open nor auth-disabled settings establish a trusted human identity.
         let token = match token {
             Some(t) => t,
             None => {
-                if !config.is_auth_enabled() {
-                    // Auth disabled, no token: inject bootstrap and continue.
-                    depot.inject(bootstrap_context());
-                    ctrl.call_next(req, depot, res).await;
-                    return;
-                }
-                if allow_anonymous_enabled() {
-                    // Explicit --open: anonymous callers get a non-admin open
-                    // context. Surface restrictions and declared scopes still apply.
-                    let ctx = open_anonymous_context();
-                    if let Err((status, msg)) = enforce_request_surface(
-                        project_connector_enabled(depot),
-                        &ctx,
-                        req.uri().path(),
-                    ) {
-                        reject(res, ctrl, status, msg);
-                        return;
-                    }
-                    if let Err((scope, description)) =
-                        scopes::enforce_route_scope(&ctx, req.method().as_str(), req.uri().path())
-                    {
-                        render_scope_forbidden(res, Some(&ctx), scope, description);
-                        ctrl.skip_rest();
-                        return;
-                    }
-                    depot.inject(ctx);
-                    ctrl.call_next(req, depot, res).await;
-                    return;
-                }
                 res.status_code(StatusCode::UNAUTHORIZED);
                 if let Some(challenge) = oauth2_bearer_challenge(&config) {
                     if let Ok(val) = salvo::http::HeaderValue::from_str(&challenge) {
@@ -605,7 +720,7 @@ mod connector_surface_tests {
         assert!(enforce_token_surface(&agent, "/api/runtime-console/projects").is_err());
         assert!(enforce_project_connector_surface(false, &user, "/api/tools/call").is_ok());
 
-        let bootstrap = bootstrap_context();
+        let bootstrap = crate::auth::bootstrap_context();
         assert!(enforce_project_connector_surface(true, &bootstrap, "/api/projects/list").is_ok());
     }
 }

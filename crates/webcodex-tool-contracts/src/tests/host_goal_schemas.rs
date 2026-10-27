@@ -2,6 +2,31 @@ use super::*;
 use crate::test_support::validate_schema_instance;
 
 #[test]
+fn host_goal_handoff_schema_never_accepts_asserted_readiness_or_identity() {
+    let specs = registered_tool_specs();
+    let schema = &spec_named(&specs, "goal_handoff").input_schema;
+    let request = json!({"goal_id":"hgoal_example","action":"commit",
+        "handoff_id":"hhandoff_one","attempt_id":"candidate-one",
+        "checkpoint_sequence":1,"package_sha256":"a".repeat(64)});
+    validate_schema_instance(&request, schema).unwrap();
+    for field in [
+        "ready",
+        "execution_granted",
+        "agent_id",
+        "run_id",
+        "owner_key",
+        "source_context_epoch",
+    ] {
+        let mut forged = request.clone();
+        forged[field] = json!("asserted-by-model");
+        assert!(
+            validate_schema_instance(&forged, schema).is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
 fn host_goal_workflow_overview_is_bounded_and_only_declared_on_entry_outputs() {
     let specs = registered_tool_specs();
     for name in ["goal_mode_start", "goal_bootstrap"] {
@@ -181,14 +206,19 @@ fn host_goal_handoff_output_is_source_specific_closed_and_keeps_unknown_provenan
             "binding":{"goal_id":"hgoal_example","node_id":"step","attempt_id":"attempt-B","plan_version":1,"fence":2},
             "context_epoch":"chat-B","identity_source":"window_bound","status":"passed","started_at":6,"finished_at":7
         },
-        "unresolved_operation_count":0,"business_verified":true,
+        "unresolved_operation_count":0,"business_verified":true,"resume_started":null,
         "business_evidence":{"operation_id":"business-B","attempt_id":"attempt-B","status":"succeeded","check_passed":true}
     }});
+    validate_schema_instance(&output, schema).unwrap();
+    output["output"]["resume_started"] = json!({
+        "context_epoch":"chat-B", "identity_source":"window_bound", "started_at":6
+    });
     validate_schema_instance(&output, schema).unwrap();
     for pointer in [
         "/output/source_context/owner_key",
         "/output/checkpoint/owner_key",
         "/output/current_attempt/owner_key",
+        "/output/resume_started/owner_key",
         "/output/owner_key",
     ] {
         let mut invalid = output.clone();
@@ -206,6 +236,7 @@ fn host_goal_handoff_output_is_source_specific_closed_and_keeps_unknown_provenan
     forged_status["output"]["business_evidence"]["status"] = json!("running");
     assert!(validate_schema_instance(&forged_status, schema).is_err());
     output["output"]["source_context"]["identity_source"] = Value::Null;
+    output["output"]["resume_started"] = Value::Null;
     output["output"]["source_context"]["lifecycle_state"] = json!("unknown");
     output["output"]["source_context"]["retired_at"] = Value::Null;
     output["output"]["checkpoint"]["action"] = Value::Null;
@@ -331,6 +362,7 @@ fn host_goal_metadata_is_project_scoped_and_visible_through_generic_dispatch() {
     let specs = registered_tool_specs();
     for name in [
         "goal_mode_start",
+        "goal_handoff",
         "goal_plan_save",
         "goal_confirm_plan",
         "goal_claim_node",

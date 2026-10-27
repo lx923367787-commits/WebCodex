@@ -219,6 +219,7 @@ async fn register_owned_project(
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 client_id: "host-goal-runner".into(),
                 runner_instance_id: "inst".into(),
                 runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -284,8 +285,12 @@ fn assert_workflow_overview(output: &Value) {
         "current node, Attempt/Fence and goal_context",
         "Keep chat identity/context_epoch fixed",
         "Verify saving from tool receipts; completion requires passed acceptance, not model assertions",
-        "verify saving succeeded, then a new chat resumes the same Goal",
-        "Existing tracked Jobs may continue under existing rules",
+        "Handoff saves a task checkpoint and freezes source business",
+        "prepares and commits through goal_handoff",
+        "Only server-confirmed ownership permits continuation",
+        "source retirement occurs atomically with transfer",
+        "Old execution chains must have stopped",
+        "Four failed attempts stop execution and preserve manual recovery state",
     ] {
         assert!(overview.contains(boundary), "missing boundary: {boundary}");
     }
@@ -1809,11 +1814,19 @@ async fn host_goals_partial_fact_deletion_preserves_other_state_and_checkpoint_h
     assert!(original["state"]["facts"].get("fresh").is_none());
 }
 
-fn native_host_epoch(fixture: &super::goals::Fixture) -> String {
+fn native_host_window(fixture: &super::goals::Fixture) -> crate::client_window::ClientWindow {
     let hash = crate::tool_runtime::host_goal_files::sha256(
         fixture.temp.path().to_string_lossy().as_bytes(),
     );
-    format!("native-chat-{}", &hash[..16])
+    crate::client_window::ClientWindow::from_opaque(
+        "openai-session",
+        &format!("native-chat-{}", &hash[..16]),
+    )
+    .unwrap()
+}
+
+fn native_host_epoch(fixture: &super::goals::Fixture) -> String {
+    format!("chat_{}", native_host_window(fixture).key())
 }
 
 async fn native_host_call(
@@ -1822,14 +1835,36 @@ async fn native_host_call(
     binding: Option<&Value>,
 ) -> ToolResult {
     let epoch = native_host_epoch(fixture);
-    dispatch_in_chat(
-        &fixture.runtime,
-        &super::goals::goal_auth(),
-        call,
-        &epoch,
-        binding,
-    )
-    .await
+    let window = native_host_window(fixture);
+    let auth = super::goals::goal_auth();
+    let tool_name = call.tool_name().to_owned();
+    let mut arguments = serde_json::to_value(&call).unwrap()["params"].clone();
+    arguments["context_epoch"] = json!(epoch);
+    if let Some(binding) = binding {
+        let mut metadata = binding.clone();
+        metadata["operation_id"] = json!("checkpoint-operation");
+        metadata["context_epoch"] = json!(epoch);
+        arguments["goal_context"] = metadata;
+    }
+    let outcome = fixture
+        .runtime
+        .call_tool_with_context(
+            ToolCallRequest {
+                tool_name,
+                arguments,
+            },
+            ToolCallContext {
+                transport: ToolTransport::Mcp,
+                session_id: None,
+                auth: Some(&auth),
+                window: Some(&window),
+                record_oauth_scope_denials: true,
+                host_file_import_trust: HostFileImportTrust::Untrusted,
+            },
+        )
+        .await;
+    assert!(outcome.error_status.is_none(), "{:?}", outcome.error_status);
+    outcome.result.expect("native host kernel result")
 }
 
 async fn native_host_setup(
@@ -2635,3 +2670,5 @@ async fn host_goals_unknown_operation_requires_user_reconciliation_and_never_ove
     assert_eq!(still_running.status, HostGoalOperationStatus::Running);
     assert_eq!(still_running.job_id.as_deref(), Some("job-still-running"));
 }
+#[path = "host_goal_takeover.rs"]
+mod takeover;

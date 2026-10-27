@@ -104,6 +104,199 @@ async fn project_management_lists_enabled_and_disabled_on_exact_runner() {
     assert_eq!(body, json!({"client_id":"runner"}));
 }
 
+fn inventory_project(index: usize) -> Value {
+    json!({
+        "id":format!("agent:runner:repo-{index}"),
+        "name":format!("Repo {index}"),
+        "path":format!("C:/work/repo-{index}"),
+        "revision":format!("sha256:revision-{index}"),
+        "enabled":index % 2 == 0,
+        "connected":true,
+        "agent_status":"online",
+        "active_jobs":0
+    })
+}
+
+#[tokio::test]
+async fn project_management_preserves_complete_inventory_metadata_without_other_output_fields() {
+    let projects = vec![inventory_project(0)];
+    let (url, thread) = server(
+        200,
+        json!({
+            "success":true,
+            "output":{"projects":projects,"count":1,"matched_count":1,"truncated":false,"operator_user_id":"actual-user-id",
+                "token":"private-response-value","recommended_for_smoke":["internal-reference"]}
+        }),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let (config, token) = files(&temp, &url);
+    let output: Value =
+        serde_json::from_str(&run(options(config, token, url, "list")).await.unwrap()).unwrap();
+    assert_eq!(output["projects"], json!(projects));
+    assert_eq!(output["matched_count"], 1);
+    assert_eq!(output["truncated"], false);
+    assert_eq!(output["operator_user_id"], "actual-user-id");
+    let mut keys: Vec<_> = output
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "client_id",
+            "matched_count",
+            "operator_user_id",
+            "projects",
+            "truncated"
+        ]
+    );
+    assert!(!output.to_string().contains("private-response-value"));
+    assert!(!output.to_string().contains("fixture-credential"));
+    let (path, body) = thread.join().unwrap();
+    assert_eq!(path, "POST /api/projects/list HTTP/1.1");
+    assert_eq!(body, json!({"client_id":"runner"}));
+}
+
+#[tokio::test]
+async fn project_management_preserves_truncated_inventory_metadata_and_returned_page() {
+    let projects: Vec<_> = (0..100).map(inventory_project).collect();
+    let (url, thread) = server(
+        200,
+        json!({
+            "success":true,"output":{"projects":projects,"matched_count":137,"truncated":true}
+        }),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let (config, token) = files(&temp, &url);
+    let output: Value =
+        serde_json::from_str(&run(options(config, token, url, "list")).await.unwrap()).unwrap();
+    assert_eq!(output["projects"], json!(projects));
+    assert_eq!(output["projects"].as_array().unwrap().len(), 100);
+    assert_eq!(output["matched_count"], 137);
+    assert_eq!(output["truncated"], true);
+    let (path, body) = thread.join().unwrap();
+    assert_eq!(path, "POST /api/projects/list HTTP/1.1");
+    // Preserve the exact filter; do not invent a larger server page or pagination.
+    assert_eq!(body, json!({"client_id":"runner"}));
+}
+
+#[tokio::test]
+async fn project_management_missing_legacy_inventory_metadata_stays_unknown() {
+    for (matched_count, truncated) in [(None, None), (Some(37u64), None), (None, Some(true))] {
+        let mut inventory = json!({"projects":[inventory_project(0)]});
+        if let Some(count) = matched_count {
+            inventory["matched_count"] = json!(count);
+        }
+        if let Some(truncated) = truncated {
+            inventory["truncated"] = json!(truncated);
+        }
+        let (url, thread) = server(200, json!({"success":true,"output":inventory}));
+        let temp = tempfile::tempdir().unwrap();
+        let (config, token) = files(&temp, &url);
+        let output: Value =
+            serde_json::from_str(&run(options(config, token, url, "list")).await.unwrap()).unwrap();
+        assert_eq!(output["projects"], json!([inventory_project(0)]));
+        assert_eq!(output["matched_count"], json!(matched_count));
+        assert_eq!(output["truncated"], json!(truncated));
+        assert!(output.get("matched_count").is_some());
+        assert!(output.get("truncated").is_some());
+        let (_, body) = thread.join().unwrap();
+        assert_eq!(body, json!({"client_id":"runner"}));
+    }
+}
+
+#[tokio::test]
+async fn project_management_rejects_present_invalid_inventory_metadata() {
+    for (field, invalid_values) in [
+        (
+            "operator_user_id",
+            vec![
+                json!(null),
+                json!(""),
+                json!(" \t"),
+                json!("bad\0id"),
+                json!("u".repeat(257)),
+                json!(123),
+            ],
+        ),
+        (
+            "matched_count",
+            vec![
+                json!(null),
+                json!("1"),
+                json!(true),
+                json!(-1),
+                json!(1.5),
+                json!([]),
+                json!({}),
+            ],
+        ),
+        (
+            "truncated",
+            vec![
+                json!(null),
+                json!("false"),
+                json!(0),
+                json!(1),
+                json!([]),
+                json!({}),
+            ],
+        ),
+    ] {
+        for invalid in invalid_values {
+            let mut inventory = json!({"projects":[inventory_project(0)],"matched_count":1,"truncated":false,
+                "token":"private-response-value"});
+            inventory[field] = invalid;
+            let (url, thread) = server(200, json!({"success":true,"output":inventory}));
+            let temp = tempfile::tempdir().unwrap();
+            let (config, token) = files(&temp, &url);
+            let error = run(options(config, token, url, "list")).await.unwrap_err();
+            assert_eq!(
+                error,
+                format!("project_operation_indeterminate: Invalid inventory {field} metadata")
+            );
+            assert!(!error.contains("private-response-value"));
+            assert!(!error.contains("fixture-credential"));
+            let (_, body) = thread.join().unwrap();
+            assert_eq!(body, json!({"client_id":"runner"}));
+        }
+    }
+}
+
+#[tokio::test]
+async fn project_management_metadata_does_not_weaken_project_schema_or_runner_scope() {
+    for foreign in [false, true] {
+        let mut project = inventory_project(0);
+        if foreign {
+            project["id"] = json!("agent:other:repo");
+        } else {
+            project.as_object_mut().unwrap().remove("revision");
+        }
+        let (url, thread) = server(
+            200,
+            json!({
+                "success":true,"output":{"projects":[project],"matched_count":1,"truncated":false}
+            }),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let (config, token) = files(&temp, &url);
+        let error = run(options(config, token, url, "list")).await.unwrap_err();
+        assert_eq!(
+            error,
+            if foreign {
+                "project_connection_changed: Inventory belongs to another Runner"
+            } else {
+                "project_operation_indeterminate: Invalid project inventory"
+            }
+        );
+        let (_, body) = thread.join().unwrap();
+        assert_eq!(body, json!({"client_id":"runner"}));
+    }
+}
+
 #[tokio::test]
 async fn project_management_mutations_use_admin_contract_and_original_revision() {
     for action in ["enable", "disable", "unregister"] {

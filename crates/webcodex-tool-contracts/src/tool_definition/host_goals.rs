@@ -52,6 +52,11 @@ const fn state_tool(
 
 pub(super) const DEFINITIONS: &[ToolDefinition] = &[
     state_tool(
+        "goal_handoff",
+        "Continue the same Goal through its server-owned handoff. A new host conversation must prepare using the exact handoff_id, attempt_id and checkpoint_sequence supplied by the scheduler. The Server checks the authorized immutable task package and performs actual read-only Runner checks; read that package and commit its returned package_sha256. Business remains forbidden until status confirms execution_granted=true for this caller. Created chats, sent prompts, accepted/pending responses and bootstrap are not ownership. After a lost response query status before any retry. Only the trusted local scheduler may begin/fail/abort attempts; at most four attempts, each with a finite persisted deadline. Never reuse the source conversation identity or create a replacement Goal. Terminal handoff failure preserves the checkpoint and needs explicit human recovery.",
+        goal_handoff_input_schema, false,
+    ),
+    state_tool(
         "goal_mode_start",
         "Start a host-driven goal in the selected project. task_directory is the user's chosen task folder (relative or absolute inside this project), defaulting to the project root. New plan files go under <task>/goals and handoff snapshots under <task>/handoff on the owning Runner; never guess a Server-local path. First inspect inputs with read/search tools or present_document, then goal_plan_save produces plan.json/plan.md. Saving does not confirm execution: await a subsequent explicit user instruction for that exact version before goal_confirm_plan. Replay the same key/payload after uncertainty; the task folder cannot be retargeted. New epochs default to 600000/800000 warning/handoff tokens; existing epochs keep their thresholds. Counts cover partially observed tool text, not actual model capacity. Draining/retired epochs cannot reset authority by bootstrapping or changing settings.",
         goal_mode_start_input_schema, true,
@@ -86,7 +91,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
     ),
     state_tool(
         "goal_checkpoint",
-        "Persist bounded progress with current revision/idempotency and goal_context during execution. State patches preserve omitted fields; facts merge (null deletes), supplied arrays replace. action=checkpoint/handoff/pause/exit/block/cancel never confirms a plan or passes acceptance. handoff commits a checkpoint and retires its source epoch, then writes immutable JSON/Markdown under the selected task folder's handoff directory. If file export fails, checkpoint_saved=true still means retirement committed; retry the identical request/key to finish export. Never substitute newer state. Active requests/unknown effects block handoff; known Jobs/Runs may continue and must be observed before a new claim. Replay exact inputs after lost responses. Keep context_epoch fixed within a chat; retirement cannot be reversed. pause/exit/cancel do not prove execution stopped.",
+        "Save progress with current revision/key and execution goal_context. Omitted state fields stay; facts merge (null deletes), arrays replace. checkpoint/handoff/pause/exit/block/cancel never confirms plans or passes acceptance. Handoff saves immutable task files and freezes source business without retiring it. Replay identical inputs/key after export failure or lost response. The scheduler allows four attempts; a fresh trusted conversation must goal_handoff prepare/commit and confirm execution_granted. Old Jobs/Runs must authoritatively stop before atomic ownership transfer and source retirement; unknown execution fails closed. Keep the same context_epoch within a chat. pause/exit/cancel alone does not prove execution stopped.",
         goal_checkpoint_input_schema, false,
     ),
     state_tool(

@@ -88,6 +88,7 @@ async fn register_script_job_agent(
         structured_process_argv: true,
         structured_script_payload: true,
         structured_execution_jobs: true,
+        agent_isolated_execution_v1: false,
         ..Default::default()
     };
     register_agent_with_projects(

@@ -285,12 +285,16 @@ mod tests {
     #[test]
     fn structured_execution_budget_preserves_default_and_validates_explicit_sync_wait() {
         let default = StructuredExecutionBudget::resolve_with_sync_wait(None, None).unwrap();
-        assert_eq!(default.effective_timeout_secs, 60);
+        assert_eq!(default.effective_timeout_secs, 300);
         assert_eq!(default.sync_wait_secs, 10);
 
         let short = StructuredExecutionBudget::resolve_with_sync_wait(Some(5), None).unwrap();
         assert_eq!(short.effective_timeout_secs, 5);
         assert_eq!(short.sync_wait_secs, 5);
+
+        assert_eq!(StructuredExecutionBudget::resolve(Some(900)).unwrap().effective_timeout_secs, 900);
+        assert!(StructuredExecutionBudget::resolve(Some(3600)).is_ok());
+        assert!(StructuredExecutionBudget::resolve(Some(3601)).is_err());
 
         for wait in [1, 45, 60] {
             let budget =

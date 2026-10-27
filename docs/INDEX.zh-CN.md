@@ -1,5 +1,7 @@
 # 文档索引
 
+[外部工具、账号与迁移](EXTERNAL_TOOLS.md#简体中文) — 随包范围、本机安装登录、Runner 验收及打包边界。
+
 [English](INDEX.md) | [简体中文](INDEX.zh-CN.md)
 
 按你现在想完成的事情选择文档即可。
@@ -33,6 +35,7 @@
 ## 我遇到了问题
 
 - [故障排查](TROUBLESHOOTING.zh-CN.md) —— 安装、连接、运行和 Runner 问题
+- [2026-10-25 多 Agent 协作复盘](agent/collaboration-lessons-2026-10-25.zh-CN.md) —— 团队配置、隔离 CLI、正式交付及跨电脑边界
 - [安全说明](../SECURITY.md) —— 安全模型和使用建议
 
 ## 我想理解或扩展 WebCodex

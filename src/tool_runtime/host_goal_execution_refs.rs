@@ -125,7 +125,12 @@ pub(super) fn operation_receipt<'a>(
         || output["command_completed"] == false
         || matches!(
             tool,
-            "run_shell" | "run_process" | "run_script" | "run_job" | "run_detached_process"
+            "run_shell"
+                | "run_process"
+                | "run_script"
+                | "run_job"
+                | "run_detached_process"
+                | "team_cli_start"
         )
     {
         Operation::Unknown
@@ -223,6 +228,31 @@ pub(super) fn native_run_receipt(
 }
 
 impl ToolRuntime {
+    pub(crate) async fn stop_host_goal_native_run(
+        &self,
+        goal: &HostGoalRecord,
+        operation: &HostGoalOperation,
+        auth: Option<&AuthContext>,
+    ) -> Result<bool, ToolResult> {
+        let Some(original) = saved_native_run(operation) else {
+            return Ok(false);
+        };
+        let cancelled = self
+            .host_goal_internal_tool(
+                ToolCall::CodingAgentCancel {
+                    run_id: original.run_id,
+                },
+                auth,
+            )
+            .await;
+        if !cancelled.success {
+            return Err(cancelled);
+        }
+        // accepted/cancel_requested is not proof that descendants have stopped.
+        self.reconcile_host_goal_native_run(goal, operation, auth)
+            .await
+    }
+
     pub(crate) async fn reconcile_host_goal_native_run(
         &self,
         goal: &HostGoalRecord,
@@ -327,6 +357,38 @@ impl ToolRuntime {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn team_cli_receipts_keep_running_and_unknown_jobs_active() {
+        use HostGoalOperationStatus as Operation;
+        for (output, expected, job) in [
+            (
+                json!({"attempt":{"job_id":"job"},"dispatched":true}),
+                Operation::Unknown,
+                None,
+            ),
+            (
+                json!({"job_id":"job","job_status":"running"}),
+                Operation::Running,
+                Some("job"),
+            ),
+            (
+                json!({"job_id":"job","job_status":"lost","execution_state":"outcome_unknown"}),
+                Operation::Unknown,
+                Some("job"),
+            ),
+            (
+                json!({"job_id":"job","job_status":"completed","exit_code":0}),
+                Operation::Succeeded,
+                Some("job"),
+            ),
+        ] {
+            assert_eq!(
+                operation_receipt("team_cli_start", &ToolResult::ok(output)),
+                (expected, job)
+            );
+        }
+    }
 
     #[test]
     fn host_goal_operation_receipts_require_actual_execution_completion() {

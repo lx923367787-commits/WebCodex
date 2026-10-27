@@ -62,6 +62,30 @@ fn validate_context(
     snapshot: &ShellJobSnapshot,
 ) -> Result<(), String> {
     let context = &snapshot.context;
+    if let Some(binding) = context.agent_execution.as_ref() {
+        binding.validate()?;
+        if binding.target.client_id != client_id
+            || !matches!(&binding.carrier, webcodex_core::runner_protocol::AgentExecutionCarrier::Job { job_id, start_request_id } if job_id == &snapshot.job_id && start_request_id == &snapshot.request_id)
+            || context.runtime_project_id.is_some()
+            || context.workflow_session_id.is_some()
+            || context.document.is_some()
+            || context.ssh_resource.is_some()
+            || context.cwd.is_some()
+            || context.project_cwd.is_some()
+            || context
+                .structured_execution
+                .as_ref()
+                .is_none_or(|metadata| metadata.execution_source != "agent_isolated_execution_v1")
+        {
+            return Err("agent_execution_inventory_binding_mismatch".into());
+        }
+    } else if context
+        .structured_execution
+        .as_ref()
+        .is_some_and(|metadata| metadata.execution_source == "agent_isolated_execution_v1")
+    {
+        return Err("agent_execution_inventory_binding_required".into());
+    }
     if let Some(document) = context.document.as_ref() {
         if !document.is_valid()
             || context.runtime_project_id.is_none()
@@ -517,6 +541,8 @@ pub(super) fn validate_job_inventory_without_project_membership(
 fn same_context(job: &ShellJobRecord, snapshot: &ShellJobSnapshot) -> bool {
     let context = &snapshot.context;
     job.request_id.as_deref() == Some(snapshot.request_id.as_str())
+        && job.agent_execution.as_ref().map(|state| &state.binding)
+            == context.agent_execution.as_ref()
         && job.project_id == context.runtime_project_id
         && job.session_id == context.workflow_session_id
         && job.ssh_resource == context.ssh_resource
@@ -563,8 +589,22 @@ pub(super) fn preflight_inventory_locked(
             ));
         }
         let Some(existing) = inner.jobs_by_id.get(&snapshot.job_id) else {
+            // A Runner inventory is an observation, not the missing committed
+            // Store intent. Until the trusted restore bridge exists, do not
+            // reconstruct isolated authority from a fresh Server's empty map.
+            if snapshot.context.agent_execution.is_some() {
+                return Err("agent_execution_store_reconciliation_required".into());
+            }
             continue;
         };
+        if snapshot
+            .context
+            .agent_execution
+            .as_ref()
+            .is_some_and(|binding| binding.target.runner_instance_id != runner_instance_id)
+        {
+            return Err("agent_execution_inventory_instance_mismatch".into());
+        }
         if existing.client_id != client_id {
             return Err(format!(
                 "job inventory job_id {} belongs to a different runner",
@@ -674,6 +714,7 @@ fn record_from_snapshot(
 ) -> ShellJobRecord {
     let context = &snapshot.context;
     let mut record = ShellJobRecord {
+        agent_execution: None,
         document: context.document.clone(),
         job_id: snapshot.job_id.clone(),
         request_id: Some(snapshot.request_id.clone()),
@@ -796,7 +837,10 @@ impl RunnerRegistry {
             .jobs_by_id
             .iter()
             .filter_map(|(job_id, job)| {
-                if job.visibility != ShellJobVisibility::Public || !job.lifecycle.is_terminal() {
+                if job.agent_execution.is_some()
+                    || job.visibility != ShellJobVisibility::Public
+                    || !job.lifecycle.is_terminal()
+                {
                     return None;
                 }
                 match job.observation.terminal_observed_at {
@@ -959,6 +1003,7 @@ pub(super) fn expire_recovering_jobs_locked(
 /// registry mutex only for bounded HashMap work (capped by
 /// [`RECOVERY_SWEEP_PASS_CAP`]) and never awaits under it.
 pub async fn recovery_timeout_sweep(registry: &RunnerRegistry) {
+    registry.cancel_abandoned_sync_requests().await;
     registry.process_hidden_cleanup_intents().await;
     let now = crate::registry::now_ts();
     let mut inner = registry.inner.lock().await;

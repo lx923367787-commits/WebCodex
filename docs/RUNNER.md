@@ -1,5 +1,7 @@
 # Runner
 
+**External tools:** Install model CLIs on each Runner computer, sign in with that user’s account or configure their key, then configure and validate the Runner. WebCodex packages integration code and account-independent runtimes, not preconfigured user tool installations. See [tools, accounts and migration](EXTERNAL_TOOLS.md).
+
 The Runner is the component that executes the actual work. The executable is
 `webcodex-runner`; the CLI namespace that manages it is `webcodex runner ...`.
 `webcodex` and `webcodex-runner` are separate executables. Operator lifecycle

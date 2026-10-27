@@ -247,6 +247,7 @@ async fn project_management_cleared_current_selection_survives_reopen_without_lo
         runtime_project_id: Some("agent:runner:project".into()),
     });
     core.config.runtime = Some(crate::models::StoredRuntime {
+        native_host_id: None,
         server_url: "http://127.0.0.1:1".into(),
         server_env_file: None,
         runner_config: Some(config_path),

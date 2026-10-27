@@ -50,6 +50,7 @@ pub(in crate::tool_runtime::tests) fn sample_tool_args_for_spec(spec: &ToolSpec)
                 && matches!(
                     spec.name.as_str(),
                     "goal_plan_save"
+                        | "goal_handoff"
                         | "goal_confirm_plan"
                         | "goal_claim_node"
                         | "goal_checkpoint"
@@ -70,6 +71,9 @@ pub(in crate::tool_runtime::tests) fn sample_tool_args_for_spec(spec: &ToolSpec)
     // source through the top-level `required` array. Keep fixtures aligned with
     // each tool's metadata contract.
     match spec.name.as_str() {
+        "goal_handoff" => {
+            args.insert("action".to_string(), json!("status"));
+        }
         "work_on_project" => {
             args.insert("project".to_string(), json!(SAMPLE_PROJECT));
         }

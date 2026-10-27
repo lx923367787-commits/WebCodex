@@ -757,8 +757,9 @@ pub enum ToolCall {
     },
 
     /// Execute one native process directly from a structured executable and
-    /// argv. No shell parser, environment mutation, PTY, or durable handoff is
-    /// part of this synchronous v1 contract.
+    /// argv, including an Agent CLI without ACP/Provider registration. Long
+    /// work continues through the existing Runner-owned Job observation path;
+    /// use RunDetachedProcess when accepted work must outlive the Runner.
     RunProcess {
         project: String,
         executable: String,
@@ -776,6 +777,66 @@ pub enum ToolCall {
         cwd: Option<String>,
         #[serde(default)]
         purpose: Option<ExecutionPurpose>,
+    },
+
+    TeamPolicyGet {
+        project: String,
+    },
+    TeamPolicySave {
+        project: String,
+        expected_revision: i64,
+        policy: Value,
+    },
+    TeamPlanRegister {
+        project: String,
+        root_task_id: String,
+        expected_policy_revision: i64,
+        plan: Value,
+        idempotency_key: String,
+    },
+    TeamPlanList {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    TeamPlanRead {
+        project: String,
+        root_task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempts_offset: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempts_limit: Option<usize>,
+    },
+    TeamPlanCancel {
+        project: String,
+        root_task_id: String,
+    },
+    TeamCliStart {
+        project: String,
+        root_task_id: String,
+        source_task_id: String,
+        call_index: u32,
+        idempotency_key: String,
+        fallback_thinking_profile_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+    },
+    TeamCliObserve {
+        project: String,
+        source_attempt_id: String,
+    },
+    TeamAgentStart {
+        project: String,
+        root_task_id: String,
+        source_task_id: String,
+        idempotency_key: String,
+        thinking_profile_id: String,
+    },
+    TeamAgentObserve {
+        project: String,
+        team_agent_attempt_id: String,
     },
 
     /// Admit one native executable + argv as an explicitly detached durable Job.
@@ -902,6 +963,20 @@ pub enum ToolCall {
         plan_sha256: String,
         confirmation: String,
         idempotency_key: String,
+    },
+    GoalHandoff {
+        goal_id: String,
+        action: String,
+        #[serde(default)]
+        handoff_id: Option<String>,
+        #[serde(default)]
+        attempt_id: Option<String>,
+        #[serde(default)]
+        checkpoint_sequence: Option<u64>,
+        #[serde(default)]
+        package_sha256: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
     },
     GoalBootstrap {
         #[serde(default)]
@@ -2753,6 +2828,28 @@ fn reject_unknown_goal_fields(tool_name: &str, arguments: &Value) -> Result<(), 
     }
 }
 
+// Plans and policies are domain payloads interpreted by the store. Keep their
+// object boundaries closed here as well, using the canonical published schema.
+fn reject_unknown_team_fields(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    if let (Some(object), Some(properties)) = (value.as_object(), schema["properties"].as_object())
+    {
+        for (key, item) in object {
+            let field = properties
+                .get(key)
+                .ok_or_else(|| format!("unknown team field {path}.{key}"))?;
+            reject_unknown_team_fields(item, field, &format!("{path}.{key}"))?;
+        }
+    }
+    if let Some(items) = value.as_array() {
+        if let Some(item_schema) = schema.get("items") {
+            for item in items {
+                reject_unknown_team_fields(item, item_schema, path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ToolCall {
     pub fn from_tool_name(name: &str, arguments: Value) -> Result<Self, String> {
         Self::from_tool_name_with_recorder_metadata(name, arguments).map(|(call, _)| call)
@@ -2813,6 +2910,48 @@ impl ToolCall {
         }
         let recorder_metadata = ToolCallRecorderMetadata::from_business_arguments(&arguments);
         let arguments = strip_tool_call_expectation_metadata(arguments);
+        if matches!(
+            name,
+            "team_policy_get"
+                | "team_policy_save"
+                | "team_plan_register"
+                | "team_plan_list"
+                | "team_plan_read"
+                | "team_plan_cancel"
+                | "team_cli_start"
+                | "team_cli_observe"
+                | "team_agent_start"
+                | "team_agent_observe"
+        ) {
+            let schema = (definition
+                .model_spec
+                .expect("published team tool")
+                .input_schema)();
+            reject_unknown_team_fields(&arguments, &schema, name)?;
+            for field in ["expected_revision", "expected_policy_revision"] {
+                if arguments[field].as_i64().is_some_and(|value| value < 0) {
+                    return Err(format!("{field} must be nonnegative"));
+                }
+            }
+            if arguments["call_index"]
+                .as_u64()
+                .is_some_and(|value| value > 31)
+                || arguments["limit"]
+                    .as_u64()
+                    .is_some_and(|value| !(1..=20).contains(&value))
+                || arguments["timeout_secs"]
+                    .as_u64()
+                    .is_some_and(|value| !(1..=3600).contains(&value))
+                || arguments["attempts_limit"]
+                    .as_u64()
+                    .is_some_and(|value| !(1..=20).contains(&value))
+                || arguments["attempts_offset"]
+                    .as_u64()
+                    .is_some_and(|value| value > 65536)
+            {
+                return Err(format!("invalid bounded arguments for tool '{name}'"));
+            }
+        }
         // Unit variants have no params for serde to inspect. Do not silently
         // discard a supplied target, precondition, or malformed argument shape.
         if definition.uses_unit_arguments()
@@ -2989,6 +3128,16 @@ impl ToolCall {
             Self::WorkspaceCheckpointRestore { .. } => "workspace_checkpoint_restore",
             Self::WorkspaceCheckpointDelete { .. } => "workspace_checkpoint_delete",
             Self::RunProcess { .. } => "run_process",
+            Self::TeamPolicyGet { .. } => "team_policy_get",
+            Self::TeamPolicySave { .. } => "team_policy_save",
+            Self::TeamPlanRegister { .. } => "team_plan_register",
+            Self::TeamPlanList { .. } => "team_plan_list",
+            Self::TeamPlanRead { .. } => "team_plan_read",
+            Self::TeamPlanCancel { .. } => "team_plan_cancel",
+            Self::TeamCliStart { .. } => "team_cli_start",
+            Self::TeamCliObserve { .. } => "team_cli_observe",
+            Self::TeamAgentStart { .. } => "team_agent_start",
+            Self::TeamAgentObserve { .. } => "team_agent_observe",
             Self::RunDetachedProcess { .. } => "run_detached_process",
             Self::CodingAgentStart { .. } => "coding_agent_start",
             Self::CodingAgentObserve { .. } => "coding_agent_observe",
@@ -3002,6 +3151,7 @@ impl ToolCall {
             Self::GoalPlanSave { .. } => "goal_plan_save",
             Self::GoalConfirmPlan { .. } => "goal_confirm_plan",
             Self::GoalBootstrap { .. } => "goal_bootstrap",
+            Self::GoalHandoff { .. } => "goal_handoff",
             Self::GoalClaimNode { .. } => "goal_claim_node",
             Self::GoalCheckpoint { .. } => "goal_checkpoint",
             Self::GoalCheckNode { .. } => "goal_check_node",
@@ -3275,6 +3425,16 @@ impl ToolCall {
             | Self::CodingAgentStart { project, .. }
             | Self::GoalStart { project, .. }
             | Self::GoalModeStart { project, .. }
+            | Self::TeamPolicyGet { project, .. }
+            | Self::TeamPolicySave { project, .. }
+            | Self::TeamPlanRegister { project, .. }
+            | Self::TeamPlanList { project, .. }
+            | Self::TeamPlanRead { project, .. }
+            | Self::TeamPlanCancel { project, .. }
+            | Self::TeamCliStart { project, .. }
+            | Self::TeamCliObserve { project, .. }
+            | Self::TeamAgentStart { project, .. }
+            | Self::TeamAgentObserve { project, .. }
             | Self::StartAgentTaskCodingRun { project, .. }
             | Self::RunScript { project, .. }
             | Self::RunShell { project, .. }

@@ -13,11 +13,10 @@ use std::time::{Duration, Instant};
 use webcodex_core::runner_job_lifecycle::RunnerJobLifecycle;
 use webcodex_core::runner_operation::RunnerJobOperation;
 use webcodex_core::runner_protocol::{RunnerRequest, ShellCommandExecutionState};
-use webcodex_process::ManagedChild;
 
 #[derive(Clone)]
 pub(crate) struct JobShutdownTarget {
-    pub(crate) child: Arc<Mutex<ManagedChild>>,
+    pub(crate) child: Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>,
 }
 
 pub(crate) struct JobShutdownBatch {
@@ -58,6 +57,7 @@ pub(crate) fn job_prestart_lifecycle(
 ) -> Option<ShellCommandExecutionState> {
     match operation {
         RunnerJobOperation::StartShell(_)
+        | RunnerJobOperation::StartIsolatedProcess(_)
         | RunnerJobOperation::StartProcess(_)
         | RunnerJobOperation::StartDetachedProcess(_)
         | RunnerJobOperation::StartScript(_) => Some(ShellCommandExecutionState::NotStarted),
@@ -73,7 +73,11 @@ pub(crate) fn decode_failure_prestart_lifecycle(
 ) -> Option<ShellCommandExecutionState> {
     matches!(
         request.kind.as_str(),
-        "start_job" | "start_process_job" | "start_detached_process_job" | "start_script_job"
+        "start_job"
+            | "start_process_job"
+            | "start_detached_process_job"
+            | "start_script_job"
+            | "start_agent_isolated_process_job"
     )
     .then_some(ShellCommandExecutionState::NotStarted)
 }

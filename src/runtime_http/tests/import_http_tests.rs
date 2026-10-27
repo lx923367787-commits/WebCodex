@@ -493,6 +493,8 @@ async fn runtime_conversation_import_host_ref_saves_pptx_through_artifact_path_b
         "overwrite": false
     });
     let auth = AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: AuthKind::Bootstrap,
         user_id: None,
         username: None,
@@ -573,6 +575,8 @@ async fn runtime_conversation_import_rejects_non_mcp_transport() {
     )
     .await;
     let auth = AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: AuthKind::Bootstrap,
         user_id: None,
         username: None,

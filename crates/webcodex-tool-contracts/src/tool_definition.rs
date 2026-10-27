@@ -29,6 +29,7 @@ mod runner_config;
 mod sessions;
 mod skills;
 mod ssh_resources;
+mod team_task;
 mod testing;
 
 use super::metadata::{
@@ -991,6 +992,7 @@ const TOOL_DEFINITION_GROUPS: &[&[ToolDefinition]] = &[
     sessions::DEFINITIONS,
     communication::DEFINITIONS,
     agent_tasks::DEFINITIONS,
+    team_task::DEFINITIONS,
     memory::DEFINITIONS,
     skills::DEFINITIONS,
     hygiene::DEFINITIONS,

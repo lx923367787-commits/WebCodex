@@ -618,6 +618,7 @@ pub fn host_goal_tool_has_native_job_receipt(tool: &str) -> bool {
             | "run_script"
             | "run_job"
             | "run_detached_process"
+            | "team_cli_start"
             | "cargo_check"
             | "cargo_test"
             | "cargo_fmt"

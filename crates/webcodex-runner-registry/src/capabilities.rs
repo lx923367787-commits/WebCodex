@@ -57,6 +57,7 @@ pub enum RunnerFeature {
     ComputerElementState,
     JobStateReconciliation,
     CodingAgentRuns,
+    AgentIsolatedExecutionV1,
     NativeToolPlugins,
     ManagedSshResources,
     RunnerConfigControl,
@@ -67,7 +68,7 @@ pub enum RunnerFeature {
     ComputerTextInput,
 }
 
-const ALL_RUNNER_FEATURES: [RunnerFeature; 57] = [
+const ALL_RUNNER_FEATURES: [RunnerFeature; 58] = [
     RunnerFeature::Shell,
     RunnerFeature::FileRead,
     RunnerFeature::FileWrite,
@@ -117,6 +118,7 @@ const ALL_RUNNER_FEATURES: [RunnerFeature; 57] = [
     RunnerFeature::ComputerElementState,
     RunnerFeature::JobStateReconciliation,
     RunnerFeature::CodingAgentRuns,
+    RunnerFeature::AgentIsolatedExecutionV1,
     RunnerFeature::NativeToolPlugins,
     RunnerFeature::ManagedSshResources,
     RunnerFeature::RunnerConfigControl,
@@ -205,6 +207,7 @@ impl RunnerFeature {
             Self::ComputerElementState => wire::RUNNER_CAPABILITY_COMPUTER_ELEMENT_STATE,
             Self::JobStateReconciliation => wire::RUNNER_CAPABILITY_JOB_STATE_RECONCILIATION,
             Self::CodingAgentRuns => wire::RUNNER_CAPABILITY_CODING_AGENT_RUNS,
+            Self::AgentIsolatedExecutionV1 => wire::RUNNER_CAPABILITY_AGENT_ISOLATED_EXECUTION_V1,
             Self::NativeToolPlugins => wire::RUNNER_CAPABILITY_NATIVE_TOOL_PLUGINS,
             Self::ManagedSshResources => wire::RUNNER_CAPABILITY_MANAGED_SSH_RESOURCES,
             Self::RunnerConfigControl => wire::RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL,
@@ -277,6 +280,7 @@ impl RunnerFeature {
             wire::RUNNER_CAPABILITY_COMPUTER_ELEMENT_STATE => Self::ComputerElementState,
             wire::RUNNER_CAPABILITY_JOB_STATE_RECONCILIATION => Self::JobStateReconciliation,
             wire::RUNNER_CAPABILITY_CODING_AGENT_RUNS => Self::CodingAgentRuns,
+            wire::RUNNER_CAPABILITY_AGENT_ISOLATED_EXECUTION_V1 => Self::AgentIsolatedExecutionV1,
             wire::RUNNER_CAPABILITY_NATIVE_TOOL_PLUGINS => Self::NativeToolPlugins,
             wire::RUNNER_CAPABILITY_MANAGED_SSH_RESOURCES => Self::ManagedSshResources,
             wire::RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL => Self::RunnerConfigControl,
@@ -340,6 +344,7 @@ impl RunnerFeature {
             | Self::ComputerElementState
             | Self::JobStateReconciliation
             | Self::CodingAgentRuns
+            | Self::AgentIsolatedExecutionV1
             | Self::NativeToolPlugins
             | Self::ManagedSshResources
             | Self::RunnerConfigControl
@@ -408,6 +413,8 @@ impl RunnerFeature {
             Self::ComputerElementState => capabilities.computer_element_state,
             Self::JobStateReconciliation => capabilities.job_state_reconciliation,
             Self::CodingAgentRuns => capabilities.coding_agent_runs,
+            // No baseline or neighboring capability implies this contract.
+            Self::AgentIsolatedExecutionV1 => capabilities.agent_isolated_execution_v1(),
             Self::NativeToolPlugins => capabilities.native_tool_plugins,
             Self::ManagedSshResources => capabilities.managed_ssh_resources,
             Self::RunnerConfigControl => capabilities.runner_config_control,

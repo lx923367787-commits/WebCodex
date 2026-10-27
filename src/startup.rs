@@ -1,17 +1,17 @@
 use crate::{project_entry, task_cli};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RegularServerTunnelOptions {
     pub local_server_url: String,
-    pub mcp_token: String,
+    pub bootstrap_token: String,
     pub runtime_parent: PathBuf,
 }
 
 pub async fn run_regular_server_tunnel(options: RegularServerTunnelOptions) -> Result<(), String> {
     project_entry::run_regular_server_tunnel(&project_entry::RegularServerTunnelOptions {
         local_server_url: options.local_server_url,
-        mcp_token: options.mcp_token,
+        bootstrap_token: options.bootstrap_token,
         runtime_parent: options.runtime_parent,
     })
     .await

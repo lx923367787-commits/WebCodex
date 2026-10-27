@@ -3,12 +3,110 @@ use super::{
     require_runner_transport_scope, runner_access_from_auth,
 };
 use crate::runner_protocol::{
+    RunnerAgentExecutionCloseReceiptRequest, RunnerAgentExecutionCloseReceiptResponse,
     RunnerJobUpdateRequest, RunnerJobUpdateResponse, RunnerOfflineRequest, RunnerOfflineResponse,
     RunnerPersistentShellResultRequest, RunnerPersistentShellResultResponse, RunnerPollPayload,
     RunnerPollResponse, RunnerRegisterRequest, RunnerRegisterResponse, RunnerResultPayload,
     RunnerResultResponse,
 };
 use salvo::prelude::*;
+use std::sync::Arc;
+
+#[cfg(test)]
+#[path = "close_receipt_tests.rs"]
+mod close_receipt_tests;
+
+#[handler]
+pub async fn runner_agent_execution_close_receipt(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) {
+    let auth = depot.obtain::<crate::auth::AuthContext>().ok();
+    if auth.is_none()
+        || require_runner_transport_scope(auth, crate::auth::SCOPE_AGENT_RESULT).is_err()
+    {
+        res.status_code(StatusCode::FORBIDDEN);
+        res.render(Json(RunnerAgentExecutionCloseReceiptResponse {
+            stored: false,
+            error: Some("runner_close_receipt_forbidden".into()),
+        }));
+        return;
+    }
+    let body: RunnerAgentExecutionCloseReceiptRequest = match req.parse_json().await {
+        Ok(body) => body,
+        Err(_) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(RunnerAgentExecutionCloseReceiptResponse {
+                stored: false,
+                error: Some("runner_close_receipt_invalid_input".into()),
+            }));
+            return;
+        }
+    };
+    let client_id = body.receipt.target.client_id.clone();
+    let runner_instance_id = body.receipt.target.runner_instance_id.clone();
+    if enforce_runner_transport(auth, &client_id).is_err() {
+        res.status_code(StatusCode::FORBIDDEN);
+        res.render(Json(RunnerAgentExecutionCloseReceiptResponse {
+            stored: false,
+            error: Some("runner_close_receipt_forbidden".into()),
+        }));
+        return;
+    }
+    let Some(registry) = get_registry(depot) else {
+        res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+        res.render(Json(RunnerAgentExecutionCloseReceiptResponse {
+            stored: false,
+            error: Some("runner_close_receipt_unavailable".into()),
+        }));
+        return;
+    };
+    let access = runner_access_from_auth(auth);
+    if registry
+        .assert_runner_access(access.as_ref(), &client_id)
+        .await
+        .is_err()
+    {
+        res.status_code(StatusCode::FORBIDDEN);
+        res.render(Json(RunnerAgentExecutionCloseReceiptResponse {
+            stored: false,
+            error: Some("runner_close_receipt_forbidden".into()),
+        }));
+        return;
+    }
+    let Some(db) = depot.obtain::<Arc<crate::Database>>().ok() else {
+        res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+        res.render(Json(RunnerAgentExecutionCloseReceiptResponse {
+            stored: false,
+            error: Some("runner_close_receipt_unavailable".into()),
+        }));
+        return;
+    };
+    match crate::agent_team_execution::accept_authenticated_close_receipt(
+        db,
+        &registry,
+        &client_id,
+        &runner_instance_id,
+        None,
+        &body.request_id,
+        body.receipt,
+    )
+    .await
+    {
+        Ok(_) => res.render(Json(RunnerAgentExecutionCloseReceiptResponse {
+            stored: true,
+            error: None,
+        })),
+        Err(_) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(RunnerAgentExecutionCloseReceiptResponse {
+                stored: false,
+                error: Some("runner_close_receipt_rejected".into()),
+            }));
+        }
+    }
+}
 
 #[handler]
 pub async fn runner_register(req: &mut Request, depot: &mut Depot, res: &mut Response) {

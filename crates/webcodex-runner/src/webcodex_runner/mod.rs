@@ -1,3 +1,4 @@
+pub(crate) mod agent_cli;
 pub(crate) mod cli;
 pub(crate) mod jobs;
 pub(crate) mod registration;

@@ -20,6 +20,9 @@ fn main() -> io::Result<()> {
         }
     }
     append(marker, "start\n")?;
+    if scenario.starts_with("lifecycle") {
+        append(marker, &format!("lifecycle-pid:{}\n", std::process::id()))?;
+    }
     if scenario.starts_with("check_") || scenario.starts_with("candidate_") {
         append(marker, &format!("candidate-pid:{}\n", std::process::id()))?;
     }
@@ -56,11 +59,7 @@ fn main() -> io::Result<()> {
     } else if scenario == "stderr_flood" {
         let mut stderr = io::stderr().lock();
         for index in 0..256usize {
-            writeln!(
-                stderr,
-                "stderr-flood-{index:03}-{}",
-                "x".repeat(2 * 1024)
-            )?;
+            writeln!(stderr, "stderr-flood-{index:03}-{}", "x".repeat(2 * 1024))?;
         }
         stderr.flush()?;
     }
@@ -69,6 +68,8 @@ fn main() -> io::Result<()> {
     let mut writer = io::stdout().lock();
     let mut lists = 0usize;
     let mut calls = 0usize;
+    let mut lifecycle_instance: Option<String> = None;
+    let mut lifecycle_stopped = false;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -100,10 +101,22 @@ fn main() -> io::Result<()> {
                 } else {
                     "webcodex-plugin-v1"
                 };
+                let lifecycle = if scenario.starts_with("lifecycle") {
+                    let provider = if scenario == "lifecycle_bad_capability" {
+                        "other"
+                    } else {
+                        "chat-agents"
+                    };
+                    format!(
+                        r#","runtimeLifecycle":{{"protocolVersion":"webcodex-chat-agents-lifecycle-v1","providerId":"{provider}"}}"#
+                    )
+                } else {
+                    String::new()
+                };
                 send(
                     &mut writer,
                     &format!(
-                        r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"{version}"}}}}"#
+                        r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"{version}"{lifecycle}}}}}"#
                     ),
                 )?;
             }
@@ -166,9 +179,7 @@ fn main() -> io::Result<()> {
                 if scenario == "check_malformed_tools_list" {
                     send(
                         &mut writer,
-                        &format!(
-                            r#"{{"jsonrpc":"2.0","id":{id},"result":{{"notTools":[]}}}}"#
-                        ),
+                        &format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"notTools":[]}}}}"#),
                     )?;
                     continue;
                 }
@@ -223,7 +234,11 @@ fn main() -> io::Result<()> {
                 } else {
                     "string"
                 };
-                let tool_name = if scenario == "check_v2" { "echo_v2" } else { "echo" };
+                let tool_name = if scenario == "check_v2" {
+                    "echo_v2"
+                } else {
+                    "echo"
+                };
                 let startup_padding = if scenario == "check_startup_large_schema" {
                     "x".repeat(40 * 1024)
                 } else {
@@ -275,6 +290,56 @@ fn main() -> io::Result<()> {
                         thread::sleep(Duration::from_secs(60));
                     }
                 }
+            }
+            "webcodex/chat-agents/lifecycle" => {
+                let action = string_field(&line, "action").unwrap_or_default();
+                let instance = string_field(&line, "providerInstanceId").unwrap_or_default();
+                let valid = string_field(&line, "protocolVersion").as_deref()
+                    == Some("webcodex-chat-agents-lifecycle-v1")
+                    && string_field(&line, "providerId").as_deref() == Some("chat-agents")
+                    && instance.len() == 32
+                    && instance
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && matches!(action.as_str(), "activate" | "deactivate")
+                    && lifecycle_instance
+                        .as_ref()
+                        .is_none_or(|old| old == &instance);
+                append(marker, &format!("runtime-{action}:{instance}\n"))?;
+                if !valid || (action == "activate" && lifecycle_stopped) {
+                    send(
+                        &mut writer,
+                        &format!(
+                            r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32001,"message":"invalid lifecycle"}}}}"#
+                        ),
+                    )?;
+                    continue;
+                }
+                lifecycle_instance = Some(instance.clone());
+                let state = if action == "activate" {
+                    append(marker, &format!("runtime-active:{instance}\n"))?;
+                    if scenario == "lifecycle_lost_activate" {
+                        continue;
+                    }
+                    "active"
+                } else if scenario == "lifecycle_stop_unknown" {
+                    "unknown"
+                } else {
+                    lifecycle_stopped = true;
+                    append(marker, &format!("runtime-stopped:{instance}\n"))?;
+                    "stopped"
+                };
+                let returned_instance = if scenario == "lifecycle_wrong_instance" {
+                    "0".repeat(32)
+                } else {
+                    instance
+                };
+                send(
+                    &mut writer,
+                    &format!(
+                        r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"webcodex-chat-agents-lifecycle-v1","providerId":"chat-agents","providerInstanceId":"{returned_instance}","state":"{state}"}}}}"#
+                    ),
+                )?;
             }
             "tools/call" => {
                 calls += 1;

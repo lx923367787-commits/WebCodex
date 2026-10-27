@@ -75,6 +75,7 @@ fn empty_inventory() -> ShellJobInventory {
 
 fn register_request(instance: &str, inventory: ShellJobInventory) -> RunnerRegisterRequest {
     crate::test_support::current_runner_registration(RunnerRegisterRequest {
+        agent_execution_resources: Vec::new(),
         client_id: CLIENT_ID.to_string(),
         runner_instance_id: instance.to_string(),
         runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -1701,6 +1702,7 @@ async fn terminal_observed_future_inventory_ended_at_cannot_bypass_prune() {
         inner.pending_by_id.insert(
             original_request_id.clone(),
             PendingShellRequest {
+                agent_cli: None,
                 request: request.clone(),
                 operation: request.decode_operation().unwrap(),
                 waiter: None,
@@ -1723,6 +1725,7 @@ async fn terminal_observed_future_inventory_ended_at_cannot_bypass_prune() {
         inner.pending_by_id.insert(
             control_request_id.clone(),
             PendingShellRequest {
+                agent_cli: None,
                 request: control_request.clone(),
                 operation: control_request.decode_operation().unwrap(),
                 waiter: None,
@@ -2424,6 +2427,7 @@ fn standalone_snapshot(job_id: &str, status: &str) -> ShellJobSnapshot {
         error: None,
         command_execution_state: None,
         context: ShellJobContext {
+            agent_execution: None,
             document: None,
             runtime_project_id: None,
             workflow_session_id: None,

@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub(crate) struct ExecutionState {
+    pub(crate) team_cli_watchers: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub(crate) coding_agent_runs: Arc<super::coding_agent::CodingAgentServerState>,
     pub(crate) checkpoint_store: checkpoint::CheckpointStore,
     pub(crate) session_shells: SessionShellRegistry,
@@ -27,6 +28,7 @@ pub(crate) struct ExecutionState {
 impl Default for ExecutionState {
     fn default() -> Self {
         Self {
+            team_cli_watchers: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             coding_agent_runs: Arc::new(super::coding_agent::CodingAgentServerState::default()),
             checkpoint_store: checkpoint::CheckpointStore::default(),
             session_shells: SessionShellRegistry::default(),

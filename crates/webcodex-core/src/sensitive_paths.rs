@@ -24,6 +24,7 @@ const SECRET_COMPONENTS: &[&str] = &[
     "tokens",
     "project-registry",
     "projects.d",
+    "agent-runtime",
 ];
 
 /// Component prefixes that mark a credential or Runner-config file.
@@ -34,7 +35,7 @@ const SECRET_COMPONENTS: &[&str] = &[
 const SECRET_PREFIXES: &[&str] = &[".env", "runner.toml", "agent.toml", "webcodex.env"];
 
 /// Component suffixes that mark key material or a credential backup.
-const SECRET_SUFFIXES: &[&str] = &[".pem", ".key", ".env", ".toml.bak"];
+const SECRET_SUFFIXES: &[&str] = &[".pem", ".key", ".env", ".toml.bak", "-agent-resources"];
 
 /// High-volume trees that search and listing skip. Not secret.
 const BULK_COMPONENTS: &[&str] = &["target", "node_modules"];
@@ -118,6 +119,8 @@ mod tests {
             "tokens/agent",
             "project-registry/demo.toml",
             "projects.d/demo.toml",
+            "state/agent-runtime/projects/a/agents/other/private/memory.txt",
+            "state/RUNNER-agent-resources/agent-other/workspace/source.rs",
             // Runner configuration, canonical and legacy
             "runner.toml",
             "config/runner.toml",

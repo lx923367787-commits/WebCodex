@@ -154,7 +154,9 @@ pub(crate) fn validation_module_available(
     let Ok(child) = ManagedChild::spawn(&mut command) else {
         return false;
     };
-    let child = Arc::new(Mutex::new(child));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(child),
+    ));
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let wait_result = {
@@ -188,7 +190,9 @@ pub(crate) fn validation_module_available(
 ///
 /// The platform detail (SIGKILL to a private process group on Unix,
 /// `TerminateJobObject` on Windows) stays inside `webcodex-process`.
-pub(crate) fn terminate_managed_tree(child: &Arc<Mutex<ManagedChild>>) -> Result<(), String> {
+pub(crate) fn terminate_managed_tree(
+    child: &Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>,
+) -> Result<(), String> {
     lock_unpoison(child)
         .terminate_tree()
         .map_err(|error| error.to_string())
@@ -198,7 +202,7 @@ pub(crate) fn terminate_managed_tree(child: &Arc<Mutex<ManagedChild>>) -> Result
 /// platform cannot deliver a graceful signal to the whole tree (Windows Job
 /// Objects). An already-exited tree is idempotent success.
 pub(crate) fn request_terminate_managed_tree(
-    child: &Arc<Mutex<ManagedChild>>,
+    child: &Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>,
 ) -> Result<(), String> {
     // Bind the result first so the temporary `MutexGuard` is released before
     // the match arms: the Unsupported arm re-locks the same mutex, and a guard
@@ -218,7 +222,7 @@ pub(crate) fn request_terminate_managed_tree(
 /// held while polling, so a concurrent `terminate_tree` blocks only until this
 /// bounded wait returns; nothing here waits on another thread's progress.
 pub(crate) fn wait_managed_tree_exit(
-    child: &Arc<Mutex<ManagedChild>>,
+    child: &Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>,
     deadline: Instant,
 ) -> Result<bool, String> {
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -235,7 +239,9 @@ pub(crate) fn wait_managed_tree_exit(
 /// Opportunistically reaps the direct child so a Unix zombie is not mistaken
 /// for a live tree member. A busy lock or a platform probe failure is treated
 /// conservatively as "still running".
-pub(crate) fn managed_tree_running(child: &Arc<Mutex<ManagedChild>>) -> bool {
+pub(crate) fn managed_tree_running(
+    child: &Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>,
+) -> bool {
     let mut guard = match child.try_lock() {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::WouldBlock) => return true,
@@ -255,7 +261,9 @@ pub(crate) fn managed_tree_running(child: &Arc<Mutex<ManagedChild>>) -> bool {
 /// been decided: give the tree a short bounded window to exit on its own,
 /// force-terminate whatever remains, and confirm the tree emptied, so
 /// pipe-holding descendants cannot stall the output readers forever.
-pub(crate) fn cleanup_managed_tree(child: &Arc<Mutex<ManagedChild>>) {
+pub(crate) fn cleanup_managed_tree(
+    child: &Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>,
+) {
     const NATURAL_EXIT_GRACE: Duration = Duration::from_millis(500);
     const FORCE_EXIT_GRACE: Duration = Duration::from_millis(500);
     let natural_deadline = Instant::now() + NATURAL_EXIT_GRACE;
@@ -271,7 +279,7 @@ pub(crate) fn cleanup_managed_tree(child: &Arc<Mutex<ManagedChild>>) {
 /// (including when another thread reaped it concurrently), and `Err` on a wait
 /// failure. The lock is only ever taken briefly with `try_lock`.
 pub(crate) fn reap_managed_direct_child(
-    child: &Arc<Mutex<ManagedChild>>,
+    child: &Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>,
     deadline: Instant,
 ) -> Result<bool, String> {
     loop {

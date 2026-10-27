@@ -9,6 +9,9 @@ use webcodex_tool_contracts::{
 };
 use webcodex_workflow_session as sessions;
 
+#[path = "team_tool_contract_tests.rs"]
+mod team_tool_contract_tests;
+
 #[test]
 fn strict_tool_arguments_reject_unknown_fields_and_non_object_unit_inputs() {
     for (name, args) in [

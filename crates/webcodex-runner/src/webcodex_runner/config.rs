@@ -68,6 +68,10 @@ pub(crate) struct RunnerConfig {
     pub(crate) poll_interval_ms: u64,
     #[serde(default)]
     pub(crate) capabilities: Option<RunnerCapabilities>,
+    /// Explicit local isolated resources, frozen for this Runner process.
+    #[serde(default)]
+    pub(crate) agent_execution_resources:
+        super::jobs::agent_resources::AgentExecutionResourcesConfig,
     #[serde(default)]
     pub(crate) max_concurrent_jobs: Option<usize>,
     #[serde(default)]
@@ -124,6 +128,7 @@ pub(crate) struct AcpConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AcpAgentConfig {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -143,6 +148,21 @@ pub(crate) struct AcpAgentConfig {
 fn default_acp_max_concurrent_runs() -> usize {
     DEFAULT_ACP_MAX_CONCURRENT_RUNS
 }
+
+#[cfg(test)]
+mod acp_transport_tests {
+    use super::AcpAgentConfig;
+
+    #[test]
+    fn retired_json_cli_config_is_not_silently_launched_as_acp() {
+        let base = r#"{"id":"agent","name":"Agent","executable":"agent.exe","args":[]}"#;
+        assert!(serde_json::from_str::<AcpAgentConfig>(base).is_ok());
+        let mut obsolete: serde_json::Value = serde_json::from_str(base).unwrap();
+        obsolete["json_cli"] = serde_json::json!({"result_pointer":"/response"});
+        assert!(serde_json::from_value::<AcpAgentConfig>(obsolete).is_err());
+    }
+}
+
 fn default_acp_permission_timeout_secs() -> u64 {
     DEFAULT_ACP_PERMISSION_TIMEOUT_SECS
 }
@@ -226,11 +246,20 @@ pub(crate) struct PluginProviderConfig {
     pub(crate) profile: Option<String>,
     #[serde(default)]
     pub(crate) timeout_secs: Option<u64>,
+    /// Trusted local opt-in; never selected by a model Tool or provider advert.
+    #[serde(default)]
+    pub(crate) runtime_lifecycle: Option<PluginRuntimeLifecycle>,
     /// Operator-selected office worker; never supplied by a model tool call.
     #[serde(default)]
     pub(crate) document_worker: Option<String>,
     #[serde(default)]
     pub(crate) document_worker_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PluginRuntimeLifecycle {
+    ChatAgentsV1,
 }
 
 fn default_plugin_request_timeout_secs() -> u64 {
@@ -533,6 +562,7 @@ impl HotRunnerConfig {
 }
 
 pub(crate) struct ReloadableRunnerConfig {
+    agent_execution_ready: AtomicBool,
     startup: RunnerConfig,
     startup_managed_ssh: SshConfig,
     managed_ssh: Arc<ManagedSshResourceStore>,
@@ -575,8 +605,9 @@ impl ReloadableRunnerConfig {
                 }
             }
         };
-        Self {
+        let config = Self {
             mcp_gateway: Arc::new(McpGatewayManager::new(&startup.mcp_gateway)),
+            agent_execution_ready: AtomicBool::new(false),
             plugins: Arc::new(PluginManager::new(&startup, path.clone())),
             coding_agents,
             startup_managed_ssh,
@@ -587,11 +618,31 @@ impl ReloadableRunnerConfig {
             reload_lock: Mutex::new(()),
             external_routers: Mutex::new(external_routers),
             stopping: AtomicBool::new(false),
+        };
+        // The startup HotConfig and Plugin map both exist before the private
+        // coordinator is allowed to dispatch. Candidate construction stays pure.
+        match config.plugins.activate_committed_startup() {
+            Ok(report) if !report.activation_failures.is_empty() => {
+                tracing::error!("Runner startup committed; Plugin runtime activation failed");
+            }
+            Err(code) => {
+                tracing::error!(error = code, "Runner startup Plugin runtime unavailable");
+            }
+            _ => {}
         }
+        config
     }
 
     pub(crate) fn snapshot(&self) -> Arc<HotRunnerConfig> {
         Arc::clone(&self.current.read().unwrap())
+    }
+
+    pub(crate) fn set_agent_execution_ready(&self, ready: bool) {
+        self.agent_execution_ready.store(ready, Ordering::Release);
+    }
+
+    pub(crate) fn agent_execution_ready(&self) -> bool {
+        self.agent_execution_ready.load(Ordering::Acquire) && !self.stopping.load(Ordering::Acquire)
     }
 
     pub(crate) fn with_active(&self, f: impl FnOnce(&HotRunnerConfig)) {
@@ -763,7 +814,7 @@ impl ReloadableRunnerConfig {
         };
         let generation = active.generation.saturating_add(1);
         let restart_required_fields = restart_required_fields(&self.startup, &candidate);
-        let status = RunnerConfigReloadStatus {
+        let mut status = RunnerConfigReloadStatus {
             generation,
             last_reload_result: if restart_required_fields.is_empty() {
                 "success"
@@ -821,7 +872,21 @@ impl ReloadableRunnerConfig {
                 let mut current = self.current.write().unwrap();
                 *current = next_for_commit;
             }) {
-            Ok(()) => {}
+            Ok(report) => {
+                if !report.activation_failures.is_empty() {
+                    // Both configurations have committed. Preserve the new
+                    // generation and report runtime unavailability separately;
+                    // never pretend the old configuration remained active.
+                    status.last_reload_result = "partial".into();
+                    status.last_reload_error_code = Some("plugin_reload_failed".into());
+                    *next.reload_status.lock().unwrap() = status.clone();
+                    next.external_tools.configuration_status_changed();
+                    tracing::error!(
+                        generation,
+                        "Runner config committed; Plugin runtime activation failed"
+                    );
+                }
+            }
             Err("plugin_reload_busy") => {
                 return (
                     active.reload_status(),
@@ -1004,6 +1069,7 @@ pub(crate) fn restart_required_fields(
     }
     classify!(
         capabilities,
+        agent_execution_resources,
         client_id,
         display_name,
         hostname,
@@ -1628,7 +1694,10 @@ fn validate_acp_config(config: &AcpConfig) -> Result<(), String> {
                 .iter()
                 .any(|existing| super::shell::env_keys_equal(existing, destination))
             {
-                return Err(format!("ACP agent '{}' env_from_env contains conflicting destination names for this platform", agent.id));
+                return Err(format!(
+                    "ACP agent '{}' env_from_env contains conflicting destination names for this platform",
+                    agent.id
+                ));
             }
             destinations.push(destination);
         }
@@ -1800,6 +1869,9 @@ fn validate_plugin_config(config: &PluginConfig, shell: &ShellConfig) -> Result<
     for provider in &config.providers {
         validate_provider_id(&provider.id)
             .map_err(|error| format!("plugin provider id is invalid: {error}"))?;
+        if provider.runtime_lifecycle.is_some() && provider.id != "chat-agents" {
+            return Err("plugins runtime_lifecycle requires exact provider id chat-agents".into());
+        }
         validate_provider_name(&provider.name)
             .map_err(|error| format!("plugin provider name is invalid: {error}"))?;
         if !ids.insert(provider.id.as_str()) {
@@ -1865,7 +1937,10 @@ fn validate_plugin_config(config: &PluginConfig, shell: &ShellConfig) -> Result<
                 > 16 * 1024
             || (provider.document_worker.is_none() && !provider.document_worker_args.is_empty())
         {
-            return Err(format!("plugins provider '{}' document_worker requires absolute worker/cwd paths and bounded operator arguments without --request/--result", provider.id));
+            return Err(format!(
+                "plugins provider '{}' document_worker requires absolute worker/cwd paths and bounded operator arguments without --request/--result",
+                provider.id
+            ));
         }
         let timeout = provider.timeout_secs.unwrap_or(config.request_timeout_secs);
         if !(1..=120).contains(&timeout) {
@@ -1893,6 +1968,7 @@ mod plugin_config_tests {
             cwd: None,
             profile: None,
             timeout_secs: None,
+            runtime_lifecycle: None,
         }
     }
 
@@ -1909,6 +1985,30 @@ mod plugin_config_tests {
         )
         .unwrap_err()
         .contains("at most 1024 bytes"));
+    }
+
+    #[test]
+    fn plugin_runtime_lifecycle_is_local_explicit_and_exact_provider_only() {
+        let raw = "id='chat-agents'\nname='Chat Agents'\ncommand='python.exe'\n";
+        let ordinary: PluginProviderConfig = toml::from_str(raw).unwrap();
+        assert!(ordinary.runtime_lifecycle.is_none());
+        let opted: PluginProviderConfig =
+            toml::from_str(&format!("{raw}runtime_lifecycle='chat_agents_v1'\n")).unwrap();
+        assert_eq!(
+            opted.runtime_lifecycle,
+            Some(PluginRuntimeLifecycle::ChatAgentsV1)
+        );
+        let mut config = PluginConfig {
+            request_timeout_secs: 3,
+            providers: vec![opted],
+        };
+        validate_plugin_config(&config, &ShellConfig::default()).unwrap();
+        config.providers[0].id = "unrelated-provider".into();
+        assert!(validate_plugin_config(&config, &ShellConfig::default()).is_err());
+        assert!(toml::from_str::<PluginProviderConfig>(&format!(
+            "{raw}runtime_lifecycle='generic_plugin'\n"
+        ))
+        .is_err());
     }
 }
 

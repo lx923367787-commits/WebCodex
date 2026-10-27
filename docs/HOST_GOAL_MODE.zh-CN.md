@@ -142,42 +142,21 @@ SQLite 继续保存运行时的身份、权限、计划版本、审核及恢复�
 
 新 epoch 初次启动时可以通过 `context_warning_tokens` 和 `context_handoff_tokens` 配置阈值，后者必须更大。已有 epoch 不通过重复启动改写策略，DRAINING/RETIRED 状态也不会因重启或阈值变化退回。这是本地参考编码对 **WebCodex 可见工具文本** 的累计估算，不是 ChatGPT 的真实容量或占用率。普通聊天、系统提示、其他工具、图片内容和宿主压缩不可完整观测。纯聊天期间没有工具交互时，不会保证实时提醒。
 
-交接调用 `goal_checkpoint`，将 `"action":"handoff"` 放在 `patch` 对象中（`patch.action`），并按契约提供原因、当前 revision、稳定幂等键及所需调用绑定；不存在顶层 `action` 参数。该操作在同一事务保存 checkpoint、撤销源 epoch 的后续写权限并保存幂等回执。原同步请求仍运行、任务身份丢失或副作用未知时保持阻塞；已权威确认的后台 Job/Run 可以保留原 ID 继续运行。交接成功后的 A 为 RETIRED，仅允许读取和已完成请求的纯回执重放，不能重新激活、认领、验收执行或停止任务。
+交接调用 `goal_checkpoint`，把 `"action":"handoff"` 放在 `patch` 中。相同请求/key 重放同一 Checkpoint；源对话进入等待接管，停止新业务，但此时没有退休。原 Goal、已确认计划、最后进度及成果保留。
 
-新对话 B 先用 `goal_bootstrap` 恢复同一 Goal，按当前阶段继续：`planning` 继续调查和完善计划；`awaiting_confirmation` 可以只读调查但不实施；`ready` / `executing` 等需要继续执行的阶段，先按返回入口读取节点要求、核对原 Operation/Job/Run，再按认领或接管契约取得本对话有效的 attempt/fence；`completed` 报告已完成结果，不自行重新认领或创建替代任务。已有后台执行未到终态时先观察原 ID，不启动替代执行。B 不能借 A 的 binding 发起新业务。
+现有本地调度器发现等待记录后，通过受信控制接口分配尝试（native 使用 `handoff_begin_attempt`；原 host-window 内部接口保留 `goal_handoff(action="begin_attempt")`）。Server 持久分配唯一 attempt_id 和截止时间，再实际调用原网页启动适配器。保留既有 120 秒启动延迟；接管等待从 Server 分配尝试起单独计时，默认 300 秒，用 `WEBCODEX_HANDOFF_TAKEOVER_TIMEOUT_SECS` 配置（1–3600 秒）。它不修改 CLI 超时或 600K/800K 阈值。最多首次加三次重试，共四次；重复发现、回调、服务重启不清零预算。同一次尝试不重复发送。换尝试前先撤销旧候选资格，结果丢失先查询 Server 的实际状态。
 
-已确认且未变化的计划不会因为换聊天而失效，不要求重新确认；计划变更等原有重新确认条件仍然有效。`context_meter.lifecycle_state` 和 notice 的限制优先于流程地图；draining/retired 不能通过 bootstrap 或更换标识重新激活。网页新建、登录和工具批准由用户完成，系统不自动执行这些动作。
+候选对话使用自己的可信 host window，不接受源 epoch 或自报身份。`goal_handoff(action="prepare")` 核对 project、Goal、Checkpoint、计划版本与交接包，实际读取文件指纹（native 经 private broker，原路径经 Runner）；只返回本任务包和摘要。候选读取包后以精确 `package_sha256` 调用 `commit`。Server 在同一事务核对当前候选、未过期尝试、准备证明和旧执行链终态，切换执行所有者、推进旧节点 fence、退休源对话。新对话还须以 `status` 确认 `execution_granted=true` 才能继续原任务。创建网页、提示词发送、accepted/pending、bootstrap 或模型口头声明都不是接管成功。
 
-同一真实对话切换节点、切换目标或重复读取恢复信息不会清零。系统优先使用可靠宿主对话身份；无法取得时，由调用方在同一对话复用 `context_epoch`，只在实际新开对话后更换。无法归属时显示计量不可用，不把多个对话混成一个计数。
+切换前通过现有 StopJob/原生 Run 取消与观测机制处理旧后台链；仍有活动请求、未知结果或无法证明全链终止时停止交接，不能同时放行两个执行者。四次失败或不安全旧执行链使 handoff=`failed`、Goal=`blocked`、源上下文=`stopped`；不再自动恢复或启动第五次。报告“交接失败，已停止执行，已保留可人工恢复的状态”，不标记任务完成。只有用户明确要求后才可人工恢复。
 
-累计量使用 `o200k_base` 参考编码，仅覆盖可见工具文本。记账按服务端调用进行（`retry_accounting=per_server_invocation`）；业务幂等重放不等于本次工具交互免计量。新默认值也不会回写旧 epoch，实际阈值以该 epoch 返回的 `context_meter.warning_tokens` / `handoff_tokens` 为准。
+handoff 保持同一个逻辑 Agent 身份，仅更换 run/网页对话，不创建替代 Goal。按用户后续确认，自己的 Memory 和已有会议授权保留；业务写入受持久 `task_goal_id`、当前 run 和新节点 claim 约束，不能读取其他 Agent 的私域。native 私域文件通道可以接续本任务，CLI/插件因缺少已验证的 OS 隔离仍被拒绝。
 
-收到提醒后，先保存交接检查点并核对成功回执，再打开新的 ChatGPT 对话，连接同一个 Server，输入：
+native 接入使用既有 BootstrapOnly 管理接口控制有限重试，显式配置控制凭据而不复用 Desktop user token。可信 OAuth 宿主须显式登记源窗口。启动器随后领取仅限当前尝试的 256-bit 一次性准备授权，只在发给目标新聊天的局部消息中携带；本地 request、回执、文件名、日志和环境不保存原文，目标宿主聊天可能留存授权消息。服务端仅存哈希，首次 `prepare(launch_claim=...)` 同事务核验 OAuth principal、source/pending run、同 Goal/Checkpoint/attempt、原 deadline 和全新窗口，再授予 Pending 准备资格。不会因为凭证、网页创建或 prepared 就授业务权，仍必须实际读包核验再 commit/status。源窗口、其他 Agent、旧候选/撤销窗口不能兑付，同窗只可幂等读回原结果。
 
-```text
-继续本地当前任务。
-```
+attempt UUID 与网页 URL 均不充当授权，不复制旧 run token 或改变全局 connector，也不需要猜测 URL 与匿名 `openai/session` 的对应关系。发行响应丢失先查状态，不能重发或旋转同次 grant；未成功就等待原截止时间，下一次尝试撤销旧资格。数据库排队时间计入期限，锁等待跨过 deadline 时拒绝准备或切权。真实网页接管仍未实测；自动化模拟不代表已验证外部网页端到端成功。接入限制及验证结果见 [本轮说明](HANDOFF_RELIABILITY.zh-CN.md)。
 
-恢复信息会给出目标、计划版本、当前节点、进度、问题、未决操作数量和后续读取入口。通过 `continuation`、`details` 继续读取：
-
-| 读取方式 | 内容与上限 |
-| --- | --- |
-| `goal_bootstrap` | 不超过 8 KiB 的恢复摘要及 `workflow_overview`；仍需按后续入口补读材料 |
-| `goal_read(view="summary")` | 不超过 8 KiB 的摘要；不重复附加流程总览，`progress_summary.partial` 明确为真 |
-| `goal_read(view="node", node_id=...)` | 不超过 16 KiB 的完整共享需求和当前节点包，供认领前读取 |
-| `goal_read(view="detail", section=...)` | 每页不超过 8 KiB 的 JSON 文本片段；支持 `goal`、`plan`、`state`、`checkpoints`、`attempts`、`operations`、`reviews` |
-| `goal_read(view="handoff", source_context_epoch=...)` | 按固定源 epoch 在一致快照中读取撤权、checkpoint、接管身份和通过验收的业务证据；筛选参数不设置调用者身份 |
-
-详细数据按 `next_cursor` 依次读取，先拼接所有 `text` 片段，再解析该段 JSON；不能把半段 JSON 当成完整状态。历史段解析后若仍有 `has_more`，再把其中的 `next_sequence` 作为 `history_after` 读取下一段历史。`history_after=0` 从最早记录开始；省略时检查点和 Attempt 默认最新一条，操作默认未决记录。状态版本或材料变化会使旧游标失效，需要重新读取该段。
-
-完整初始需求即使尚无计划，也能通过 `section="goal"` 取回。正在规划的任务继续规划；待确认的任务继续等待确认；已完成任务只展示结果，不自动启动另一目标。
-
-需要模型审核或图像检查时，按当前[审核契约](REVIEW_FEEDBACK_LOOP.zh-CN.md)重新准备并在本对话实际接收材料；历史图片路径、送达记录或口头结论不能冒充本次审核。
-
-没有有效的当前目标时，应列出并明确选取任务，不猜测“最近访问的目标就是当前任务”。不同 Server 或不同所有者不能自动读取这里的本地目标。
-
-这里的“当前目标”是 Server 上的 Host Goal 指针，不是 Desktop 的“当前项目”选择。切换桌面项目不会迁移已有 Goal；恢复时仍须核对原 Goal 的 Project、任务目录和执行绑定。
-
+原 host-window 内部投影通过 `goal_list.latest_handoff` 和 `goal_read(view="handoff",source_context_epoch=...)` 发现交接；native 调度器使用管理接口 `handoff_list/status`，模型使用 `goal_handoff(status)`。`retired_at` 在实际提交前为 null，`created_at` 是交接准备时间；`resume_started` 仅在执行权提交时记录，不再以激活 bootstrap 作为自动交接成功依据。
 ## 5. 中断、重试与未知结果
 
 请求超时不等于操作没有执行。保持原参数和幂等键，读取已有目标、操作或原 Job；不要随意换新键重新派发。

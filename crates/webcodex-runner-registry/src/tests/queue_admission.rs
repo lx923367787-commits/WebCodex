@@ -5,6 +5,7 @@ async fn registry_rejects_enqueue_when_queue_full() {
     let registry = RunnerRegistry::default();
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -72,6 +73,7 @@ async fn registry_rejects_enqueue_when_client_offline() {
     let registry = RunnerRegistry::default();
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,

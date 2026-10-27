@@ -1,0 +1,9 @@
+# Replace C:/WebCodex with the absolute checkout path before merging into
+# the Runner configuration. This file contains no Server credential.
+[[plugins.providers]]
+id = "edge-handoff"
+name = "WebCodex Edge Handoff"
+command = 'C:/WebCodex/windows/.venv/Scripts/python.exe'
+args = ['C:/WebCodex/windows/chat-handoff/edge_tools.py', '--native-plugin']
+cwd = 'C:/WebCodex/windows/chat-handoff'
+timeout_secs = 60

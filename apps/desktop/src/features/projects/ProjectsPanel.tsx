@@ -4,11 +4,19 @@ import type { DesktopState, ProjectAction, ProjectRegistrySnapshot, RegisteredPr
 import { desktopApi } from "../../lib/desktop-api";
 import { useLocale, type MessageKey } from "../../i18n/locale";
 import { normalizeDesktopError } from "../../i18n/presentation";
+import { aiOfficeApi } from "../../lib/ai-office-api";
+import type { AiOfficeApi } from "../ai-office/types";
+import { ProjectTeamSettings } from "./ProjectTeamSettings";
 
-export function ProjectsPanel({ state, onState, onChooseProject }: {
+export type ProjectRegistryApi = Pick<typeof desktopApi, "listProjects" | "inspectProject" | "addProject" | "switchProject" | "mutateProject" | "getState">;
+
+export function ProjectsPanel({ state, onState, onChooseProject, api = desktopApi, officeApi = aiOfficeApi, preview = false }: {
   state: DesktopState;
   onState: (state: DesktopState) => void;
   onChooseProject: () => void;
+  api?: ProjectRegistryApi;
+  officeApi?: AiOfficeApi;
+  preview?: boolean;
 }) {
   const { t } = useLocale();
   const [registry, setRegistry] = useState<ProjectRegistrySnapshot | null>(null);
@@ -16,6 +24,7 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<MessageKey | null>(null);
   const [removing, setRemoving] = useState<RegisteredProject | null>(null);
+  const [teamProject, setTeamProject] = useState<RegisteredProject | null>(null);
   const sequence = useRef(0);
   const inFlight = useRef(false);
   const mounted = useRef(true);
@@ -25,13 +34,13 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
   const local = state.topology?.server.kind === "local";
   const busy = pending || loading || Boolean(state.current_operation);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<ProjectRegistrySnapshot | null> => {
     const request = ++sequence.current;
     setLoading(true);
     setError(null);
     try {
-      const next = await desktopApi.listProjects();
-      if (mounted.current && request === sequence.current) setRegistry(next);
+      const next = await api.listProjects();
+      if (mounted.current && request === sequence.current) { setRegistry(next); return next; }
     } catch (value) {
       if (mounted.current && request === sequence.current) {
         setRegistry(null);
@@ -40,7 +49,8 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
     } finally {
       if (mounted.current && request === sequence.current) setLoading(false);
     }
-  }, []);
+    return null;
+  }, [api]);
 
   useEffect(() => {
     mounted.current = true;
@@ -49,8 +59,8 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
     return () => { mounted.current = false; sequence.current += 1; };
   }, [available, canObserve, refresh]);
 
-  const operate = async (operation: () => Promise<DesktopState>) => {
-    if (inFlight.current || busy) return;
+  const operate = async (operation: () => Promise<DesktopState>, afterSuccess?: (registry: ProjectRegistrySnapshot) => void) => {
+    if (preview || inFlight.current || busy) return;
     inFlight.current = true;
     sequence.current += 1;
     setPending(true);
@@ -61,19 +71,20 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
     } catch (value) {
       failure = projectError(value);
       // A lost response can follow a committed registry/selection change.
-      try { onState(await desktopApi.getState()); } catch { /* Keep the last verified state. */ }
+      try { onState(await api.getState()); } catch { /* Keep the last verified state. */ }
     } finally {
       inFlight.current = false;
       if (mounted.current) {
         setPending(false);
-        await refresh();
+        const next = await refresh();
         if (failure) setError(failure);
+        else if (next && mounted.current) afterSuccess?.(next);
       }
     }
   };
 
   const add = async () => {
-    if (busy || inFlight.current) return;
+    if (preview || busy || inFlight.current) return;
     inFlight.current = true;
     setPending(true);
     let selection: string | string[] | null = null;
@@ -83,17 +94,31 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
     finally { inFlight.current = false; if (mounted.current) setPending(false); }
     if (typeof selection === "string" && mounted.current) {
       const path = selection;
-      await operate(() => desktopApi.addProject(path));
+      let inspectedPath: string | null = null;
+      await operate(async () => {
+        inspectedPath = (await api.inspectProject(path)).path;
+        return api.addProject(path);
+      }, (next) => {
+        const canonicalPath = inspectedPath;
+        if (canonicalPath === null) return;
+        const matching = next.projects.filter((project) => comparableProjectPath(project.path) === comparableProjectPath(canonicalPath));
+        const selected = matching.length === 1 ? matching[0] : null;
+        if (selected) setTeamProject(selected);
+      });
     }
   };
 
   const mutate = (project: RegisteredProject, action: ProjectAction) =>
-    operate(() => desktopApi.mutateProject(project.id, project.revision, action));
+    operate(() => api.mutateProject(project.id, project.revision, action));
 
   const closeRemoval = () => {
     setRemoving(null);
     removeTrigger.current?.focus();
   };
+
+  if (teamProject) {
+    return <ProjectTeamSettings key={teamProject.id} project={teamProject} api={officeApi} onBack={() => setTeamProject(null)} />;
+  }
 
   return (
     <section className="page-section" aria-labelledby="projects-title" data-webcodex-page="projects">
@@ -102,11 +127,13 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
         <h1 id="projects-title">{t("project.title")}</h1>
         <div className="project-row-actions">
           {available && <button className="secondary-button" onClick={() => void refresh()} disabled={busy}>{t("project.refresh")}</button>}
-          <button className="primary-button" onClick={() => available && local ? void add() : onChooseProject()} disabled={busy}>{t("project.add")}</button>
+          <button className="primary-button" onClick={() => available && local ? void add() : onChooseProject()} disabled={busy || preview}>{t("project.add")}</button>
         </div>
       </div>
       <p className="lede">{t("project.description")}</p>
       <p className="project-help">{t("project.registrationOnly")}</p>
+      <p className="project-help">每个项目文件夹都可以独立设置团队人数、CLI 使用与模型。默认由总经理自主安排。</p>
+      {preview && <p className="project-help">演示项目支持团队设置与策略保存；文件夹管理操作在桌面端使用。</p>}
       {error && <p role="alert" className="project-error">{t(error)}</p>}
       {!available ? <div className="empty-state">{t("project.runtimeRequired")}</div> : <>
         {loading && <p role="status">{t("project.loading")}</p>}
@@ -116,7 +143,7 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
           {registry?.projects.map((project) => {
             const current = state.project?.runtime_project_id === project.id;
             const online = project.agent_status === "online";
-            const mutable = registry.can_manage && online && !busy;
+            const mutable = registry.can_manage && online && !busy && !preview;
             return (
               <article className="detail-card project-registry-card" key={project.id} aria-label={project.name}>
                 <div className="project-row-title">
@@ -127,7 +154,8 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
                 <p className="project-path">{project.path.replace(/^\\\\\?\\/, "")}</p>
                 {project.active_jobs > 0 && <p className="project-help">{t("project.activeJobs", { count: project.active_jobs })}</p>}
                 <div className="project-row-actions">
-                  <button className="secondary-button" disabled={!mutable || !project.enabled || current} onClick={() => void operate(() => desktopApi.switchProject(project.id, project.revision))}>{t(current ? "project.current" : "project.switch")}</button>
+                  <button className="secondary-button" disabled={busy} onClick={() => setTeamProject(project)}>团队设置</button>
+                  <button className="secondary-button" disabled={!mutable || !project.enabled || current} onClick={() => void operate(() => api.switchProject(project.id, project.revision))}>{t(current ? "project.current" : "project.switch")}</button>
                   <button className="secondary-button" disabled={!mutable} onClick={() => void mutate(project, project.enabled ? "disable" : "enable")}>{t(project.enabled ? "project.disable" : "project.enable")}</button>
                   <button className="secondary-button project-remove" disabled={!mutable || project.active_jobs > 0} onClick={(event) => { removeTrigger.current = event.currentTarget; setRemoving(project); }}>{t("project.remove")}</button>
                 </div>
@@ -158,6 +186,11 @@ export function ProjectsPanel({ state, onState, onChooseProject }: {
       </div>}
     </section>
   );
+}
+
+function comparableProjectPath(path: string): string {
+  const clean = path.replace(/^\\\\\?\\/, "").replace(/\\/g, "/").replace(/\/+$/, "");
+  return /^[A-Za-z]:\//.test(clean) || clean.startsWith("//") ? clean.toLowerCase() : clean;
 }
 
 function projectError(value: unknown): MessageKey {

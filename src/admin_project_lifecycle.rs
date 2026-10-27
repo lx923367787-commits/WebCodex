@@ -844,6 +844,8 @@ mod tests {
 
     fn user_auth(username: &str) -> AuthContext {
         AuthContext {
+            agent_run: None,
+            native_host: None,
             kind: AuthKind::ApiToken,
             user_id: Some(format!("user-{username}")),
             username: Some(username.to_string()),
@@ -882,6 +884,7 @@ mod tests {
         registry
             .register(crate::test_support::current_runner_registration(
                 RunnerRegisterRequest {
+                    agent_execution_resources: Vec::new(),
                     client_id: "owned-runner".to_string(),
                     runner_instance_id: "instance-owned".to_string(),
                     runner_protocol_generation:

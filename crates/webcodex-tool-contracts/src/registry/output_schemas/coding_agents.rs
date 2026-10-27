@@ -63,7 +63,7 @@ fn event_schema() -> Value {
                 ]
             },
             "text":nullable_schema("string", "Bounded normalized text when this event kind carries text."),
-            "label":nullable_schema("string", "Bounded normalized activity label when present."),
+            "label":nullable_schema("string", "Bounded activity identity. Tool/file/terminal activity uses the provider tool-call id when available, enabling receipt correlation; agent messages may label commentary, final_answer or model metadata."),
             "status":nullable_schema("string", "Bounded normalized activity status when present."),
             "usage":{"anyOf":[usage_schema(),{"type":"null"}]}
         },

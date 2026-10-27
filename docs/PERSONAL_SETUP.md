@@ -1,5 +1,7 @@
 # Full WebCodex Setup
 
+**External tools:** Install model CLIs on each Runner computer, sign in with that user’s account or configure their key, then configure and validate the Runner. WebCodex packages integration code and account-independent runtimes, not preconfigured user tool installations. See [tools, accounts and migration](EXTERNAL_TOOLS.md).
+
 [English](PERSONAL_SETUP.md) | [简体中文](PERSONAL_SETUP.zh-CN.md)
 
 Use this path for CLI setup, an existing Server, or a setup that needs more control than Desktop provides. For a normal Windows or macOS personal installation, the recommended first path is [WebCodex Desktop + the official OpenAI Secure Tunnel](desktop-install.md). In either case, the full WebCodex model is the same: ChatGPT connects to a regular Server, and a persistent Runner uses the real projects, Git checkout, compiler, and test tools on your machine.

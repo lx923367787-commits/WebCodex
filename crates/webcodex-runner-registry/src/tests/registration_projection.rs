@@ -45,6 +45,7 @@ async fn registry_registers_and_lists_client() {
     let registry = RunnerRegistry::default();
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,

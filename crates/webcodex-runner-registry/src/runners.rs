@@ -21,7 +21,7 @@ use super::{
     RunnerTransport, MAX_RETIRED_INSTANCES_PER_RUNNER, RUNNER_ONLINE_WINDOW_SECS,
 };
 use crate::RunnerAccessGroup;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{watch, Notify};
 use webcodex_core::coding_agent::{
@@ -247,6 +247,30 @@ impl RunnerRegistry {
         let accepted_protocol =
             AcceptedRunnerProtocol::try_from_registration(body.runner_protocol_generation)?;
         let runner_features = RunnerFeatureSet::try_from_registration(&body.capabilities)?;
+        if body.agent_execution_resources.len()
+            > webcodex_core::runner_protocol::AGENT_EXECUTION_RESOURCE_MAX_ENTRIES
+        {
+            return Err("agent_execution_resource_capacity_exceeded".into());
+        }
+        if !runner_features.supports(RunnerFeature::AgentIsolatedExecutionV1)
+            && !body.agent_execution_resources.is_empty()
+        {
+            return Err("agent_execution_resources_require_capability".into());
+        }
+        let mut resource_ids = HashSet::new();
+        let mut resource_providers = BTreeSet::new();
+        for resource in &body.agent_execution_resources {
+            resource.validate()?;
+            if !resource_ids.insert(resource.resource_set_id.clone()) {
+                return Err("agent_execution_resource_duplicate".into());
+            }
+            if resource
+                .provider
+                .is_some_and(|provider| !resource_providers.insert(provider))
+            {
+                return Err("agent_cli_provider_resource_ambiguous".into());
+            }
+        }
         if runner_features.supports(RunnerFeature::ApplyPatchMatchMetadata)
             && !runner_features.supports(RunnerFeature::ApplyPatch)
         {
@@ -331,6 +355,7 @@ impl RunnerRegistry {
             job_concurrency_limit: body.job_concurrency_limit,
             coding_agent_providers: coding_agent_providers.clone(),
             coding_agent_inventory,
+            agent_execution_resources: body.agent_execution_resources,
             projected_structured_terminal_suppressions: VecDeque::new(),
         };
         match (

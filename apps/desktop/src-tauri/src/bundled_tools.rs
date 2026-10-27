@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
-const TOKEN_FILE_KEY: &str = "WEBCODEX_TUNNEL_MCP_TOKEN_FILE";
+// File-import trust survives independently of the native Tunnel Host identity.
+const TOKEN_FILE_KEY: &str = "WEBCODEX_FILE_BRIDGE_TOKEN_FILE";
 const TRUST_KEY: &str = "WEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS";
 
 pub(crate) struct BundledTools {
@@ -150,6 +151,14 @@ pub(crate) struct BridgeToken {
 }
 
 pub(crate) struct BootstrapCredentialFile(PathBuf);
+
+/// Reuse the existing private credential-directory boundary for passive Host
+/// control metadata. This helper reads no credential.
+pub(crate) fn prepare_host_control_directory(path: &Path) -> DesktopResult<()> {
+    std::fs::create_dir_all(path)
+        .map_err(|_| config_error("Could not prepare private Host control storage"))?;
+    protect_secret_directory(path)
+}
 
 impl BootstrapCredentialFile {
     pub fn path(&self) -> &Path {
@@ -383,7 +392,7 @@ c=json.loads(sys.argv[1]); env={}
 for line in Path(c['env']).read_text(encoding='utf-8').splitlines():
     if '=' in line and not line.strip().startswith('#'):
         k,v=line.split('=',1); env[k.strip()]=v.strip().strip('\"').strip("'")
-token=Path(env['WEBCODEX_TUNNEL_MCP_TOKEN_FILE']).read_text().strip()
+token=Path(env['WEBCODEX_FILE_BRIDGE_TOKEN_FILE']).read_text().strip()
 assert token.startswith('wc_pat_') and token != env['WEBCODEX_TOKEN']
 url=urlsplit(c['url']); session=None; seq=0
 def rpc(name,args):
@@ -783,7 +792,7 @@ mod tests {
             "webcodex-bridge-explicit-{}.env",
             std::process::id()
         ));
-        let bytes = "WEBCODEX_TUNNEL_MCP_TOKEN_FILE='Z:/operator/credential.token'\nWEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS=operator-choice\n";
+        let bytes = "WEBCODEX_FILE_BRIDGE_TOKEN_FILE='Z:/operator/credential.token'\nWEBCODEX_TRUSTED_MCP_FILE_API_TOKEN_IDS=operator-choice\n";
         std::fs::write(&path, bytes).unwrap();
         assert!(!needs_file_bridge(&path).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);

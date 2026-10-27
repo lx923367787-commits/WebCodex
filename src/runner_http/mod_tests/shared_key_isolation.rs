@@ -5,6 +5,8 @@ fn managed_oauth_auth_context(
     shared_key_hash: Option<&str>,
 ) -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::OAuth2Token,
         user_id: Some(format!("user-{}", username)),
         username: Some(username.to_string()),
@@ -46,6 +48,7 @@ async fn registry_filters_lightweight_clients_by_auth_group() {
         registry
             .register_with_auth(
                 RunnerRegisterRequest {
+                    agent_execution_resources: Vec::new(),
                     process_started_at: None,
                     build: None,
                     job_concurrency_limit: None,
@@ -75,6 +78,7 @@ async fn registry_filters_lightweight_clients_by_auth_group() {
     ] {
         registry
             .register(RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -213,6 +217,7 @@ async fn non_bootstrap_admin_keeps_global_visibility_without_owner_bypass() {
     let registry = RunnerRegistry::default();
     registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -279,6 +284,7 @@ async fn managed_user_coding_agent_inventory_does_not_cross_owner() {
     ] {
         registry
             .register(RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -364,6 +370,7 @@ async fn same_client_id_in_different_project_grants_is_isolated() {
     let grant_a_access = runner_access_from_auth(Some(&grant_a)).unwrap();
     let grant_b_access = runner_access_from_auth(Some(&grant_b)).unwrap();
     let registration = |hostname: &str| RunnerRegisterRequest {
+        agent_execution_resources: Vec::new(),
         process_started_at: None,
         build: None,
         job_concurrency_limit: None,
@@ -431,6 +438,7 @@ async fn shared_key_client_id_collision_cannot_cross_group_or_revive_old_connect
     let bootstrap_access = runner_access_from_auth(Some(&bootstrap)).unwrap();
     let registration = |client_id: &str, instance: &str, hostname: &str, owner: Option<&str>| {
         RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,

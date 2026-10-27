@@ -3,22 +3,22 @@
 use crate::webcodex_runner;
 use crate::webcodex_runner::jobs::JobManager;
 use crate::webcodex_runner::transport::http::{
-    bounded_single_line, is_active_instance_lease_conflict, looks_like_auth_failure_message,
-    post_json, RunnerHttpError, RunnerHttpErrorKind, RUNNER_REGISTER_PATH,
+    RUNNER_REGISTER_PATH, RunnerHttpError, RunnerHttpErrorKind, bounded_single_line,
+    is_active_instance_lease_conflict, looks_like_auth_failure_message, post_json,
 };
 use crate::webcodex_runner::{
-    hostname, max_concurrent_jobs, HotRunnerConfig, ReloadableRunnerConfig, RunnerConfig,
-    RunnerProjectCache, ShellConfig, SshConnectionPool,
+    HotRunnerConfig, ReloadableRunnerConfig, RunnerConfig, RunnerProjectCache, ShellConfig,
+    SshConnectionPool, hostname, max_concurrent_jobs,
 };
 use reqwest::blocking::Client;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use webcodex_core::runner_protocol::{
-    RunnerCapabilities, RunnerPolicySummary, RunnerProjectSummary, RunnerRegisterRequest,
-    RunnerRegisterResponse, ShellJobInventory, ShellProfileSummaryEntry, ShellProfilesSummary,
-    ShellProjectInventoryStatus, RUNNER_PROTOCOL_GENERATION_V2,
+    RUNNER_PROTOCOL_GENERATION_V2, RunnerCapabilities, RunnerPolicySummary, RunnerProjectSummary,
+    RunnerRegisterRequest, RunnerRegisterResponse, ShellJobInventory, ShellProfileSummaryEntry,
+    ShellProfilesSummary, ShellProjectInventoryStatus,
 };
 use webcodex_core::{build_info, runner_protocol};
 
@@ -196,6 +196,9 @@ pub(crate) fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabili
     capabilities.structured_script_payload = true;
     capabilities.internal_posix_script = true;
     capabilities.structured_execution_jobs = true;
+    // Configuration alone grants no isolated execution support. Only the
+    // register builder replaces this after actual JobManager initialization.
+    capabilities.agent_isolated_execution_v1 = false;
     // Detached process ownership is an independent additive authority. Until
     // each native backend is implemented and dogfooded it must fail closed
     // rather than being inferred from structured process + durable Jobs.
@@ -283,6 +286,39 @@ pub(crate) fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabili
 }
 
 #[cfg(test)]
+mod capability_tests {
+    use super::super::jobs::agent_resources::AgentExecutionResourcesConfig;
+    use super::agent_execution_resource_registration;
+
+    #[test]
+    fn agent_execution_registration_requires_ready_backend_and_verified_resources() {
+        let empty = AgentExecutionResourcesConfig::default();
+        assert!(agent_execution_resource_registration(false, &empty).is_empty());
+        assert!(agent_execution_resource_registration(true, &empty).is_empty());
+        let invalid: AgentExecutionResourcesConfig = serde_json::from_value(serde_json::json!({
+            "profiles":[{"id":"fixture", "executable":"missing.exe", "executable_sha256":"invalid", "files":[]}]
+        })).unwrap();
+        assert!(agent_execution_resource_registration(false, &invalid).is_empty());
+        assert!(agent_execution_resource_registration(true, &invalid).is_empty());
+    }
+}
+
+fn agent_execution_resource_registration(
+    backend_ready: bool,
+    config: &super::jobs::agent_resources::AgentExecutionResourcesConfig,
+) -> Vec<runner_protocol::AgentExecutionResourceDescriptor> {
+    if !cfg!(windows) || !backend_ready {
+        return Vec::new();
+    }
+    super::jobs::agent_resources::validate_profiles(config)
+        .and_then(|profiles| {
+            profiles.verify_sources()?;
+            Ok(profiles.descriptors())
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
 pub(crate) fn build_register_request(
     cfg: &RunnerConfig,
     runner_instance_id: &str,
@@ -315,6 +351,11 @@ pub(crate) fn build_register_request_with_provider_status(
 ) {
     let hot = runtime.snapshot();
     let mut capabilities = runner_register_capabilities(cfg);
+    let agent_execution_resources = agent_execution_resource_registration(
+        runtime.agent_execution_ready(),
+        &cfg.agent_execution_resources,
+    );
+    capabilities.agent_isolated_execution_v1 = !agent_execution_resources.is_empty();
     let coding_agent_providers = runtime
         .coding_agents()
         .map(|manager| manager.providers())
@@ -333,6 +374,7 @@ pub(crate) fn build_register_request_with_provider_status(
             hostname: cfg.hostname.clone().or_else(hostname),
             host_context: cfg.host_context.clone(),
             capabilities,
+            agent_execution_resources,
             policy: Some(register_policy_summary(
                 &hot,
                 prepared_cache_count,

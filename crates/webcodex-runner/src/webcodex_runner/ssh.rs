@@ -4427,7 +4427,9 @@ fn main() {
             .read_line(&mut line)
             .expect("read fake SSH grandchild pid");
         let pid = grandchild_pid(&line);
-        let child = Arc::new(Mutex::new(child));
+        let child = Arc::new(Mutex::new(
+            crate::webcodex_runner::jobs::child::JobChild::Managed(child),
+        ));
 
         let error = crate::webcodex_runner::jobs::lifecycle::post_spawn_interruption_reason(
             true, false, true,

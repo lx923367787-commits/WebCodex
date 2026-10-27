@@ -30,6 +30,7 @@ fn document_provider_binding_is_exact_and_rejects_ambiguity_and_stale_instances(
     fs::write(&worker, "# operator configured worker").unwrap();
     let fake = fake_binary();
     let provider = PluginProviderConfig {
+        runtime_lifecycle: None,
         id: "office-a".into(),
         name: "Office".into(),
         command: fake.path.to_string_lossy().into_owned(),
@@ -168,6 +169,7 @@ impl Fixture {
         let marker = temp.path().join("marker.log");
         let fake = fake_binary();
         let provider = PluginProviderConfig {
+            runtime_lifecycle: None,
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "fake".to_string(),
@@ -288,6 +290,7 @@ fn runner_config(
         SshConfig, ToolProvidersConfig,
     };
     RunnerConfig {
+        agent_execution_resources: Default::default(),
         server_url: "http://127.0.0.1:8000".to_string(),
         token: "test-token".to_string(),
         client_id: "plugin-test".to_string(),
@@ -681,6 +684,7 @@ fn prepared_environment_reuses_shell_env_default_profile_and_clears_sensitive_va
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            runtime_lifecycle: None,
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "fake".to_string(),
@@ -741,6 +745,7 @@ fn runner_real_process_bare_plugin_command_resolves_from_prepared_path_with_expl
         // behavior. Keep provider startup tolerant of a heavily loaded CI host.
         request_timeout_secs: 10,
         providers: vec![PluginProviderConfig {
+            runtime_lifecycle: None,
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "fake".to_string(),
@@ -784,6 +789,7 @@ fn plugin_profile_init_script_is_captured_into_native_child_environment() {
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            runtime_lifecycle: None,
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "fake".to_string(),
@@ -814,6 +820,7 @@ fn reload_replaces_committed_provider_and_invalidates_old_instance() {
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            runtime_lifecycle: None,
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "fake".to_string(),
@@ -892,6 +899,7 @@ fn concurrent_reload_is_busy_while_existing_calls_continue_and_later_reload_wins
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            runtime_lifecycle: None,
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "fake".to_string(),
@@ -1125,6 +1133,7 @@ fn shutdown_during_blocked_reload_does_not_wait_for_gate_or_allow_late_commit() 
     let startup_plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            runtime_lifecycle: None,
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "fake".to_string(),
@@ -1190,6 +1199,7 @@ fn failed_candidate_keeps_previous_instance_and_removal_has_no_fallback() {
     let plugins = PluginConfig {
         request_timeout_secs: 2,
         providers: vec![PluginProviderConfig {
+            runtime_lifecycle: None,
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "fake".to_string(),
@@ -1350,6 +1360,7 @@ fn write_runner_toml_without_plugins(path: &Path, project_registry_dir: &Path) {
 fn plugin_environment_projection_tracks_explicit_isolation() {
     let plugins = PluginConfig {
         providers: vec![PluginProviderConfig {
+            runtime_lifecycle: None,
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "projection-test".into(),
@@ -1372,3 +1383,6 @@ fn plugin_environment_projection_tracks_explicit_isolation() {
         PluginEnvironmentSnapshot::from_config(&isolated, &plugins)
     );
 }
+
+#[path = "plugin_lifecycle_tests.rs"]
+mod lifecycle;

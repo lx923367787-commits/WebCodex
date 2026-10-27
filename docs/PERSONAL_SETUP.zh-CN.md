@@ -1,5 +1,7 @@
 # WebCodex 完整使用指南
 
+**外部工具与账号：** 模型 CLI 由用户在每台 Runner 电脑自行安装、登录或配置自己的 key，再配置并验证 Runner。WebCodex 交付对接代码和通用运行依赖，不交付另一用户配置好的工具环境。见[工具、账号与迁移规则](EXTERNAL_TOOLS.md#简体中文)。
+
 [English](PERSONAL_SETUP.md) | [简体中文](PERSONAL_SETUP.zh-CN.md)
 
 这条路径适合 CLI、已有 Server，或需要比 Desktop 更多控制的配置。普通 Windows / macOS 个人安装最推荐先看 [WebCodex Desktop + 官方 OpenAI Secure Tunnel](desktop-install.zh-CN.md)。无论哪种入口，完整 WebCodex 的模型都一样：ChatGPT 连接普通 Server，再由长期运行的 Runner 使用你机器上的真实项目、Git、编译器和测试工具。

@@ -17,6 +17,7 @@ async fn mcp_export_runtime_with_surface(
     registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,

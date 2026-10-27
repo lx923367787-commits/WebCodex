@@ -374,14 +374,15 @@ fn tool_specs_describe_default_coding_loop_preferences() {
 
     let run_process_desc = desc("run_process");
     for phrase in [
-        "one-shot executable with structured argv",
-        "preferred route for one native executable with literal argv",
+        "one executable with structured argv",
+        "normal project/process permissions still apply",
         "windows batch shims",
-        "bounded runner-owned quoting contract",
-        "run_shell only when shell semantics or a short tightly related command chain",
+        "bounded quoting contract",
+        "use run_shell for shell semantics",
+        "short tightly related command chain",
         "do not open a persistent shell merely to run several commands",
         "same-process cwd/env/exports/functions/umask state",
-        "one named ssh resource",
+        "named ssh-resource commands",
         "ssh_resource onboarding",
         "one-shot/no-persistence ssh",
         "runner-owned",
@@ -429,8 +430,7 @@ fn tool_specs_describe_default_coding_loop_preferences() {
     let detached_desc = desc("run_detached_process");
     for phrase in [
         "supervisor-owned",
-        "outlive the initiating runner process",
-        "runner exit",
+        "outlive runner exit",
         "restart",
         "upgrade",
         "replacement",

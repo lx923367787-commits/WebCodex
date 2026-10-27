@@ -1,5 +1,7 @@
 # WebCodex Desktop 快速安装与 ChatGPT 连接
 
+**外部工具与账号：** 模型 CLI 由用户在每台 Runner 电脑自行安装、登录或配置自己的 key，再配置并验证 Runner。WebCodex 交付对接代码和通用运行依赖，不交付另一用户配置好的工具环境。见[工具、账号与迁移规则](EXTERNAL_TOOLS.md#简体中文)。
+
 [English](desktop-install.md) | [简体中文](desktop-install.zh-CN.md)
 
 对于普通 Windows / macOS 个人用户，**最推荐的路径是 WebCodex Desktop + 官方 OpenAI Secure Tunnel**。Server 和 Runner 都留在本机，ChatGPT 通过私有 Tunnel 连接；第一次使用不需要先配置反向代理、OAuth、系统 service 或公开的 WebCodex 地址。

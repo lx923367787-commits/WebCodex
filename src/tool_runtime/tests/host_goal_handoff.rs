@@ -49,7 +49,7 @@ fn wrap(binding: &Value, epoch: &str, operation: &str) -> Value {
 }
 
 #[tokio::test]
-async fn host_goals_new_epoch_uses_explicit_policy_and_published_plan_replays_after_retirement() {
+async fn host_goals_explicit_policy_cannot_authorize_handoff_and_plan_replay_stays_immutable() {
     let f = Fixture::new().await;
     let started = raw(
         &f,
@@ -74,7 +74,10 @@ async fn host_goals_new_epoch_uses_explicit_policy_and_published_plan_replays_af
     .unwrap();
     let retired=raw(&f,"chat-original","goal_checkpoint",json!({"goal_id":id(&goal),"expected_revision":revision(&saved.output["goal"]),
         "idempotency_key":"published-handoff","patch":{"action":"handoff","reason":"transfer before confirmation"}})).await;
-    success(&retired);
+    assert_eq!(
+        retired.output["error_kind"],
+        "goal_handoff_identity_required"
+    );
     let replay = f.save_plan(&goal, plan(), "replay-published").await;
     success(&replay);
     assert_eq!(replay.output["replayed"], true);
@@ -90,204 +93,108 @@ async fn host_goals_new_epoch_uses_explicit_policy_and_published_plan_replays_af
 }
 
 #[tokio::test]
-async fn host_goals_handoff_atomic_retirement_requires_a_new_attempt_and_keeps_source_evidence() {
-    let f = Fixture::new().await;
-    let claim = executing(&f).await;
-    let goal = &claim.output["goal"];
-    let binding = &claim.output["binding"];
-    let mut identityless_binding = binding.clone();
-    identityless_binding["operation_id"] = json!("missing-epoch");
-    let identityless = f.runtime.call_tool_with_context(ToolCallRequest {
-        tool_name: "write_project_file".into(),
-        arguments: json!({"project":f.project,"path":"must-not-write.txt","content":"x","goal_context":identityless_binding}),
-    }, ToolCallContext {
-        transport: ToolTransport::Mcp, session_id: None, auth: Some(&f.auth), window: None,
-        record_oauth_scope_denials: true, host_file_import_trust: HostFileImportTrust::Untrusted,
+async fn host_goals_handoff_waits_for_inflight_requests_and_keeps_source_checkpoint_after_transfer()
+{
+    let f = super::takeover::TakeoverFixture::new().await;
+    let binding = f.operation("missing-identity");
+    let identityless = f.inner.runtime.call_tool_with_context(ToolCallRequest {
+        tool_name:"write_project_file".into(),
+        arguments:json!({"project":f.inner.project,"path":"must-not-write.txt","content":"x","goal_context":binding}),
+    },ToolCallContext {
+        transport:ToolTransport::Mcp,session_id:None,auth:Some(&f.inner.auth),window:None,
+        record_oauth_scope_denials:true,host_file_import_trust:HostFileImportTrust::Untrusted,
     }).await.result.unwrap();
     assert_eq!(identityless.output["error_kind"], "goal_context_missing");
-    let principal = crate::tool_runtime::coding_agent::goal_owner_key(Some(&f.auth)).unwrap();
-    f.db.observe_host_context(
-        &principal,
-        "chat-original",
-        "synthetic-drain",
-        800000,
-        false,
-        None,
-    )
-    .unwrap();
-    let denied = raw(
-        &f,
-        "chat-original",
-        "write_project_file",
-        json!({"project":f.project,"path":"must-not-write.txt","content":"x",
-        "goal_context":wrap(binding,"chat-original","drained-write")}),
-    )
-    .await;
-    assert_eq!(denied.output["error_kind"], "goal_context_draining");
-    assert!(!f.temp.path().join("must-not-write.txt").exists());
-    let draining = raw(
-        &f,
-        "chat-original",
-        "goal_bootstrap",
-        json!({"goal_id":id(goal),"activate":false}),
-    )
-    .await;
-    success(&draining);
-    assert_workflow_overview(&draining.output);
-    assert_eq!(
-        draining.output["context_meter"]["lifecycle_state"],
-        "draining"
-    );
-    assert!(draining.output["context_meter"]["notice"]
-        .as_str()
-        .unwrap()
-        .contains("no new business"));
-    let handoff = json!({"goal_id":id(goal),"expected_revision":revision(goal),"idempotency_key":"handoff-once",
-        "patch":{"action":"handoff","reason":"continue locally"},"goal_context":wrap(binding,"chat-original","handoff")});
     let lease = crate::tool_runtime::host_goal_context::lease_active_operation(
-        &id(goal),
+        &id(&f.goal),
         "still-synchronous",
     );
-    let waiting = raw(&f, "chat-original", "goal_checkpoint", handoff.clone()).await;
+    let waiting = f.checkpoint().await;
     assert_eq!(waiting.output["error_kind"], "goal_operation_still_active");
-    assert_ne!(
-        f.db.read_host_context_state(&principal, "chat-original")
-            .unwrap()
-            .unwrap()
-            .state,
-        "retired"
-    );
-    drop(lease);
-    let saved = raw(&f, "chat-original", "goal_checkpoint", handoff.clone()).await;
-    success(&saved);
-    let replay = raw(&f, "chat-original", "goal_checkpoint", handoff).await;
-    success(&replay);
-    assert_eq!(replay.output["replayed"], true);
-    let denied = raw(
-        &f,
-        "chat-original",
-        "goal_bootstrap",
-        json!({"goal_id":id(goal),"activate":true}),
-    )
-    .await;
-    assert_eq!(denied.output["error_kind"], "goal_chat_retired");
-    let retired = raw(
-        &f,
-        "chat-original",
-        "goal_bootstrap",
-        json!({"goal_id":id(goal),"activate":false}),
-    )
-    .await;
-    success(&retired);
-    assert_workflow_overview(&retired.output);
-    assert_eq!(
-        retired.output["context_meter"]["lifecycle_state"],
-        "retired"
-    );
-    assert!(retired.output["context_meter"]["notice"]
-        .as_str()
+    assert!(f
+        .inner
+        .db
+        .read_host_goal_handoff(&f.owner(), &id(&f.goal))
         .unwrap()
-        .contains("Do not repeat business operations or reactivate"));
-    let replay = raw(
-        &f,
-        "chat-original",
-        "goal_mode_start",
-        json!({
-            "project":f.project,"objective":"Produce a sourced analysis","idempotency_key":"start"
-        }),
+        .is_none());
+    drop(lease);
+    let fields = f.reserve().await;
+    let h = f.stored();
+    let before = f
+        .inner
+        .db
+        .read_host_goal_handoff_snapshot(&f.owner(), &id(&f.goal), &h.source_context_epoch)
+        .unwrap();
+    assert_eq!(before.source.as_ref().unwrap().state, "draining");
+    assert_eq!(
+        before.checkpoint.as_ref().unwrap().source_fence,
+        f.binding["fence"].as_u64()
+    );
+    assert!(before.resume_started.is_none());
+    let forbidden = kernel_call(
+        &f.inner,
+        &f.source,
+        "goal_bootstrap",
+        json!({"goal_id":id(&f.goal),"activate":true,"context_epoch":"forged-fresh-chat"}),
     )
     .await;
-    success(&replay);
-    assert_workflow_overview(&replay.output);
-    assert_eq!(replay.output["replayed"], true);
-    assert_eq!(replay.output["goal"], retired.output["goal"]);
-    assert_eq!(replay.output["context_meter"]["lifecycle_state"], "retired");
-    let query = json!({"goal_id":id(goal),"view":"handoff","source_context_epoch":"chat-original"});
-    let before = raw(&f, "chat-original", "goal_read", query.clone()).await;
-    success(&before);
+    assert_eq!(forbidden.output["error_kind"], "goal_handoff_pending");
+    let prepared = f.prepare(&fields).await;
+    success(&prepared);
+    assert_eq!(f.stored().execution_owner_epoch, h.source_context_epoch);
+    success(&f.commit(&fields, &prepared).await);
+    let committed = f
+        .inner
+        .db
+        .read_host_goal_handoff_snapshot(&f.owner(), &id(&f.goal), &h.source_context_epoch)
+        .unwrap();
     assert_eq!(
-        before.output["source_context"]["lifecycle_state"],
-        "retired"
+        committed.checkpoint, before.checkpoint,
+        "handoff evidence must remain the exact original checkpoint"
     );
+    assert_eq!(committed.source.as_ref().unwrap().state, "retired");
     assert_eq!(
-        before.output["checkpoint"]["source_fence"],
-        binding["fence"]
+        committed.resume_started.as_ref().unwrap().identity_source,
+        "window_bound"
     );
-    assert_eq!(before.output["business_verified"], false);
-    success(
-        &raw(
-            &f,
-            "chat-b",
-            "goal_bootstrap",
-            json!({"goal_id":id(goal),"activate":true}),
-        )
-        .await,
-    );
-    let theft = raw(
-        &f,
-        "chat-b",
-        "write_project_file",
-        json!({"project":f.project,"path":"must-not-write.txt","content":"x",
-        "goal_context":wrap(binding,"chat-b","stolen-binding")}),
-    )
-    .await;
-    assert_eq!(theft.output["error_kind"], "goal_context_attempt_mismatch");
-    let read = raw(
-        &f,
-        "chat-b",
+    let read = kernel_call(
+        &f.inner,
+        &f.candidate,
         "goal_read",
-        json!({"goal_id":id(goal),"view":"node","node_id":"research"}),
+        json!({"goal_id":id(&f.goal),"view":"node","node_id":"research"}),
     )
     .await;
     success(&read);
-    let b = raw(&f,"chat-b","goal_claim_node",json!({"goal_id":id(goal),"node_id":"research","expected_revision":revision(&read.output["goal"]),
-        "plan_version":1,"idempotency_key":"b-claim","takeover_attempt_id":binding["attempt_id"]})).await;
-    success(&b);
-    assert!(b.output["binding"]["fence"].as_u64().unwrap() > binding["fence"].as_u64().unwrap());
-    let after = raw(&f, "chat-b", "goal_read", query.clone()).await;
-    success(&after);
-    assert_eq!(after.output["checkpoint"], before.output["checkpoint"]);
-    assert_eq!(after.output["current_attempt"]["context_epoch"], "chat-b");
-    assert_eq!(
-        after.output["business_verified"], false,
-        "bootstrap/claim alone must not count as business"
+    let claimed = kernel_call(&f.inner,&f.candidate,"goal_claim_node",
+        json!({"goal_id":id(&f.goal),"node_id":"research","expected_revision":revision(&read.output["goal"]),
+            "plan_version":1,"idempotency_key":"successor-claim"})).await;
+    success(&claimed);
+    assert!(
+        claimed.output["binding"]["fence"].as_u64().unwrap() > f.binding["fence"].as_u64().unwrap()
     );
-    assert_eq!(b.output["context_meter"]["warning_tokens"], 600000);
-    assert_eq!(b.output["context_meter"]["handoff_tokens"], 800000);
-    let retired = raw(
-        &f,
-        "chat-original",
-        "write_project_file",
-        json!({"project":f.project,"path":"must-not-write.txt","content":"x",
-        "goal_context":wrap(&b.output["binding"],"chat-original","retired-with-new-binding")}),
-    )
-    .await;
-    assert_eq!(retired.output["error_kind"], "goal_chat_retired");
-    assert!(!f.temp.path().join("must-not-write.txt").exists());
+    assert_eq!(claimed.output["context_meter"]["warning_tokens"], 600000);
+    assert_eq!(claimed.output["context_meter"]["handoff_tokens"], 800000);
+    let mut stolen = claimed.output["binding"].clone();
+    stolen["operation_id"] = json!("retired-using-new-binding");
+    let retired = kernel_call(&f.inner,&f.source,"write_project_file",
+        json!({"project":f.inner.project,"path":"must-not-write.txt","content":"x","goal_context":stolen})).await;
+    assert_eq!(retired.output["error_kind"], "goal_handoff_context_revoked");
+    assert!(!f.inner.temp.path().join("must-not-write.txt").exists());
 }
 
 #[tokio::test]
-async fn host_goals_runner_handoff_files_keep_exact_checkpoint_on_retired_replay() {
-    let f = Fixture::new().await;
-    let goal = f.start_in_task(Some("task-output")).await;
-    let first_arguments = json!({"goal_id":id(&goal),"expected_revision":revision(&goal),
-        "idempotency_key":"task-handoff-one","patch":{"action":"handoff","reason":"Preserve first exact state",
-            "state":{"completed_summary":"First checkpoint conclusion","facts":{"stage":"first"}}}});
-    let first = raw(
-        &f,
-        "chat-original",
-        "goal_checkpoint",
-        first_arguments.clone(),
-    )
-    .await;
+async fn host_goals_runner_handoff_files_keep_exact_checkpoint_on_waiting_replay() {
+    let f = super::takeover::TakeoverFixture::new().await;
+    let first = f.checkpoint().await;
     success(&first);
     let receipt = &first.output["handoff_artifacts"];
     let sequence = receipt["checkpoint_sequence"].as_u64().unwrap();
     let expected = f
+        .inner
         .temp
         .path()
         .join("task-output/handoff")
-        .join(id(&goal))
+        .join(id(&f.goal))
         .join(format!("checkpoint-{sequence}"))
         .join("handoff.json");
     let json_path = std::path::PathBuf::from(receipt["json_path"].as_str().unwrap());
@@ -300,46 +207,25 @@ async fn host_goals_runner_handoff_files_keep_exact_checkpoint_on_retired_replay
     let first_bytes = std::fs::read(&json_path).unwrap();
     let first_markdown = std::fs::read(&markdown_path).unwrap();
     let snapshot: Value = serde_json::from_slice(&first_bytes).unwrap();
-    let principal = crate::tool_runtime::coding_agent::goal_owner_key(Some(&f.auth)).unwrap();
     let stored = f
+        .inner
         .db
-        .host_goal_checkpoint_for_revision(&principal, &id(&goal), revision(&first.output["goal"]))
+        .host_goal_checkpoint_for_revision(
+            &f.owner(),
+            &id(&f.goal),
+            revision(&first.output["goal"]),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(
         snapshot["checkpoint"],
         serde_json::to_value(&stored).unwrap()
     );
-    assert!(snapshot.to_string().contains("First checkpoint conclusion"));
-    assert!(!f.server.path().join("handoff").exists());
-    let successor = raw(
-        &f,
-        "task-successor",
-        "goal_bootstrap",
-        json!({"goal_id":id(&goal),"activate":true}),
-    )
-    .await;
-    success(&successor);
-    let second = raw(&f,"task-successor","goal_checkpoint",json!({"goal_id":id(&goal),
-        "expected_revision":revision(&successor.output["goal"]),"idempotency_key":"task-handoff-two",
-        "patch":{"action":"handoff","reason":"A later state must have a separate snapshot",
-            "state":{"completed_summary":"Second distinct checkpoint conclusion","facts":{"stage":"second"}}}})).await;
-    success(&second);
-    assert_ne!(
-        second.output["handoff_artifacts"]["checkpoint_sequence"],
-        receipt["checkpoint_sequence"]
-    );
-    assert_ne!(
-        second.output["handoff_artifacts"]["json_path"],
-        receipt["json_path"]
-    );
-    let replay = raw(
-        &f,
-        "chat-original",
-        "goal_checkpoint",
-        first_arguments.clone(),
-    )
-    .await;
+    assert!(snapshot
+        .to_string()
+        .contains("Saved evidence remains available"));
+    assert!(!f.inner.server.path().join("handoff").exists());
+    let replay = f.checkpoint().await;
     success(&replay);
     assert_eq!(replay.output["replayed"], true);
     assert_eq!(
@@ -347,10 +233,8 @@ async fn host_goals_runner_handoff_files_keep_exact_checkpoint_on_retired_replay
         sequence
     );
     assert_eq!(std::fs::read(&json_path).unwrap(), first_bytes);
-    assert_eq!(std::fs::read(&markdown_path).unwrap(), first_markdown);
     std::fs::write(&json_path, b"external edit must be preserved").unwrap();
-    let conflict = raw(&f, "chat-original", "goal_checkpoint", first_arguments).await;
-    assert!(!conflict.success);
+    let conflict = f.checkpoint().await;
     assert_eq!(conflict.output["error_kind"], "goal_handoff_files_pending");
     assert_eq!(conflict.output["checkpoint_saved"], true);
     assert_eq!(
@@ -358,11 +242,43 @@ async fn host_goals_runner_handoff_files_keep_exact_checkpoint_on_retired_replay
         b"external edit must be preserved"
     );
     assert_eq!(std::fs::read(&markdown_path).unwrap(), first_markdown);
+    // Restore only the synthetic fixture's exact bytes to exercise a second
+    // transfer without treating the corrupted file as an authorized replacement.
+    std::fs::write(&json_path, &first_bytes).unwrap();
+    let fields = f.reserve().await;
+    let prepared = f.prepare(&fields).await;
+    success(&prepared);
+    success(&f.commit(&fields, &prepared).await);
+    let current = f
+        .inner
+        .db
+        .get_host_goal(&f.owner(), &id(&f.goal))
+        .unwrap()
+        .unwrap();
+    let second = kernel_call(&f.inner,&f.candidate,"goal_checkpoint",
+        json!({"goal_id":id(&f.goal),"expected_revision":current.revision,"idempotency_key":"second-handoff",
+            "patch":{"action":"handoff","reason":"Second transfer preserves its own exact snapshot",
+                "state":{"completed_summary":"Second distinct checkpoint conclusion"}}})).await;
+    success(&second);
+    assert_ne!(
+        second.output["handoff_artifacts"]["checkpoint_sequence"],
+        sequence
+    );
+    assert_ne!(
+        second.output["handoff_artifacts"]["json_path"],
+        receipt["json_path"]
+    );
+    assert_eq!(std::fs::read(&json_path).unwrap(), first_bytes);
+    assert_eq!(std::fs::read(&markdown_path).unwrap(), first_markdown);
+    assert_eq!(
+        f.checkpoint().await.output["error_kind"],
+        "goal_handoff_context_revoked"
+    );
 }
 
 #[tokio::test]
-async fn host_goals_draining_allows_only_existing_acceptance_and_retired_blocks_activation_even_with_forged_epoch(
-) {
+async fn host_goals_draining_allows_existing_acceptance_and_handoff_blocks_forged_epoch_activation()
+{
     let f = Fixture::new().await;
     let claim = executing(&f).await;
     let recorded = raw(
@@ -439,12 +355,16 @@ async fn host_goals_draining_allows_only_existing_acceptance_and_retired_blocks_
         "idempotency_key":"host-handoff","patch":{"action":"handoff","reason":"new host"}})).await;
     success(&handoff);
     let forged=kernel_call(&f,&window,"goal_bootstrap",json!({"goal_id":id(&start.output["goal"]),"activate":true,"context_epoch":"fake-fresh-chat"})).await;
-    assert_eq!(forged.output["error_kind"], "goal_chat_retired");
-    assert_eq!(forged.output["context_meter"]["context_epoch"], original);
-    let read=kernel_call(&f,&window,"goal_read",json!({"goal_id":id(&start.output["goal"]),"view":"handoff","source_context_epoch":original})).await;
+    assert_eq!(forged.output["error_kind"], "goal_handoff_pending");
+    let read = kernel_call(
+        &f,
+        &window,
+        "goal_handoff",
+        json!({"goal_id":id(&start.output["goal"]),"action":"status"}),
+    )
+    .await;
     success(&read);
-    assert_eq!(
-        read.output["source_context"]["identity_source"],
-        "window_bound"
-    );
+    assert_eq!(read.output["handoff"]["source_context_epoch"], original);
+    assert_eq!(read.output["handoff"]["status"], "waiting");
+    assert_eq!(read.output["execution_granted"], false);
 }

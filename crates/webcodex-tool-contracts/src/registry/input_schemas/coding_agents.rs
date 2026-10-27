@@ -49,8 +49,8 @@ pub fn coding_agent_start_input_schema() -> Value {
                 "type": "integer",
                 "minimum": CODING_AGENT_TIMEOUT_MIN_SECS,
                 "maximum": CODING_AGENT_TIMEOUT_MAX_SECS,
-                "default": 300,
-                "description": "Total Run budget. Timeout requests cancellation; it is not a retry signal and may become lost/outcome_unknown if terminal correlation is unavailable."
+                "default": webcodex_core::coding_agent::CODING_AGENT_RESPONSE_TIMEOUT_SECS,
+                "description": "Wait budget for this one delegated AI response (default 300s; use 900s for long responses; maximum 3600s), including bounded provider setup. Does not limit the parent WebCodex workflow. Timeout requests cancellation; it is not a retry signal and may become lost/outcome_unknown if terminal correlation is unavailable."
             }
         },
         "required": ["project", "provider_id", "idempotency_key", "instruction"],

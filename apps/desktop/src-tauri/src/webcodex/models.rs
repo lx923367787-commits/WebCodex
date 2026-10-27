@@ -140,6 +140,11 @@ pub struct RegularTunnelReadyEvent {
     pub event: String,
     pub schema_version: u64,
     pub provider: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::deserialize_native_host_id"
+    )]
+    pub host_id: Option<String>,
     pub ready_for_chatgpt: bool,
     pub connection: RegularTunnelConnection,
 }

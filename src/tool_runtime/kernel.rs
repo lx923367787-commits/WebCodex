@@ -314,6 +314,29 @@ impl ToolRuntime {
         invocation_metadata: ToolInvocationMetadata,
         capabilities: ToolProtocolCapabilities,
     ) -> ToolCallOutcome {
+        // The isolated model audience is handled before shared Session, Goal,
+        // trace or project projections can read any legacy private state.
+        if context.auth.is_none_or(|auth| {
+            auth.kind == crate::auth::AuthKind::ModelAgent
+                || auth.agent_run.is_some()
+                || auth.is_native_host()
+        }) {
+            let isolated = self
+                .isolated_model_call_async(
+                    &request.tool_name,
+                    request.arguments.clone(),
+                    context.auth,
+                )
+                .await;
+            return ToolCallOutcome {
+                success: isolated.success,
+                result: Some(isolated),
+                error_status: None,
+                project: None,
+                model_ergonomics: None,
+                correlation: Default::default(),
+            };
+        }
         let context_continuity_capable = capabilities.context_continuity
             && super::tool_definition::runtime_tool_accepts_context_ack(&request.tool_name);
         let context_ack = invocation_metadata.effective_context_ack(context_continuity_capable);
@@ -367,6 +390,18 @@ impl ToolRuntime {
         }
         let tool_name = request.tool_name.clone();
         let work = Box::pin(async {
+            if let Err(result) =
+                self.host_goal_takeover_access(&tool_name, &raw_arguments, context.auth)
+            {
+                return ToolCallOutcome {
+                    success: false,
+                    result: Some(result),
+                    error_status: None,
+                    project: None,
+                    model_ergonomics: None,
+                    correlation: Default::default(),
+                };
+            }
             let mut outcome = Box::pin(self.call_tool_with_context_inner(
                 request,
                 context,

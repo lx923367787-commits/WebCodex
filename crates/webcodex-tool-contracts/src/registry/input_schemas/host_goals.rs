@@ -176,6 +176,20 @@ pub fn goal_mode_start_input_schema() -> Value {
     )
 }
 
+pub fn goal_handoff_input_schema() -> Value {
+    object(
+        json!({
+            "goal_id":goal_id(),
+            "action":{"type":"string","enum":["status","begin_attempt","fail_attempt","abort","prepare","commit"],"description":"status observes actual ownership. The local trusted scheduler alone reserves/fails attempts. A fresh host-bound candidate uses prepare, reads its verified task package, then commits the exact returned package hash."},
+            "handoff_id":text(128), "attempt_id":text(128),
+            "checkpoint_sequence":{"type":"integer","minimum":1},
+            "package_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},
+            "reason":text(4096)
+        }),
+        &["goal_id", "action"],
+    )
+}
+
 pub fn goal_plan_save_input_schema() -> Value {
     let mut properties = revision_properties();
     properties["plan"] = host_plan_schema();

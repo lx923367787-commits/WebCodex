@@ -150,9 +150,101 @@ pub(super) fn enqueue_pending_request_locked(
     waiter: Option<oneshot::Sender<ShellRunResponse>>,
     job_id: Option<String>,
 ) -> Result<(), PendingRequestEnqueueError> {
+    enqueue_pending_request_impl(
+        telemetry,
+        inner,
+        client_id,
+        request_id,
+        request,
+        waiter,
+        job_id,
+        QueueAdmission::Generic,
+    )
+}
+
+/// Isolated requests can enter the same queue only through the checked Agent
+/// admission/control module. Generic APIs cannot manufacture this permit.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn enqueue_agent_execution_request_locked(
+    telemetry: &dyn crate::RunnerRegistryTelemetry,
+    inner: &mut RunnerRegistryInner,
+    client_id: &str,
+    request_id: String,
+    request: RunnerRequest,
+    waiter: Option<oneshot::Sender<ShellRunResponse>>,
+    job_id: Option<String>,
+    _permit: &crate::agent_execution::AgentExecutionEnqueuePermit,
+) -> Result<(), PendingRequestEnqueueError> {
+    enqueue_pending_request_impl(
+        telemetry,
+        inner,
+        client_id,
+        request_id,
+        request,
+        waiter,
+        job_id,
+        QueueAdmission::AgentExecution,
+    )
+}
+
+#[derive(PartialEq, Eq)]
+enum QueueAdmission {
+    Generic,
+    AgentExecution,
+    AgentCli,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn enqueue_agent_cli_request_locked(
+    telemetry: &dyn crate::RunnerRegistryTelemetry,
+    inner: &mut RunnerRegistryInner,
+    client_id: &str,
+    request_id: String,
+    request: RunnerRequest,
+    waiter: oneshot::Sender<ShellRunResponse>,
+    _permit: &crate::agent_cli::AgentCliEnqueuePermit,
+) -> Result<(), PendingRequestEnqueueError> {
+    enqueue_pending_request_impl(
+        telemetry,
+        inner,
+        client_id,
+        request_id,
+        request,
+        Some(waiter),
+        None,
+        QueueAdmission::AgentCli,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enqueue_pending_request_impl(
+    telemetry: &dyn crate::RunnerRegistryTelemetry,
+    inner: &mut RunnerRegistryInner,
+    client_id: &str,
+    request_id: String,
+    request: RunnerRequest,
+    waiter: Option<oneshot::Sender<ShellRunResponse>>,
+    job_id: Option<String>,
+    admission: QueueAdmission,
+) -> Result<(), PendingRequestEnqueueError> {
     let operation = request
         .decode_operation()
         .map_err(|message| PendingRequestEnqueueError::InvalidOperation { message })?;
+    let required = match &operation {
+        RunnerOperation::AgentExecutionClose(_)
+        | RunnerOperation::Job(
+            webcodex_core::runner_operation::RunnerJobOperation::StartIsolatedProcess(_),
+        ) => QueueAdmission::AgentExecution,
+        RunnerOperation::AgentCliCatalog(_) | RunnerOperation::AgentCliDelivery(_) => {
+            QueueAdmission::AgentCli
+        }
+        _ => QueueAdmission::Generic,
+    };
+    if required != admission {
+        return Err(PendingRequestEnqueueError::InvalidOperation {
+            message: "agent_execution_checked_admission_required".into(),
+        });
+    }
     ensure_dispatch_supported_locked(inner, client_id)?;
     ensure_queue_capacity_locked(inner, client_id)?;
     let runner = inner.runners.get(client_id);
@@ -179,6 +271,7 @@ pub(super) fn enqueue_pending_request_locked(
     inner.pending_by_id.insert(
         request_id,
         PendingShellRequest {
+            agent_cli: None,
             request,
             operation,
             waiter,
@@ -1062,6 +1155,7 @@ impl RunnerRegistry {
         let ssh_context = ssh_resource
             .zip(ssh_session_id)
             .map(|(resource, session_id)| ShellJobContext {
+                agent_execution: None,
                 document: None,
                 runtime_project_id: None,
                 workflow_session_id: Some(session_id),

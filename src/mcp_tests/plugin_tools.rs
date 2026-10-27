@@ -191,6 +191,7 @@ async fn register_plugin_runner_with_status(
         .runner_registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 client_id: client_id.to_string(),
                 runner_instance_id: runner_instance_id.to_string(),
                 runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -222,6 +223,7 @@ async fn register_non_plugin_runner_for_owner(
         .runner_registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 client_id: client_id.to_string(),
                 runner_instance_id: runner_instance_id.to_string(),
                 runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,

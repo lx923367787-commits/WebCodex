@@ -1,3 +1,4 @@
+mod agent_host;
 mod http_metadata;
 mod protocol;
 mod resources;
@@ -332,6 +333,13 @@ pub async fn mcp_info(req: &mut Request, depot: &mut Depot, res: &mut Response) 
 #[handler]
 pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let mut guard = ToolRequestLifecycle::new("mcp", new_trace_id(), "-", "POST /mcp", None);
+    let private_agent_request = depot
+        .obtain::<crate::auth::AuthContext>()
+        .ok()
+        .is_some_and(|a| a.agent_run.is_some() || a.is_oauth_token() || a.is_native_host());
+    if private_agent_request {
+        guard.suppress_private_payloads();
+    }
     guard.received();
 
     if let Err((status, _, message)) = crate::auth::require_json_same_origin(req) {
@@ -411,7 +419,8 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         None
     };
     guard.set_tool_name(tool_name.clone());
-    let computer_app_resource_uri = if request.method == "resources/read" {
+    let computer_app_resource_uri = if !private_agent_request && request.method == "resources/read"
+    {
         request
             .params
             .get("uri")
@@ -480,12 +489,22 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             return;
         }
     };
-    let window = match protocol_era {
-        McpProtocolEra::Legacy => {
-            crate::client_window::mcp_window(req, request.method == "initialize")
-        }
-        McpProtocolEra::Stateless2026 => {
-            crate::client_window::stateless_mcp_window(&request.params)
+    let window = if depot
+        .obtain::<AuthContext>()
+        .ok()
+        .is_some_and(|a| a.is_oauth_token() || a.is_native_host())
+    {
+        // The registered host bridge uses only its outer conversation metadata
+        // in both protocol eras. Transport sessions must not masquerade as it.
+        crate::client_window::stateless_mcp_window(&request.params)
+    } else {
+        match protocol_era {
+            McpProtocolEra::Legacy => {
+                crate::client_window::mcp_window(req, request.method == "initialize")
+            }
+            McpProtocolEra::Stateless2026 => {
+                crate::client_window::stateless_mcp_window(&request.params)
+            }
         }
     };
     guard.set_client_window(window.identity.as_ref());
@@ -494,23 +513,25 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let auth = depot.obtain::<crate::auth::AuthContext>().ok().cloned();
     let live_principal = crate::tool_runtime::runtime_observation_principal(auth.as_ref()).ok();
     let window_registry = runtime.window_activity_registry();
-    let mut live_window_request =
-        if request.id.is_some() && matches!(request.method.as_str(), "tools/call" | "tools/list") {
-            window.identity.as_ref().map(|identity| {
-                window_registry.start_observed(
-                    identity,
-                    &server_trace_id,
-                    &request.method,
-                    tool_name.as_deref(),
-                    live_principal
-                        .as_ref()
-                        .map(|(kind, id)| (kind.as_str(), id.as_str())),
-                    guard.request_observed_at_ms(),
-                )
-            })
-        } else {
-            None
-        };
+    let mut live_window_request = if !private_agent_request
+        && request.id.is_some()
+        && matches!(request.method.as_str(), "tools/call" | "tools/list")
+    {
+        window.identity.as_ref().map(|identity| {
+            window_registry.start_observed(
+                identity,
+                &server_trace_id,
+                &request.method,
+                tool_name.as_deref(),
+                live_principal
+                    .as_ref()
+                    .map(|(kind, id)| (kind.as_str(), id.as_str())),
+                guard.request_observed_at_ms(),
+            )
+        })
+    } else {
+        None
+    };
 
     // Chat-window MCP tool calls must land in the action audit exactly like
     // the REST surface (they were previously invisible there). Summary-level
@@ -906,7 +927,10 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             let estimated = estimate_json_bytes(&body);
             guard.response_serialized(403, estimated, Some(false), None, "forbidden");
             res.status_code(StatusCode::FORBIDDEN);
-            if auth.as_ref().is_some_and(AuthContext::is_oauth_token) {
+            if auth
+                .as_ref()
+                .is_some_and(|a| a.is_oauth_token() || a.is_native_host())
+            {
                 let challenge = crate::auth::oauth_insufficient_scope_challenge(required_scope);
                 if let Ok(val) = salvo::http::HeaderValue::from_str(&challenge) {
                     res.headers_mut().insert("www-authenticate", val);
@@ -992,6 +1016,19 @@ async fn handle_mcp_request_with_lifecycle(
     compact_schemas: bool,
     mut correlation_out: Option<&mut crate::tool_runtime::ToolCallCorrelation>,
 ) -> McpOutcome {
+    if auth.is_some_and(|auth| auth.agent_run.is_some())
+        && !matches!(
+            request.method.as_str(),
+            "server/discover"
+                | "initialize"
+                | "ping"
+                | "notifications/initialized"
+                | "tools/list"
+                | "tools/call"
+        )
+    {
+        return McpOutcome::Ok(rpc_error(request.id, -32601, "agent_method_not_isolated"));
+    }
     let stateless_2026 = protocol_era == McpProtocolEra::Stateless2026;
     let runtime_exposure = runtime.runtime_exposure();
     let resource_read_bypasses_runtime_read =
@@ -1059,6 +1096,10 @@ async fn handle_mcp_request_with_lifecycle(
         return McpOutcome::BadRequest(rpc_error(request.id, -32600, "jsonrpc must be '2.0'"));
     }
 
+    if let Some(auth) = auth.filter(|auth| auth.is_oauth_token() || auth.is_native_host()) {
+        return agent_host::handle(runtime, request, auth, protocol_era).await;
+    }
+
     if let Err(error) = validate_runtime_exposure_state(runtime_exposure, connector.is_some()) {
         return McpOutcome::BadRequest(rpc_error(request.id, -32603, error));
     }
@@ -1071,6 +1112,9 @@ async fn handle_mcp_request_with_lifecycle(
         // session lifecycle used by 2025-06-18 and ChatGPT 2025-11-25 clients.
         "server/discover" if stateless_2026 => {
             let capabilities = match runtime_exposure {
+                _ if auth.is_some_and(|auth| auth.agent_run.is_some()) => {
+                    json!({"tools":{"listChanged":false}})
+                }
                 RuntimeExposure::ProjectConnector => tasks::server_capabilities(),
                 RuntimeExposure::Runtime(model_surface)
                     if resources::model_surface_supports_computer_app(model_surface) =>

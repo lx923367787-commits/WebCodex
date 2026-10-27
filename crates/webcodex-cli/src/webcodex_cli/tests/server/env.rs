@@ -314,6 +314,36 @@ async fn token_create_local_does_not_send_plaintext_token_to_server() {
     handle.join().unwrap();
 }
 
+#[test]
+fn new_user_token_defaults_cover_team_operations_without_administration() {
+    let args = ["--server-url", "http://127.0.0.1:1", "--username", "alice"].map(str::to_string);
+    let defaults = parse_token_create_local(&args).unwrap();
+    assert_eq!(
+        defaults.scopes,
+        [
+            "runtime:read",
+            "session:collaborate",
+            "project:read",
+            "project:write",
+            "job:run",
+            "communication:read",
+            "communication:manage",
+            "plugin:inspect",
+            "plugin:invoke"
+        ]
+    );
+    let mut narrow = args.to_vec();
+    narrow.extend(["--scope".into(), "project:read".into()]);
+    assert_eq!(
+        parse_token_create_local(&narrow).unwrap().scopes,
+        ["project:read"]
+    );
+    assert!(!defaults
+        .scopes
+        .iter()
+        .any(|scope| scope == "admin" || scope == "plugin:manage"));
+}
+
 #[tokio::test]
 async fn runner_token_create_local_does_not_send_plaintext_token_to_server() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

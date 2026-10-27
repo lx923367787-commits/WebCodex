@@ -173,7 +173,23 @@ async fn call_host_goal_over_mcp(
     mut arguments: Value,
     epoch: &str,
 ) -> Value {
-    arguments["context_epoch"] = json!(epoch);
+    arguments
+        .as_object_mut()
+        .unwrap()
+        .entry("context_epoch")
+        .or_insert_with(|| json!(epoch));
+    // Exercise both admitted identity modes: the direct surface receives real
+    // MCP host metadata, while the gateway fixture retains weaker explicit keys.
+    let host_metadata = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "goal_mode_start")
+        && !(name == "goal_handoff"
+            && matches!(
+                arguments["action"].as_str(),
+                Some("begin_attempt" | "fail_attempt" | "abort")
+            ));
     let direct = tools
         .as_array()
         .unwrap()
@@ -205,21 +221,30 @@ async fn call_host_goal_over_mcp(
         .unwrap()
         .config
         .path;
+    let mut params = mcp_2026_params(json!({"name":public_name,"arguments":arguments}));
+    if host_metadata {
+        params["_meta"]["openai/session"] = json!(epoch);
+    }
+    // The convenience handle_mcp_request test wrapper deliberately supplies no
+    // window. Use the same metadata parser and dispatcher as production mcp_post.
+    let window = crate::client_window::stateless_mcp_window(&params);
     let outcome = crate::test_support::runner_project_files::during(
         runtime,
         "goal-mcp-runner",
         "instance",
         std::path::Path::new(&root),
-        Box::pin(handle_mcp_request(
+        Box::pin(handle_mcp_request_with_lifecycle(
             runtime,
-            rpc(
-                "tools/call",
-                Some(json!(name)),
-                mcp_2026_params(json!({
-                    "name":public_name,"arguments":arguments
-                })),
-            ),
+            None,
+            rpc("tools/call", Some(json!(name)), params),
             Some(auth),
+            McpProtocolEra::Stateless2026,
+            HostFileImportTrust::Untrusted,
+            window.identity.as_ref(),
+            None,
+            None,
+            crate::config::mcp_compact_schemas_enabled(),
+            None,
         )),
     )
     .await;
@@ -284,6 +309,7 @@ async fn host_goal_mcp_workflow(surface: ModelSurface) {
         .runner_registry
         .register_with_auth(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 client_id: "goal-mcp-runner".into(),
                 runner_instance_id: "instance".into(),
                 runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -367,6 +393,14 @@ async fn host_goal_mcp_workflow(surface: ModelSurface) {
     )
     .await;
     assert_eq!(started["success"], true, "{started}");
+    assert_eq!(
+        started["output"]["context_meter"]["identity_source"],
+        if surface == ModelSurface::LocalCoding {
+            "window_bound"
+        } else {
+            "explicit_context_only"
+        }
+    );
     let id = started["output"]["goal"]["goal_id"]
         .as_str()
         .unwrap()
@@ -487,24 +521,123 @@ async fn host_goal_mcp_workflow(surface: ModelSurface) {
         "goal_context":checkpoint_context,
         "patch":{"action":"handoff","reason":"Change conversation","state":{"next_step":"Read source two","facts":{"detail_two":null}}}
     }),"chat-two").await;
-    assert_eq!(handoff["success"], true, "{handoff}");
+    let transferred_progress = if surface == ModelSurface::LocalCoding {
+        assert_eq!(handoff["success"], true, "{handoff}");
+        let status = call_host_goal_over_mcp(
+            &runtime,
+            &auth,
+            tools,
+            "goal_handoff",
+            json!({"goal_id":id,"action":"status"}),
+            "chat-two",
+        )
+        .await;
+        assert_eq!(status["success"], true, "{status}");
+        assert_eq!(status["output"]["handoff"]["status"], "waiting");
+        assert_eq!(status["output"]["execution_granted"], false);
+        let mut scheduler = auth.clone();
+        scheduler.scopes.push(crate::auth::SCOPE_ADMIN.into());
+        let reserved=call_host_goal_over_mcp(&runtime,&scheduler,tools,"goal_handoff",
+            json!({"goal_id":id,"action":"begin_attempt","handoff_id":status["output"]["handoff"]["handoff_id"]}),
+            "local-scheduler").await;
+        assert_eq!(reserved["success"], true, "{reserved}");
+        let h = &reserved["output"]["handoff"];
+        assert_eq!(h["status"], "awaiting_ready");
+        let prepared = call_host_goal_over_mcp(
+            &runtime,
+            &auth,
+            tools,
+            "goal_handoff",
+            json!({"goal_id":id,"action":"prepare","handoff_id":h["handoff_id"],
+                "attempt_id":h["attempt_id"],"checkpoint_sequence":h["checkpoint_sequence"]}),
+            "chat-three",
+        )
+        .await;
+        assert_eq!(prepared["success"], true, "{prepared}");
+        assert_eq!(prepared["output"]["execution_granted"], false);
+        assert_eq!(prepared["output"]["package"]["goal_id"], id);
+        let committed = call_host_goal_over_mcp(
+            &runtime,
+            &auth,
+            tools,
+            "goal_handoff",
+            json!({"goal_id":id,"action":"commit","handoff_id":h["handoff_id"],
+                "attempt_id":h["attempt_id"],"checkpoint_sequence":h["checkpoint_sequence"],
+                "package_sha256":prepared["output"]["package_sha256"]}),
+            "chat-three",
+        )
+        .await;
+        assert_eq!(committed["success"], true, "{committed}");
+        assert_eq!(committed["output"]["execution_granted"], true);
+        assert_eq!(committed["output"]["handoff"]["status"], "committed");
+        let retired = call_host_goal_over_mcp(
+            &runtime,
+            &auth,
+            tools,
+            "goal_bootstrap",
+            json!({"goal_id":id,"activate":true,"context_epoch":"forged-new-epoch"}),
+            "chat-two",
+        )
+        .await;
+        assert_eq!(retired["success"], false, "{retired}");
+        assert_eq!(
+            retired["output"]["error_kind"],
+            "goal_handoff_context_revoked"
+        );
+        Some(prepared["output"]["package"]["progress"].clone())
+    } else {
+        assert_eq!(handoff["success"], false, "{handoff}");
+        assert_eq!(
+            handoff["output"]["error_kind"],
+            "goal_handoff_identity_required"
+        );
+        // Explicit epochs can save ordinary progress, but cannot authorize a transfer.
+        let saved_progress=call_host_goal_over_mcp(&runtime,&auth,tools,"goal_checkpoint",json!({
+            "goal_id":id,"expected_revision":checkpoint["output"]["goal"]["revision"],"idempotency_key":"save-before-reopen",
+            "goal_context":checkpoint_context,
+            "patch":{"reason":"Save progress before reopening durable state","state":{"next_step":"Read source two","facts":{"detail_two":null}}}
+        }),"chat-two").await;
+        assert_eq!(saved_progress["success"], true, "{saved_progress}");
+        None
+    };
     let registry = runtime.runner_registry.clone();
     drop(runtime);
     let restored = ToolRuntime::new_for_tests_with_runner_registry(registry)
         .with_runtime_exposure(RuntimeExposure::Runtime(surface))
         .with_communication_database(Arc::new(crate::Database::open(&database_path).unwrap()));
+    if surface == ModelSurface::LocalCoding {
+        let durable = call_host_goal_over_mcp(
+            &restored,
+            &auth,
+            tools,
+            "goal_handoff",
+            json!({"goal_id":id,"action":"status"}),
+            "chat-three",
+        )
+        .await;
+        assert_eq!(durable["success"], true, "{durable}");
+        assert_eq!(durable["output"]["execution_granted"], true);
+        assert_eq!(durable["output"]["handoff"]["attempt_count"], 1);
+    }
     let recovery = call_host_goal_over_mcp(
         &restored,
         &auth,
         tools,
         "goal_bootstrap",
-        json!({}),
+        json!({"goal_id":id}),
         "chat-three",
     )
     .await;
     assert_eq!(recovery["success"], true, "{recovery}");
     assert_eq!(recovery["output"]["goal"]["goal_id"], id);
-    assert_eq!(recovery["output"]["goal"]["phase"], "executing");
+    assert_eq!(
+        recovery["output"]["goal"]["phase"],
+        if surface == ModelSurface::LocalCoding {
+            "ready"
+        } else {
+            "executing"
+        }
+    );
     assert_eq!(recovery["output"]["confirmation_required"], false);
     assert_eq!(
         recovery["output"]["goal"]["confirmation"],
@@ -527,7 +660,11 @@ async fn host_goal_mcp_workflow(surface: ModelSurface) {
     let mut state_text = String::new();
     let mut cursor = None;
     let mut pages = 0;
-    for _ in 0..128 {
+    for _ in 0..if transferred_progress.is_some() {
+        0
+    } else {
+        128
+    } {
         let mut arguments = json!({"goal_id":id,"view":"detail","section":"state"});
         if let Some(cursor) = cursor {
             arguments["cursor"] = json!(cursor);
@@ -555,11 +692,14 @@ async fn host_goal_mcp_workflow(surface: ModelSurface) {
         cursor.is_none(),
         "State detail must reach a terminal cursor within its bounded size"
     );
-    assert!(
-        pages > 1,
-        "The persisted state must be recovered through multiple bounded UTF-8 pages"
-    );
-    let restored_state: Value = serde_json::from_str(&state_text).unwrap();
+    if transferred_progress.is_none() {
+        assert!(
+            pages > 1,
+            "The ordinary recovery path preserves multiple bounded UTF-8 state pages"
+        );
+    }
+    let restored_state: Value =
+        transferred_progress.unwrap_or_else(|| serde_json::from_str(&state_text).unwrap());
     assert_eq!(restored_state["next_step"], "Read source two");
     assert_eq!(
         restored_state["facts"]["source_one"], "inspected",

@@ -75,6 +75,7 @@ async fn register_process_job_agent(
         structured_process_argv: true,
         structured_script_payload: true,
         structured_execution_jobs: true,
+        agent_isolated_execution_v1: false,
         ..Default::default()
     };
     register_agent_with_projects(
@@ -101,6 +102,7 @@ async fn register_detached_process_job_agent(
         structured_validation_argv: true,
         structured_process_argv: true,
         structured_execution_jobs: true,
+        agent_isolated_execution_v1: false,
         detached_process_jobs,
         ..Default::default()
     };
@@ -379,6 +381,7 @@ async fn detached_process_requires_job_run_and_detach_scopes_before_any_admissio
         structured_validation_argv: true,
         structured_process_argv: true,
         structured_execution_jobs: true,
+        agent_isolated_execution_v1: false,
         detached_process_jobs: true,
         ..Default::default()
     };
@@ -674,6 +677,7 @@ async fn detached_process_lost_initiation_after_server_restart_recovers_same_job
         structured_validation_argv: true,
         structured_process_argv: true,
         structured_execution_jobs: true,
+        agent_isolated_execution_v1: false,
         detached_process_jobs: true,
         job_state_reconciliation: true,
         coding_agent_runs: false,
@@ -682,6 +686,7 @@ async fn detached_process_lost_initiation_after_server_restart_recovers_same_job
     restarted
         .runner_registry
         .register(crate::runner_protocol::RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -2052,4 +2057,65 @@ async fn model_facing_session_denials_keep_run_process_prestart_lifecycle() {
             .is_none(),
         "model-facing Session denials must happen before Runner enqueue"
     );
+}
+
+#[tokio::test]
+async fn team_cli_fast_failure_retains_public_job_for_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = test_runtime().with_structured_execution_sync_wait(Duration::from_millis(250));
+    let project = register_process_job_agent(&runtime, "team-retained-job", temp.path()).await;
+    let auth = auth_context(None, true);
+    let runner = runtime.clone();
+    let worker = tokio::spawn(async move {
+        runner
+            .run_team_cli_process(
+                project,
+                "argv-helper".into(),
+                vec![],
+                Some("task".into()),
+                30,
+                Some(&auth),
+            )
+            .await
+    });
+    let request =
+        wait_for_runner_request_for_instance(&runtime, "team-retained-job", "inst")
+            .await;
+    assert_eq!(request.kind, "start_process_job");
+    update_process_job(
+        &runtime,
+        "team-retained-job",
+        &request,
+        "running",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    update_process_job(
+        &runtime,
+        "team-retained-job",
+        &request,
+        "failed",
+        Some(ShellCommandExecutionState::Completed),
+        Some(19),
+        Some("failed\n"),
+        None,
+        None,
+    )
+    .await;
+    let result = worker.await.unwrap();
+    assert!(!result.success);
+    let id = result.output["job_id"]
+        .as_str()
+        .expect("team failure retains its exact Job");
+    assert_eq!(result.output["promoted_to_job"], true);
+    assert!(runtime
+        .runner_registry
+        .list_jobs(Some(10))
+        .await
+        .iter()
+        .any(|job| job.job_id == id));
 }

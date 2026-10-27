@@ -1,5 +1,7 @@
 # 本地轻量绘图工作流
 
+> 发布说明：本文的实例标识和本机用户目录已脱敏；验收日期、结论与构建指纹保留。
+
 在现有 WebCodex 中生成流程图、架构图和数据图表。GPT 使用 `run_process` 调用本机 Python 绘图入口，再用 `read_project_artifact(as_image=true)` 看到实际图片。本次不增加 MCP 工具，不修改 Rust，也不制作或修改 PPT。
 
 | 类型 | 适用内容 | 模板 |
@@ -15,7 +17,7 @@
 
 ## 先确定工作目录
 
-使用 `list_projects` 返回的真实项目 ID。当前本机 `E:\wbecodex` 对应 `agent:lixian-8e32bbbb5c704b42:wbecodex`；重装或换 Runner 后，应重新查询，不能沿用旧 ID。
+使用 `list_projects` 返回的真实项目 ID。当前本机 `E:\wbecodex` 对应 `agent:<runner-id>:<project-id>`；重装或换 Runner 后，应重新查询，不能沿用旧 ID。
 
 模型端可通过已有通用入口查询：
 
@@ -40,7 +42,7 @@ E:\wbecodex\anzhuang\WebCodex Desktop\mycodex-tools\draw.py
 
 ```json
 {
-  "project": "agent:lixian-8e32bbbb5c704b42:wbecodex",
+  "project": "agent:<runner-id>:<project-id>",
   "executable": "E:\\wbecodex\\anzhuang\\WebCodex Desktop\\mycodex-tools\\python\\python.exe",
   "args": [
     "-B",
@@ -63,7 +65,7 @@ E:\wbecodex\anzhuang\WebCodex Desktop\mycodex-tools\draw.py
 {
   "tool": "read_project_artifact",
   "arguments": {
-    "project": "agent:lixian-8e32bbbb5c704b42:wbecodex",
+    "project": "agent:<runner-id>:<project-id>",
     "path": "<本次preview.path对应的项目相对路径>",
     "as_image": true
   }

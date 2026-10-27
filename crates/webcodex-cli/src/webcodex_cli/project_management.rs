@@ -194,7 +194,37 @@ pub(crate) async fn run(opts: Options) -> Result<String, String> {
         {
             return Err("project_connection_changed: Inventory belongs to another Runner".into());
         }
-        Ok(json!({"client_id":opts.client_id,"projects":projects}).to_string())
+        // Preserve Server completeness evidence without inferring it from the
+        // returned page. Missing legacy metadata stays unknown, not 0/false.
+        let matched_count: Option<u64> = match body["output"].get("matched_count") {
+            None => None,
+            Some(value) => Some(value.as_u64().ok_or(
+                "project_operation_indeterminate: Invalid inventory matched_count metadata",
+            )?),
+        };
+        let truncated: Option<bool> =
+            match body["output"].get("truncated") {
+                None => None,
+                Some(value) => Some(value.as_bool().ok_or(
+                    "project_operation_indeterminate: Invalid inventory truncated metadata",
+                )?),
+            };
+        let operator_user_id = match body["output"].get("operator_user_id") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .filter(|id| {
+                        !id.trim().is_empty()
+                            && id.len() <= 256
+                            && !id.chars().any(char::is_control)
+                    })
+                    .ok_or(
+                    "project_operation_indeterminate: Invalid inventory operator_user_id metadata",
+                    )?,
+            ),
+        };
+        Ok(json!({"client_id":opts.client_id,"projects":projects,"matched_count":matched_count,"truncated":truncated,"operator_user_id":operator_user_id}).to_string())
     } else {
         if body["project"].as_str() != opts.project.as_deref() || body["operation"] != opts.action {
             return Err("project_operation_indeterminate: Mutation receipt does not match the requested project".into());

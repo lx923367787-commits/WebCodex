@@ -82,6 +82,16 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
     ToolDiscoveryGroup {
         name: TOOL_DISCOVERY_GROUP_AGENT_TASK,
         tools: &[
+            "team_policy_get",
+            "team_policy_save",
+            "team_plan_register",
+            "team_plan_list",
+            "team_plan_read",
+            "team_plan_cancel",
+            "team_cli_start",
+            "team_cli_observe",
+            "team_agent_start",
+            "team_agent_observe",
             "create_agent_task",
             "list_agent_tasks",
             "read_agent_task",
@@ -270,6 +280,13 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
     ToolDiscoveryGroup {
         name: TOOL_DISCOVERY_GROUP_CODING_AGENT,
         tools: &[
+            "run_process",
+            "run_detached_process",
+            "run_shell",
+            "observe_jobs",
+            "job_status",
+            "job_log",
+            "stop_job",
             "coding_agent_start",
             "coding_agent_observe",
             "coding_agent_cancel",
@@ -282,6 +299,7 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
             "goal_plan_save",
             "goal_confirm_plan",
             "goal_bootstrap",
+            "goal_handoff",
             "goal_claim_node",
             "goal_checkpoint",
             "goal_check_node",
@@ -309,6 +327,12 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
 ];
 
 pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
+    ToolRecommendedFlow {
+        name: "agent_cli",
+        summary: "Agent CLI: invoke an installed CLI directly with run_process and structured argv. No ACP or Provider registration is required. Follow a returned job_id with observe_jobs; use run_detached_process only when work must survive Runner restart.",
+        manifest_purpose: "Default Agent execution is an installed CLI through run_process; use run_shell only for shell semantics such as explicit per-call proxy environment. Preserve the original goal, files, output and test evidence. Observe/stop the exact Job and confirm termination before replacement; never blindly replay uncertain work. Process exit alone is not task acceptance. ACP coding_agent_start is optional for explicitly selected configured ACP providers.",
+        tools: &["run_process", "run_detached_process", "run_shell", "observe_jobs", "job_status", "job_log", "stop_job", "coding_agent_start"],
+    },
     ToolRecommendedFlow {
         name: "discovery",
         summary: "Discovery: if the user gives an exact Runner client_id, use runtime_status/list_projects for that Runner before treating it as absent. Otherwise use bounded runtime/project discovery, then batch-capable structured search/read.",
@@ -496,6 +520,16 @@ pub const LOCAL_CODING_TOOL_NAMES: &[&str] = &[
     "get_session_assignment",
     "complete_session_message",
     // delegated ACP coding-agent Runs (explicit coding_agent:run authority)
+    "team_policy_get",
+    "team_policy_save",
+    "team_plan_register",
+    "team_plan_list",
+    "team_plan_read",
+    "team_plan_cancel",
+    "team_cli_start",
+    "team_cli_observe",
+    "team_agent_start",
+    "team_agent_observe",
     "coding_agent_start",
     "coding_agent_observe",
     "coding_agent_cancel",
@@ -509,6 +543,7 @@ pub const LOCAL_CODING_TOOL_NAMES: &[&str] = &[
     "goal_plan_save",
     "goal_confirm_plan",
     "goal_bootstrap",
+    "goal_handoff",
     "goal_claim_node",
     "goal_checkpoint",
     "goal_check_node",

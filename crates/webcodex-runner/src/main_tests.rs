@@ -69,6 +69,7 @@ fn unrestricted_test_policy() -> RunnerPolicy {
 
 fn test_config(project_registry_dir: PathBuf) -> RunnerConfig {
     RunnerConfig {
+        agent_execution_resources: Default::default(),
         server_url: "http://127.0.0.1:8000".to_string(),
         token: "test-token".to_string(),
         client_id: "oe".to_string(),

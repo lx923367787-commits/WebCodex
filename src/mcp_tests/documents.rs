@@ -114,6 +114,7 @@ async fn document_present_job_resume_delivers_native_images_direct_and_gateway()
             .runner_registry
             .register(crate::test_support::current_runner_registration(
                 RunnerRegisterRequest {
+                    agent_execution_resources: Vec::new(),
                     client_id: "document-runner".into(),
                     runner_instance_id: "document-instance".into(),
                     runner_protocol_generation:
@@ -133,6 +134,7 @@ async fn document_present_job_resume_delivers_native_images_direct_and_gateway()
                         structured_validation_argv: true,
                         structured_script_payload: true,
                         structured_execution_jobs: true,
+                        agent_isolated_execution_v1: false,
                         ..Default::default()
                     },
                     policy: None,

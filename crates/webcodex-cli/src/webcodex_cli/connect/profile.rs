@@ -1036,3 +1036,33 @@ mod tests {
         assert!(!atomic_write(&config, second.as_bytes(), true).unwrap());
     }
 }
+
+pub(super) fn validate_redirect_uri(uri: &str) -> Result<String, String> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return Err("OAuth redirect URI cannot be empty".to_string());
+    }
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|_| "OAuth redirect URI is not a valid URL".to_string())?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("OAuth redirect URI must not contain userinfo".to_string());
+    }
+    if parsed.fragment().is_some() {
+        return Err("OAuth redirect URI must not contain a fragment".to_string());
+    }
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return Err("OAuth redirect URI must use http or https".to_string());
+    }
+    let host = parsed.host_str().unwrap_or("");
+    if host.is_empty() {
+        return Err("OAuth redirect URI must have a host".to_string());
+    }
+    if scheme == "http" && !matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
+        return Err(
+            "http OAuth redirect URI is only allowed for loopback; use https for other hosts"
+                .to_string(),
+        );
+    }
+    Ok(trimmed.to_string())
+}

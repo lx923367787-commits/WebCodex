@@ -23,7 +23,6 @@ use webcodex_core::runner_protocol;
 use webcodex_core::runner_protocol::{
     ShellCommandExecutionState, ShellJobActivity, ShellJobSnapshot, ShellJobValidationProgress,
 };
-use webcodex_process::ManagedChild;
 
 #[derive(Debug)]
 pub(crate) struct JobManagerOwnerLifetime {
@@ -137,6 +136,7 @@ pub(crate) struct JobManager {
     pub(crate) prepared_profiles: PreparedShellProfileCache,
     pub(crate) ssh_pool: SshConnectionPool,
     pub(crate) lifecycle: Arc<Mutex<()>>,
+    pub(crate) agent_execution: Arc<Mutex<agent_execution::AgentExecutionRuntime>>,
     pub(crate) shutting_down: Arc<AtomicBool>,
     pub(crate) workers: ActivityTracker,
     pub(crate) current_sink: Arc<Mutex<Option<RunnerSink>>>,
@@ -178,6 +178,9 @@ impl JobManager {
             prepared_profiles: PreparedShellProfileCache::default(),
             ssh_pool: SshConnectionPool::default(),
             lifecycle: Arc::new(Mutex::new(())),
+            agent_execution: Arc::new(
+                Mutex::new(agent_execution::AgentExecutionRuntime::default()),
+            ),
             shutting_down,
             workers: ActivityTracker::default(),
             current_sink,
@@ -217,8 +220,9 @@ pub(crate) struct RunningJob {
     pub(crate) snapshot: ShellJobSnapshot,
     /// The single owner of the job's process tree. Clones are shared with the
     /// job's worker thread so it can poll the direct child and terminate the
-    /// whole tree, but there is never more than one live `ManagedChild`.
-    pub(crate) child: Option<Arc<Mutex<ManagedChild>>>,
+    /// whole tree. An isolated Job uses the same slot with one LPAC child;
+    /// its close evidence custody also retains that exact shared handle.
+    pub(crate) child: Option<Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>>,
     pub(crate) stop_requested: Arc<AtomicBool>,
     pub(crate) slot_reserved: bool,
 }
@@ -238,6 +242,7 @@ pub(crate) fn test_job_snapshot(job_id: &str) -> ShellJobSnapshot {
         error: None,
         command_execution_state: None,
         context: runner_protocol::ShellJobContext {
+            agent_execution: None,
             document: None,
             runtime_project_id: None,
             workflow_session_id: None,
@@ -264,6 +269,7 @@ pub(crate) fn test_job_context(
     validation_steps: Vec<String>,
 ) -> runner_protocol::ShellJobContext {
     runner_protocol::ShellJobContext {
+        agent_execution: None,
         document: None,
         runtime_project_id: None,
         workflow_session_id: None,
@@ -300,6 +306,10 @@ pub(crate) struct RunnerJobDelta {
     pub(crate) finished: bool,
 }
 
+pub(crate) mod agent_execution;
+pub(crate) mod agent_proxy;
+pub(crate) mod agent_resources;
+pub(crate) mod child;
 pub(crate) mod context;
 pub(crate) mod detached;
 pub(crate) mod execution;

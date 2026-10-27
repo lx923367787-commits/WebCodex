@@ -122,14 +122,32 @@ async fn host_goals_sync_process_and_script_preserve_receipts_before_sparse_proj
     }
 
     let current = fixture.db.get_host_goal(&owner, &goal_id).unwrap().unwrap();
-    let handoff = fixture
-        .call_in_chat(ToolCall::GoalCheckpoint {
-            goal_id,
-            expected_revision: current.revision,
-            idempotency_key: "after-sync-handoff".into(),
-            patch: json!({"action":"handoff","reason":"Both synchronous operations have canonical completion receipts"}),
-            context_epoch: Some("chat-original".into()),
-        }, "chat-original", Some(&claimed.output["binding"]))
-        .await;
+    let window =
+        crate::client_window::ClientWindow::from_opaque("openai-session", "sync-handoff-host")
+            .unwrap();
+    let read = kernel_call(
+        &fixture,
+        &window,
+        "goal_read",
+        json!({"goal_id":goal_id,"view":"node","node_id":"research"}),
+    )
+    .await;
+    success(&read);
+    let strong = kernel_call(
+        &fixture,
+        &window,
+        "goal_claim_node",
+        json!({"goal_id":goal_id,"node_id":"research","expected_revision":current.revision,
+            "plan_version":current.plan_version,"idempotency_key":"strong-sync-owner",
+            "takeover_attempt_id":claimed.output["binding"]["attempt_id"]}),
+    )
+    .await;
+    success(&strong);
+    let mut binding = strong.output["binding"].clone();
+    binding["operation_id"] = json!("after-sync-handoff");
+    let handoff = kernel_call(&fixture, &window, "goal_checkpoint",
+        json!({"goal_id":goal_id,"expected_revision":revision(&strong.output["goal"]),
+            "idempotency_key":"after-sync-handoff","goal_context":binding,
+            "patch":{"action":"handoff","reason":"Both synchronous operations have canonical completion receipts"}})).await;
     success(&handoff);
 }

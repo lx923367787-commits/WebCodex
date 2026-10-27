@@ -28,6 +28,9 @@ pub const CODING_AGENT_MAX_EVENTS_PER_RESPONSE: usize = 64;
 pub const CODING_AGENT_MAX_RETAINED_EVENTS: usize = 256;
 pub const CODING_AGENT_MAX_INVENTORY_RUNS: usize = 128;
 pub const CODING_AGENT_TIMEOUT_MIN_SECS: u64 = 1;
+/// One delegated AI response, not the lifetime of its parent workflow.
+pub const CODING_AGENT_RESPONSE_TIMEOUT_SECS: u64 = 300;
+pub const CODING_AGENT_LONG_RESPONSE_TIMEOUT_SECS: u64 = 900;
 pub const CODING_AGENT_TIMEOUT_MAX_SECS: u64 = 3600;
 pub const CODING_AGENT_OBSERVE_WAIT_MAX_SECS: u64 = 60;
 

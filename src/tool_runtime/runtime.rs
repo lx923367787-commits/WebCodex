@@ -115,9 +115,18 @@ pub struct ToolRuntime {
     pub(crate) memory: super::services::MemoryService,
     pub(crate) communication: super::services::CommunicationService,
     pub(crate) validation: super::services::ValidationService,
+    pub(crate) agent_team_assets: Option<Arc<dyn crate::agent_team_execution::AgentTeamAssets>>,
 }
 
 impl ToolRuntime {
+    pub(crate) fn agent_team_watchers(
+        &self,
+    ) -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+        self.execution_state.team_cli_watchers.clone()
+    }
+    pub(crate) fn isolation_database(&self) -> Option<&crate::Database> {
+        self.goals.store()
+    }
     pub fn new(runner_registry: Arc<RunnerRegistry>, runtime_info: Arc<RuntimeInfo>) -> Self {
         Self {
             runner_registry,
@@ -131,6 +140,7 @@ impl ToolRuntime {
             memory: super::services::MemoryService::default(),
             communication: super::services::CommunicationService::default(),
             validation: super::services::ValidationService::default(),
+            agent_team_assets: None,
         }
     }
 
@@ -183,6 +193,12 @@ impl ToolRuntime {
     }
 
     pub(crate) fn with_communication_database(mut self, db: Arc<crate::Database>) -> Self {
+        self.agent_team_assets = Some(Arc::new(
+            crate::agent_team_catalog::RunnerAgentTeamAssets::new(
+                self.runner_registry.clone(),
+                db.clone(),
+            ),
+        ));
         self.goals.attach_database(db.clone());
         self.communication.attach_database(db);
         self

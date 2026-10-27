@@ -1,5 +1,7 @@
 # WebCodex Desktop 使用指南
 
+**外部工具与账号：** 模型 CLI 由用户在每台 Runner 电脑自行安装、登录或配置自己的 key，再配置并验证 Runner。WebCodex 交付对接代码和通用运行依赖，不交付另一用户配置好的工具环境。见[工具、账号与迁移规则](EXTERNAL_TOOLS.md#简体中文)。
+
 [English](desktop-guide.md) | [简体中文](desktop-guide.zh-CN.md)
 
 Desktop 负责准备本机项目和管理连接；你在 ChatGPT 等 AI 客户端中发起工作。首次安装、Tunnel 配置和系统权限请看[安装与连接指南](desktop-install.zh-CN.md)。
@@ -16,6 +18,8 @@ Desktop 负责准备本机项目和管理连接；你在 ChatGPT 等 AI 客户�
 **本地隧道就绪不等于 ChatGPT 已连接。** 首页会保留等待验证的状态；只有观察到当前项目的真实调用，才显示使用已验证。
 
 如果已有远程 Server，欢迎页选择 **连接现有 Server**，填写地址和配对码，再选择本机项目。Desktop 连接页会显示远程 Server 信息，外部连接由 Server 管理者负责。
+
+项目团队策略、普通子 Agent 和 CLI 托管任务使用当前用户的 PAT。新配对签发及 `tokens create-local` 的默认用户权限包含 `communication:read`、`communication:manage`、`plugin:inspect` 和 `plugin:invoke`；这不会改变已有 PAT 的权限。旧连接若收到权限不足，请由用户明确重新登录或配对刷新凭据。桌面端不会自动扩大旧令牌权限，也不会改用管理员凭据执行团队任务。
 
 如果只想临时使用一个项目，选择 **快速共享项目**，再选择连接提供方。Quick Share 是独立的临时使用方式；首页提供连接交接信息和停止入口。
 

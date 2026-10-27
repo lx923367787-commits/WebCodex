@@ -383,6 +383,12 @@ async fn handle_quic_connection(
     crate::runner_session::run_runner_session(
         crate::runner_session::SessionContext {
             registry: &registry,
+            close_receipt_db: crate::runner_http::require_runner_transport_scope(
+                Some(&auth),
+                crate::auth::SCOPE_AGENT_RESULT,
+            )
+            .ok()
+            .and(db.as_deref()),
             client_id: &client_id,
             runner_instance_id: &runner_instance_id,
             connection_id: &connection_id,
@@ -592,6 +598,7 @@ mod tests {
             structured_script_payload: false,
             internal_posix_script: false,
             structured_execution_jobs: false,
+            agent_isolated_execution_v1: false,
             detached_process_jobs: false,
             lsp_read_only_navigation: false,
             lsp_call_hierarchy: false,
@@ -623,6 +630,7 @@ mod tests {
         });
         QuicRegisterFrame::new(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,

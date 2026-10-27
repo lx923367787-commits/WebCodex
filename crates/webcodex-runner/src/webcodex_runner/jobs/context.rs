@@ -13,6 +13,9 @@ pub(crate) fn validate_detached_recovery_context(
     context: &ShellJobContext,
     client_id: &str,
 ) -> Result<(), String> {
+    if context.agent_execution.is_some() {
+        return Err("agent_execution_detached_recovery_unavailable".into());
+    }
     const MAX_CONTEXT_FIELD_CHARS: usize = 1_024;
     const MAX_COMMAND_PREVIEW_CHARS: usize = 121;
     let bounded =
@@ -134,6 +137,18 @@ pub(crate) fn validate_runner_job_context_operation(
     if operation.context() != Some(context) {
         return Err("job recovery context does not match the typed Job operation".to_string());
     }
+    if let RunnerJobOperation::StartIsolatedProcess(operation) = operation {
+        operation.start.validate()?;
+        if operation.start.binding.target.client_id != client_id
+            || *context != runner_protocol::isolated_job_context(&operation.start)
+        {
+            return Err("agent_execution_context_mismatch".into());
+        }
+        return Ok(());
+    }
+    if context.agent_execution.is_some() {
+        return Err("agent_execution_requires_isolated_carrier".into());
+    }
     if !bounded(&context.command_preview, MAX_COMMAND_PREVIEW_CHARS)
         || context.command_preview.contains(['\r', '\n'])
     {
@@ -239,6 +254,7 @@ pub(crate) fn validate_runner_job_context_operation(
     }
 
     match operation {
+        RunnerJobOperation::StartIsolatedProcess(_) => unreachable!("validated above"),
         RunnerJobOperation::StartShell(operation) => {
             runner_protocol::validate_raw_shell_wire_command(&operation.command)?;
         }

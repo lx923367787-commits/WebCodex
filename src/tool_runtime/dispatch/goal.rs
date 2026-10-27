@@ -12,6 +12,7 @@ impl ToolRuntime {
             | ToolCall::GoalPlanSave { .. }
             | ToolCall::GoalConfirmPlan { .. }
             | ToolCall::GoalBootstrap { .. }
+            | ToolCall::GoalHandoff { .. }
             | ToolCall::GoalClaimNode { .. }
             | ToolCall::GoalCheckpoint { .. }
             | ToolCall::GoalCheckNode { .. }) => {

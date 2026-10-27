@@ -62,6 +62,10 @@ const SETUP_GPT_SCOPES: &[&str] = &[
     "project:read",
     "project:write",
     "job:run",
+    "communication:read",
+    "communication:manage",
+    "plugin:inspect",
+    "plugin:invoke",
 ];
 const SETUP_RUNNER_SCOPES: &[&str] = &[
     "agent:register",
@@ -107,6 +111,8 @@ enum CliAction {
     ProjectRegister(ProjectRegisterOptions),
     ProjectActivate(ProjectActivateOptions),
     ProjectManagement(webcodex_cli::project_management::Options),
+    Office(webcodex_cli::office::Options),
+    Workspaces(webcodex_cli::workspaces::Options),
     Connect(ConnectOptions),
     Disconnect(DisconnectOptions),
     HostedLogWriter(PathBuf),
@@ -333,6 +339,24 @@ where
         "connect" => parse_connect(&args[1..]),
         "disconnect" => parse_disconnect(&args[1..]),
         "project" => parse_project_subcommand(&args[1..]),
+        "workspaces" => match webcodex_cli::workspaces::parse(&args[1..]) { Ok(opts) => CliAction::Workspaces(opts), Err(error) => cli_parse_error(error) },
+        "office" => {
+            if args[1..]
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+            {
+                CliAction::Exit {
+                    code: 0,
+                    stdout: webcodex_cli::office::USAGE.into(),
+                    stderr: String::new(),
+                }
+            } else {
+                match webcodex_cli::office::parse(&args[1..]) {
+                    Ok(options) => CliAction::Office(options),
+                    Err(error) => cli_parse_error(error),
+                }
+            }
+        }
         "__hosted-log-writer" => {
             if args.len() == 2 {
                 CliAction::HostedLogWriter(PathBuf::from(&args[1]))
@@ -674,6 +698,7 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
             let mut config = None;
             let mut user_token_file = None;
             let mut project = None;
+            let mut expected_project_path = None;
             let mut json = false;
             let mut index = 1;
             while index < args.len() {
@@ -690,6 +715,13 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
                         match args.get(index) {
                             Some(value) => user_token_file = Some(PathBuf::from(value)),
                             None => return cli_parse_error("--user-token-file requires a value".to_string()),
+                        }
+                    }
+                    "--expected-project-path" => {
+                        index += 1;
+                        match args.get(index) {
+                            Some(value) => expected_project_path = Some(PathBuf::from(value)),
+                            None => return cli_parse_error("--expected-project-path requires a value".to_string()),
                         }
                     }
                     "--json" => json = true,
@@ -718,6 +750,7 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
                 config,
                 user_token_file,
                 project,
+                expected_project_path,
                 json,
             })
         }
@@ -734,6 +767,7 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
             }
             let mut config = None;
             let mut project = None;
+            let mut expected_project_path = None;
             let mut json = false;
             let mut index = 1;
             while index < args.len() {
@@ -745,6 +779,13 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
                             None => {
                                 return cli_parse_error("--config requires a value".to_string())
                             }
+                        }
+                    }
+                    "--expected-project-path" => {
+                        index += 1;
+                        match args.get(index) {
+                            Some(value) => expected_project_path = Some(PathBuf::from(value)),
+                            None => return cli_parse_error("--expected-project-path requires a value".to_string()),
                         }
                     }
                     "--json" => json = true,
@@ -773,6 +814,7 @@ fn parse_project_subcommand(args: &[String]) -> CliAction {
             CliAction::ProjectRegister(ProjectRegisterOptions {
                 config,
                 project,
+                expected_project_path,
                 json,
             })
         }
@@ -2636,6 +2678,40 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         CliAction::ProjectManagement(opts) => {
             match webcodex_cli::project_management::run(opts).await {
+                Ok(output) => {
+                    println!("{output}");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        CliAction::Workspaces(opts) => {
+            let input = webcodex_cli::workspaces::read_input(std::io::stdin().lock());
+            let result = match input {
+                Ok(input) => webcodex_cli::workspaces::run(opts, input).await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(output) => {
+                    println!("{output}");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        CliAction::Office(opts) => {
+            let input = webcodex_cli::office::read_input(std::io::stdin().lock());
+            let result = match input {
+                Ok(input) => webcodex_cli::office::run(opts, input).await,
+                Err(error) => Err(error),
+            };
+            match result {
                 Ok(output) => {
                     println!("{output}");
                     std::process::exit(0);

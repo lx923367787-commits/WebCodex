@@ -93,6 +93,7 @@ async fn register(
     runtime
         .runner_registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             client_id: CLIENT.into(),
             runner_instance_id: INSTANCE.into(),
             runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -126,6 +127,7 @@ async fn register(
                 async_shell_jobs: true,
                 structured_process_argv: true,
                 structured_execution_jobs: true,
+                agent_isolated_execution_v1: false,
                 detached_process_jobs: true,
                 ..Default::default()
             }),

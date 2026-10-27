@@ -52,10 +52,11 @@ pub async fn runner_ws(req: &mut Request, depot: &mut Depot, res: &mut Response)
     // the HTTP handshake and injects the AuthContext into the depot. We pull
     // it out here because the upgrade callback does not receive a depot.
     let auth = depot.obtain::<crate::auth::AuthContext>().ok().cloned();
+    let db = depot.obtain::<Arc<crate::Database>>().ok().cloned();
     let upgrade = WebSocketUpgrade::new()
         .max_message_size(WS_MAX_MESSAGE_SIZE)
         .upgrade(req, res, |ws| async move {
-            handle_runner_ws(ws, registry, auth).await;
+            handle_runner_ws(ws, registry, auth, db).await;
         })
         .await;
     if let Err(e) = upgrade {
@@ -69,6 +70,7 @@ async fn handle_runner_ws(
     mut ws: WebSocket,
     registry: Arc<RunnerRegistry>,
     auth: Option<crate::auth::AuthContext>,
+    db: Option<Arc<crate::Database>>,
 ) {
     // 1. Read the first message: it must be a Register envelope.
     let mut register_payload = match read_register(&mut ws).await {
@@ -201,6 +203,14 @@ async fn handle_runner_ws(
     crate::runner_session::run_runner_session(
         crate::runner_session::SessionContext {
             registry: &registry,
+            close_receipt_db: auth.as_ref().and_then(|auth| {
+                crate::runner_http::require_runner_transport_scope(
+                    Some(auth),
+                    crate::auth::SCOPE_AGENT_RESULT,
+                )
+                .ok()?;
+                db.as_deref()
+            }),
             client_id: &client_id,
             runner_instance_id: &runner_instance_id,
             connection_id: &connection_id,
@@ -353,6 +363,7 @@ mod tests {
     fn register_envelope_with_instance(client_id: &str, instance_id: &str) -> RunnerEnvelope {
         RunnerEnvelope::Register {
             payload: RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -397,6 +408,7 @@ mod tests {
                         structured_script_payload: false,
                         internal_posix_script: false,
                         structured_execution_jobs: false,
+                        agent_isolated_execution_v1: false,
                         detached_process_jobs: false,
                         lsp_read_only_navigation: false,
                         lsp_call_hierarchy: false,

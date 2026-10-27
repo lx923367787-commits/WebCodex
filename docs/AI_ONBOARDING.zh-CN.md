@@ -1,5 +1,7 @@
 # AI Coding Agent 接入指南
 
+**外部工具与账号：** 模型 CLI 由用户在每台 Runner 电脑自行安装、登录或配置自己的 key，再配置并验证 Runner。WebCodex 交付对接代码和通用运行依赖，不交付另一用户配置好的工具环境。见[工具、账号与迁移规则](EXTERNAL_TOOLS.md#简体中文)。
+
 [English](AI_ONBOARDING.md) | [简体中文](AI_ONBOARDING.zh-CN.md)
 
 本文面向帮助**用户**把仓库接入 WebCodex 或操作已有部署的 AI coding agent。它不是

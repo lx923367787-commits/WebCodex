@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+runtime/
+evidence/
+node_modules/
+*.sqlite3*
+*.log*
+*.local.toml
+*.local.json

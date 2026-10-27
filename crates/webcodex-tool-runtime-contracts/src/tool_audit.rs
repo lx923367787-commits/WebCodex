@@ -2828,6 +2828,70 @@ mod computer_privacy_tests {
 impl ToolCall {
     pub fn session_log_arguments(&self) -> Value {
         match self {
+            Self::TeamPolicyGet { project } => serde_json::json!({"project":project}),
+            Self::TeamPolicySave {
+                project,
+                expected_revision,
+                ..
+            } => serde_json::json!({
+                "project":project,"expected_revision":expected_revision
+            }),
+            Self::TeamPlanRegister {
+                project,
+                root_task_id,
+                expected_policy_revision,
+                plan,
+                ..
+            } => serde_json::json!({
+                "project":project,"root_task_id":root_task_id,"expected_policy_revision":expected_policy_revision,
+                "subagent_count":plan["subagents"].as_array().map(Vec::len)
+            }),
+            Self::TeamPlanList {
+                project,
+                offset,
+                limit,
+            } => serde_json::json!({"project":project,"offset":offset,"limit":limit}),
+            Self::TeamPlanRead {
+                project,
+                root_task_id,
+                attempts_offset,
+                attempts_limit,
+            } => {
+                serde_json::json!({"project":project,"root_task_id":root_task_id,"attempts_offset":attempts_offset,"attempts_limit":attempts_limit})
+            }
+            Self::TeamPlanCancel {
+                project,
+                root_task_id,
+            } => serde_json::json!({"project":project,"root_task_id":root_task_id}),
+            Self::TeamCliStart {
+                project,
+                root_task_id,
+                source_task_id,
+                call_index,
+                timeout_secs,
+                ..
+            } => serde_json::json!({
+                "project":project,"root_task_id":root_task_id,"source_task_id":source_task_id,
+                "call_index":call_index,"timeout_secs":timeout_secs
+            }),
+            Self::TeamCliObserve {
+                project,
+                source_attempt_id,
+            } => serde_json::json!({"project":project,"source_attempt_id":source_attempt_id}),
+            Self::TeamAgentStart {
+                project,
+                root_task_id,
+                source_task_id,
+                ..
+            } => {
+                serde_json::json!({"project":project,"root_task_id":root_task_id,"source_task_id":source_task_id})
+            }
+            Self::TeamAgentObserve {
+                project,
+                team_agent_attempt_id,
+            } => {
+                serde_json::json!({"project":project,"team_agent_attempt_id":team_agent_attempt_id})
+            }
             Self::PresentDocument(args)
             | Self::DocumentEdit(args)
             | Self::DocumentConvert(args)
@@ -2998,6 +3062,17 @@ impl ToolCall {
                 "goal_id":goal_id, "expected_revision":expected_revision, "plan_version":plan_version,
                 "confirmation_bytes":confirmation.len(),
                 "idempotency_key_present":!idempotency_key.is_empty(),
+            }),
+            Self::GoalHandoff {
+                goal_id,
+                action,
+                handoff_id,
+                attempt_id,
+                checkpoint_sequence,
+                ..
+            } => serde_json::json!({
+                "goal_id":goal_id, "action":action, "handoff_id":handoff_id,
+                "attempt_id":attempt_id, "checkpoint_sequence":checkpoint_sequence,
             }),
             Self::GoalBootstrap {
                 goal_id,

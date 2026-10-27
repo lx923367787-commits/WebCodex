@@ -132,6 +132,8 @@ pub(crate) trait RunnerReader {
 /// has authenticated, registered, and acknowledged the Runner.
 pub(crate) struct SessionContext<'a> {
     pub(crate) registry: &'a Arc<RunnerRegistry>,
+    /// Available only after authenticated Runner registration with result scope.
+    pub(crate) close_receipt_db: Option<&'a crate::Database>,
     pub(crate) client_id: &'a str,
     pub(crate) runner_instance_id: &'a str,
     pub(crate) connection_id: &'a str,
@@ -221,6 +223,7 @@ async fn run_runner_session_with_pump(
 ) {
     let SessionContext {
         registry,
+        close_receipt_db,
         client_id,
         runner_instance_id,
         connection_id,
@@ -293,6 +296,7 @@ async fn run_runner_session_with_pump(
                         dispatch_inbound(
                             env,
                             registry,
+                            close_receipt_db,
                             client_id,
                             runner_instance_id,
                             connection_id,
@@ -375,6 +379,7 @@ async fn run_runner_session_with_pump(
 async fn dispatch_inbound(
     env: RunnerEnvelope,
     registry: &Arc<RunnerRegistry>,
+    close_receipt_db: Option<&crate::Database>,
     client_id: &str,
     runner_instance_id: &str,
     connection_id: &str,
@@ -382,6 +387,37 @@ async fn dispatch_inbound(
     transport_label: &'static str,
 ) {
     match env {
+        RunnerEnvelope::AgentExecutionCloseReceipt {
+            request_id,
+            receipt,
+        } => {
+            if receipt.target.client_id != client_id
+                || receipt.target.runner_instance_id != runner_instance_id
+            {
+                tracing::warn!(client_id, "Runner close receipt identity mismatch");
+                return;
+            }
+            let Some(db) = close_receipt_db else {
+                tracing::warn!(client_id, "Runner close receipt persistence unavailable");
+                return;
+            };
+            if crate::agent_team_execution::accept_authenticated_close_receipt(
+                db,
+                registry,
+                client_id,
+                runner_instance_id,
+                Some(connection_id),
+                &request_id,
+                receipt,
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(client_id, "Runner close receipt rejected");
+            }
+            // Push delivery has no Store-ack envelope in this protocol. The
+            // Runner retains its proof; queueing a frame is never stored=true.
+        }
         RunnerEnvelope::Result { payload } => {
             if payload.result.client_id != client_id
                 || payload.result.runner_instance_id != runner_instance_id

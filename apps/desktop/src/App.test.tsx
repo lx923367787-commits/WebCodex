@@ -1256,19 +1256,19 @@ describe("semantic Desktop UI", () => {
     expect(screen.queryByRole("button", { name: "启动安全隧道" })).not.toBeInTheDocument();
   });
 
-  it("automatically resumes a saved full runtime on Desktop launch", async () => {
+  it("leaves automatic saved runtime recovery to native Desktop startup", async () => {
     const stopped = { ...setupState(), runtime_autostart: true };
     api.getState.mockResolvedValue(stopped);
     api.resumeSavedRuntime.mockResolvedValue(readyState);
 
     renderApp();
 
-    await waitFor(() => expect(api.resumeSavedRuntime).toHaveBeenCalledTimes(1));
     expect(await screen.findByRole("heading", { level: 1, name: "WebCodex" })).toBeInTheDocument();
+    expect(api.resumeSavedRuntime).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "配置 WebCodex" })).not.toBeInTheDocument();
   });
 
-  it("reconnects the remembered OpenAI Tunnel after restoring the runtime", async () => {
+  it("does not race native startup when a remembered OpenAI Tunnel exists", async () => {
     const stopped: DesktopState = {
       ...setupState(),
       runtime_autostart: true,
@@ -1285,8 +1285,9 @@ describe("semantic Desktop UI", () => {
 
     renderApp();
 
-    await waitFor(() => expect(api.resumeSavedRuntime).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(api.startRegularTunnel).toHaveBeenCalledTimes(1));
+    await screen.findByRole("heading", { level: 1, name: "WebCodex" });
+    expect(api.resumeSavedRuntime).not.toHaveBeenCalled();
+    expect(api.startRegularTunnel).not.toHaveBeenCalled();
   });
 
   it("reuses an existing remote enrollment when the user selects a different project", async () => {

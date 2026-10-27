@@ -41,8 +41,10 @@ fn sample_tool_args_for_spec(spec: &ToolSpec) -> Value {
                         | "goal_check_node"
                 ) {
                 json!(format!("hgoal_{}", "a".repeat(32)))
-            } else if field == "expected_revision" && spec.name.starts_with("goal_") {
+            } else if field == "expected_revision" && (spec.name.starts_with("goal_") || spec.name == "team_policy_save") {
                 json!(1)
+            } else if field == "plan" && spec.name == "team_plan_register" {
+                json!({"manager":{"task_id":format!("wc_agent_task_{}", "1".repeat(32)),"cli_calls":[]},"subagents":[]})
             } else if field == "patch" && spec.name == "goal_checkpoint" {
                 json!({"reason":"Progress checkpoint","state":{"next_step":"Run checks"}})
             } else {
@@ -73,6 +75,15 @@ fn sample_tool_args_for_spec(spec: &ToolSpec) -> Value {
 fn sample_field_value(field: &str) -> Value {
     match field {
         "project" => json!(SAMPLE_PROJECT),
+        "policy" => {
+            json!({"mode":"auto","subagents":{"min":0,"max":4},"cli_per_agent":{"min":0,"max":2},"providers":[]})
+        }
+        "root_task_id" | "source_task_id" => json!(format!("wc_agent_task_{}", "1".repeat(32))),
+        "source_attempt_id" => json!(format!("wc_team_cli_attempt_{}", "2".repeat(32))),
+        "team_agent_attempt_id" => json!(format!("wc_team_agent_attempt_{}", "3".repeat(32))),
+        "expected_policy_revision" | "call_index" => json!(0),
+        "fallback_thinking_profile_id" => json!("manager-selected-profile"),
+        "thinking_profile_id" => json!("manager-selected-profile"),
         "command" => json!("true"),
         "executable" => json!("git"),
         "language" => json!("sh"),

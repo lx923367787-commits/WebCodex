@@ -1,0 +1,7 @@
+/payload/
+/payload.nsh
+/payload-manifest.json
+/*.exe
+/installer-smoke.json
+/smoke-install-*/
+/__pycache__/

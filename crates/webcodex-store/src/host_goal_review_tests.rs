@@ -79,7 +79,7 @@ fn fixture_plan(
         .goal;
     let context = HostGoalInvocationContext {
         context_epoch: "review-chat-a".into(),
-        identity_source: "explicit_context_only".into(),
+        identity_source: "window_bound".into(),
     };
     db.observe_host_context(
         OWNER,
@@ -518,7 +518,7 @@ fn host_goal_review_new_attempt_and_epoch_preserve_rounds_but_require_new_image_
     let handed = managed_handoff(&db, &claim, &context, "handoff-review", &[]).unwrap();
     let next_context = HostGoalInvocationContext {
         context_epoch: "review-chat-b".into(),
-        identity_source: "explicit_context_only".into(),
+        identity_source: "window_bound".into(),
     };
     db.observe_host_context(
         OWNER,
@@ -529,7 +529,10 @@ fn host_goal_review_new_attempt_and_epoch_preserve_rounds_but_require_new_image_
         Some((3000, 4000)),
     )
     .unwrap();
-    let next = managed_claim(&db, &handed.goal, &next_context, "claim-b");
+    db.ensure_host_context_identity(OWNER, &next_context)
+        .unwrap();
+    let committed = managed_takeover(&db, &handed.goal.goal_id, &next_context);
+    let next = managed_claim(&db, &committed, &next_context, "claim-b");
     let second = packet(&next.attempt.binding, &next_context, "second", 'a', true);
     let record = db
         .prepare_host_goal_review(OWNER, &next.attempt.binding, &second, NOW)

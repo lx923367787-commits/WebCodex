@@ -92,7 +92,21 @@ pub async fn projects_list(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
     let auth = depot.obtain::<crate::auth::AuthContext>().ok().cloned();
-    let result = runtime.dispatch_with_auth(call, auth.as_ref()).await;
+    let mut result = runtime.dispatch_with_auth(call, auth.as_ref()).await;
+    // The Desktop controller receives its actual human identity with the same
+    // authorized inventory. This metadata is HTTP-only, never a model input
+    // or part of the generic list_projects tool response.
+    if result.success {
+        if let Some(operator) = auth
+            .as_ref()
+            .filter(|auth| crate::tool_runtime::office_control::human_office_auth(auth))
+            .and_then(|auth| auth.user_id.as_deref())
+        {
+            if let Some(output) = result.output.as_object_mut() {
+                output.insert("operator_user_id".into(), Value::String(operator.into()));
+            }
+        }
+    }
     render_result(res, &audit, "list_projects", None, result);
 }
 

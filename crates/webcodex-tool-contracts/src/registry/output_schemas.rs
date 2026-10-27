@@ -24,6 +24,7 @@ mod runner_config;
 mod sessions;
 mod skills;
 mod ssh_resources;
+mod team_task;
 mod testing;
 
 use common::default_output_schema;
@@ -73,6 +74,9 @@ fn add_context_meter_to_output_object(schema: &mut Value) {
 }
 
 fn base_output_schema_for_tool(name: &str) -> Value {
+    if let Some(schema) = team_task::output_schema_for_tool(name) {
+        return schema;
+    }
     if let Some(schema) = documents::output_schema_for_tool(name) {
         return schema;
     }

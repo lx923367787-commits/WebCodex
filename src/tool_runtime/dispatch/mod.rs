@@ -32,10 +32,34 @@ impl ToolRuntime {
         correlation: &mut crate::tool_runtime::window_activity::ToolCallCorrelation,
     ) -> ToolResult {
         match call {
+            call @ (ToolCall::TeamAgentStart { .. } | ToolCall::TeamAgentObserve { .. }) => {
+                let name = call.tool_name();
+                let params = match serde_json::to_value(call) {
+                    Ok(mut wrapped) => wrapped["params"].take(),
+                    Err(_) => return ToolResult::err("team_tool_serialization_failed"),
+                };
+                self.call_team_agent_tool(name, params, auth).await
+            }
+            call @ (ToolCall::TeamPolicyGet { .. }
+            | ToolCall::TeamPolicySave { .. }
+            | ToolCall::TeamPlanRegister { .. }
+            | ToolCall::TeamPlanList { .. }
+            | ToolCall::TeamPlanRead { .. }
+            | ToolCall::TeamPlanCancel { .. }
+            | ToolCall::TeamCliStart { .. }
+            | ToolCall::TeamCliObserve { .. }) => {
+                let name = call.tool_name();
+                let params = match serde_json::to_value(call) {
+                    Ok(mut wrapped) => wrapped["params"].take(),
+                    Err(_) => return ToolResult::err("team_tool_serialization_failed"),
+                };
+                self.dispatch_team_tool(auth, name, params).await
+            }
             call @ (ToolCall::GoalModeStart { .. }
             | ToolCall::GoalPlanSave { .. }
             | ToolCall::GoalConfirmPlan { .. }
             | ToolCall::GoalBootstrap { .. }
+            | ToolCall::GoalHandoff { .. }
             | ToolCall::GoalClaimNode { .. }
             | ToolCall::GoalCheckpoint { .. }
             | ToolCall::GoalCheckNode { .. }

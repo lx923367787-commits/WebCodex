@@ -440,4 +440,19 @@ impl ToolRuntime {
             "markdown_path":files[1].absolute_path,"markdown_sha256":files[1].sha256,"task_files":task_paths(goal)}),
         )
     }
+
+    /// A read-only readiness probe on the exact immutable handoff files. Never
+    /// publish or repair files on behalf of an uncommitted successor.
+    pub(crate) async fn verify_project_goal_handoff(
+        &self,
+        goal: &HostGoalRecord,
+        checkpoint: &HostGoalCheckpoint,
+        auth: Option<&AuthContext>,
+    ) -> Result<(), ToolResult> {
+        let files = handoff_files(goal, checkpoint)?;
+        let target = self
+            .resolve_goal_file_target(goal, &files, false, auth)
+            .await?;
+        self.verify_goal_file_pair(&target, &files).await
+    }
 }

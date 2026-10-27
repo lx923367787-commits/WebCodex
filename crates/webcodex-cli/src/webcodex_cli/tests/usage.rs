@@ -83,6 +83,7 @@ fn project_doctor_and_hosted_connect_dispatch() {
         CliAction::ProjectRegister(opts)
             if opts.config == std::path::PathBuf::from("/tmp/runner.toml")
                 && opts.project == std::path::PathBuf::from("/tmp/repo")
+                && opts.expected_project_path.is_none()
                 && !opts.json
     ));
     assert!(matches!(
@@ -100,6 +101,7 @@ fn project_doctor_and_hosted_connect_dispatch() {
             if opts.config == std::path::PathBuf::from("/tmp/runner.toml")
                 && opts.user_token_file == std::path::PathBuf::from("/tmp/user-token")
                 && opts.project == std::path::PathBuf::from("/tmp/repo-b")
+                && opts.expected_project_path.is_none()
                 && opts.json
     ));
     assert!(matches!(
@@ -114,6 +116,39 @@ fn project_doctor_and_hosted_connect_dispatch() {
         cli_action(["connect", "https://example.test", "--key", "shared-secret"]),
         CliAction::Connect(_)
     ));
+}
+
+#[test]
+fn project_expected_path_option_dispatches_and_requires_a_value() {
+    for command in ["activate", "register"] {
+        let mut args = vec!["project", command, "--config", "/tmp/runner.toml"];
+        if command == "activate" {
+            args.extend(["--user-token-file", "/tmp/user-token"]);
+        }
+        args.extend([
+            "/tmp/selected-project",
+            "--expected-project-path",
+            "/tmp/canonical-project",
+        ]);
+        let expected = match cli_action(args.clone()) {
+            CliAction::ProjectActivate(opts) => opts.expected_project_path,
+            CliAction::ProjectRegister(opts) => opts.expected_project_path,
+            other => panic!("expected project command, got {other:?}"),
+        };
+        assert_eq!(
+            expected,
+            Some(std::path::PathBuf::from("/tmp/canonical-project"))
+        );
+        args.pop();
+        assert!(matches!(
+            cli_action(args),
+            CliAction::Exit { code: 2, stderr, .. }
+                if stderr.contains("--expected-project-path requires a value")
+        ));
+        assert!(cli_exit(["project", command, "--help"])
+            .unwrap()
+            .contains("--expected-project-path"));
+    }
 }
 
 #[test]
@@ -156,7 +191,8 @@ fn project_registration_activation_and_login_help_prioritize_user_language() {
     assert!(project_help.contains("allowed_roots"));
     let activate_help = cli_exit(["project", "activate", "--help"]).unwrap();
     assert!(activate_help.contains("Activate one explicitly selected local project"));
-    assert!(activate_help.contains("canonical exact project root"));
+    assert!(activate_help.contains("reuses an existing allowed root for any descendant project"));
+    assert!(activate_help.contains("grants only the selected canonical root"));
     assert!(activate_help.contains("generation CAS"));
     assert!(activate_help.contains("--user-token-file PATH"));
     let login_help = cli_exit(["login", "--help"]).unwrap();

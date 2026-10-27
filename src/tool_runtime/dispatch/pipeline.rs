@@ -339,6 +339,17 @@ impl ToolRuntime {
     ) -> ToolResult {
         call = call
             .with_coding_agent_recording_session_id(recorder_metadata.recording_session_id.clone());
+        // Direct legacy dispatch is not an alternate route around the broker.
+        // Trusted management code uses domain services, never model dispatch.
+        // Keep the synchronous denial path: typed legacy calls have no original
+        // isolated arguments or execution permit and must not enter async dispatch.
+        if auth.is_none_or(|auth| {
+            auth.kind == crate::auth::AuthKind::ModelAgent
+                || auth.agent_run.is_some()
+                || auth.is_native_host()
+        }) {
+            return self.isolated_model_call(call.tool_name(), serde_json::json!({}), auth);
+        }
         if let ToolCall::PluginTool(plugin) = call {
             return match crate::plugin_gateway::invoke(
                 self,

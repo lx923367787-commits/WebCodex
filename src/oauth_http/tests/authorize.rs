@@ -162,6 +162,51 @@ async fn authorize_rejects_non_user_tokens_without_issuing_code() {
 }
 
 #[tokio::test]
+async fn authorize_rejects_isolated_agent_run_without_issuing_code() {
+    let config = test_config(oauth2_enabled());
+    let (_tmp, db) = test_db();
+    let user = seed_user(&db, "isolated-owner");
+    let client = seed_client_with_redirects_and_scopes(
+        &db,
+        &user,
+        "https://example.com/callback",
+        "runtime:read",
+    );
+    let run = db
+        .create_isolated_agent(&user.id, "synthetic-project", None)
+        .unwrap();
+    let before = auth_code_count(&db);
+    let service = Service::new(build_router(config, db.clone()));
+    let response = authorized_get(
+        &valid_authorize_url(&client, "https://example.com/callback"),
+        &run.token,
+    )
+    .send(&service)
+    .await;
+    assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+    assert_no_location(&response);
+    assert!(!response.headers.contains_key("set-cookie"));
+    assert_eq!(auth_code_count(&db), before);
+}
+
+#[test]
+fn authorize_identity_rejects_isolated_agent_binding_even_with_api_token_kind() {
+    let (_tmp, db) = test_db();
+    let grant = db
+        .create_isolated_agent("synthetic-owner", "synthetic-project", None)
+        .unwrap();
+    let binding = db.authenticate_agent_run(&grant.token).unwrap();
+    let mut auth = crate::auth::AuthContext::new(AuthKind::ModelAgent);
+    auth.user_id = Some(binding.owner_user().to_owned());
+    auth.agent_run = Some(binding);
+    assert!(!is_authorize_identity_allowed(&auth));
+    auth.kind = AuthKind::ApiToken;
+    assert!(!is_authorize_identity_allowed(&auth));
+    auth.agent_run = None;
+    assert!(is_authorize_identity_allowed(&auth));
+}
+
+#[tokio::test]
 async fn authorize_oauth2_disabled_returns_404_invalid_request_without_code() {
     let config = test_config(oauth2_disabled());
     let (_tmp, db) = test_db();

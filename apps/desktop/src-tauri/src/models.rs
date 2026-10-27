@@ -299,10 +299,34 @@ pub enum RegularTunnelStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegularTunnelState {
     pub provider: String,
+    #[serde(default, deserialize_with = "deserialize_native_host_id")]
+    pub host_id: Option<String>,
     pub status: RegularTunnelStatus,
     pub clipboard_state: String,
     pub clipboard_contains: String,
     pub ready_for_chatgpt: bool,
+}
+
+pub(crate) fn deserialize_native_host_id<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    if value.as_deref().is_some_and(|id| !is_native_host_id(id)) {
+        return Err(serde::de::Error::custom("invalid_native_host_id"));
+    }
+    Ok(value)
+}
+
+pub(crate) fn is_native_host_id(id: &str) -> bool {
+    id.strip_prefix("wc_host_").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -500,6 +524,9 @@ pub struct StoredDesktopConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredRuntime {
     pub server_url: String,
+    /// A current owned Tunnel ready observation, never a credential or cached authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_host_id: Option<String>,
     pub server_env_file: Option<PathBuf>,
     pub runner_config: Option<PathBuf>,
     pub user_token_file: Option<PathBuf>,

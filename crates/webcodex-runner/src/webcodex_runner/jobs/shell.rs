@@ -226,7 +226,9 @@ impl JobManager {
         };
         let mut stdout = child.child_mut().stdout.take();
         let mut stderr = child.child_mut().stderr.take();
-        let mut child = Arc::new(Mutex::new(child));
+        let mut child = Arc::new(Mutex::new(
+            crate::webcodex_runner::jobs::child::JobChild::from(child),
+        ));
         let post_spawn_rejection = {
             let _lifecycle = lock_unpoison(&self.lifecycle);
             let mut jobs = lock_unpoison(&self.jobs);
@@ -478,7 +480,9 @@ impl JobManager {
                     };
                     let next_stdout = next.child_mut().stdout.take();
                     let next_stderr = next.child_mut().stderr.take();
-                    let next = Arc::new(Mutex::new(next));
+                    let next = Arc::new(Mutex::new(
+                        crate::webcodex_runner::jobs::child::JobChild::from(next),
+                    ));
                     let reject_for_shutdown = {
                         let _lifecycle_guard = lock_unpoison(&lifecycle);
                         if shutting_down.load(Ordering::SeqCst)
@@ -664,7 +668,9 @@ impl JobManager {
         let mut child_stdin = child.child_mut().stdin.take();
         let mut stdout = child.child_mut().stdout.take();
         let mut stderr = child.child_mut().stderr.take();
-        let child = Arc::new(Mutex::new(child));
+        let child = Arc::new(Mutex::new(
+            crate::webcodex_runner::jobs::child::JobChild::from(child),
+        ));
         let post_spawn_rejection = {
             let _lifecycle = lock_unpoison(&self.lifecycle);
             let mut jobs = lock_unpoison(&self.jobs);

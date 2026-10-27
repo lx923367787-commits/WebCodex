@@ -62,6 +62,11 @@ pub(super) fn summary_schema() -> Value {
     schema["properties"]["plan_materialized"] = json!({"type":"boolean"});
     schema["properties"]["confirmation_required"] = json!({"type":"boolean"});
     schema["properties"]["objective_truncated"] = json!({"type":"boolean"});
+    schema["properties"]["latest_handoff"] = nullable(object(json!({
+        "source_context_epoch":text(128), "checkpoint_sequence":number(),
+        "retired_at":nullable(json!({"type":"integer"})),
+        "created_at":{"type":"integer"}, "status":text(32)
+    })));
     schema
 }
 
@@ -100,7 +105,7 @@ fn binding_schema() -> Value {
 }
 
 fn lifecycle_state_schema() -> Value {
-    json!({"type":"string","enum":["unknown","active","warning","draining","retired"]})
+    json!({"type":"string","enum":["unknown","active","warning","draining","retired","stopped"]})
 }
 
 fn task_files_schema() -> Value {
@@ -136,6 +141,13 @@ pub(super) fn handoff_fields() -> Vec<(&'static str, Value)> {
                 "action":nullable(json!({"type":"string","enum":["checkpoint","handoff","pause","exit","block","cancel"]})),
                 "source_context_epoch":nullable(text(128)), "source_fence":nullable(number()),
                 "created_at":{"type":"integer"}
+            }))),
+        ),
+        (
+            "resume_started",
+            nullable(object(json!({
+                "context_epoch":text(128), "identity_source":mode_binding(),
+                "started_at":{"type":"integer","description":"Unix milliseconds when a different conversation's activating bootstrap was accepted. This receipt grants no authority and does not prove a node claim or business completion."}
             }))),
         ),
         (
@@ -176,6 +188,7 @@ pub(super) fn handoff_output_schema() -> Value {
     schema["required"] = json!(required);
     schema["properties"]["task_files"] = task_files_schema();
     schema["properties"]["handoff_artifacts"] = handoff_artifacts_schema();
+    schema["properties"]["handoff"] = nullable(json!({"type":"object"}));
     schema["description"] = json!("Read-only bounded evidence for the exact source epoch. Missing legacy provenance remains null or unknown; another epoch becoming current never changes the selected source's checkpoint or retirement evidence. It grants no execution or retry authority.");
     schema["allOf"] = json!([{
         "if":{"properties":{"business_verified":{"const":true}}},
@@ -315,6 +328,17 @@ pub(super) fn page_fields() -> Vec<(&'static str, Value)> {
 }
 
 pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
+    if name == "goal_handoff" {
+        return Some(wrapped_output_schema(vec![
+            ("driver", json!({"type":"string","enum":["host"]})),
+            ("goal_id", text(96)),
+            ("handoff", json!({"type":"object"})),
+            ("execution_granted", json!({"type":"boolean"})),
+            ("package", json!({"type":"object"})),
+            ("package_sha256", sha256()),
+            ("notice", text(4096)),
+        ]));
+    }
     if !matches!(
         name,
         "goal_mode_start"

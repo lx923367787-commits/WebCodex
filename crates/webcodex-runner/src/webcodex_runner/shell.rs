@@ -26,6 +26,23 @@ use webcodex_process::{GracefulTermination, ManagedChild};
 mod process_command;
 pub(crate) use process_command::structured_process_command;
 
+#[cfg(any(windows, test))]
+#[path = "native_cli_env.rs"]
+mod native_cli_env;
+
+/// Reuse native CLI proxy selection for the fixed metadata controller. The
+/// shared helper still validates that the proxy contains no credentials.
+pub(crate) fn native_metadata_system_proxy() -> Option<String> {
+    #[cfg(windows)]
+    {
+        native_cli_env::system_proxy()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 const SHELL_PROFILE_PREPARE_TIMEOUT_SECS: u64 = 30;
 const PROCESS_GROUP_TERMINATION_GRACE: Duration = Duration::from_millis(50);
 const PROCESS_TREE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
@@ -389,7 +406,7 @@ fn configured_process_command(
     args: &[String],
     cwd: Option<&Path>,
 ) -> Result<Command, String> {
-    let resolved_program = resolve_process_program(shell, profile, program, cwd)?;
+    let resolved_program = resolve_process_program(shell, profile, program, args, cwd)?;
     let mut cmd = structured_process_command(&resolved_program, args, cwd)?;
     // ManagedChild (or JobManager for structured validation) owns this process
     // tree. Native argv stays literal; batch conversion belongs to the helper.
@@ -397,13 +414,48 @@ fn configured_process_command(
         Some(profile) => apply_env_snapshot(&mut cmd, &profile.env_snapshot),
         None => apply_shell_environment(&mut cmd, shell)?,
     }
+    #[cfg(windows)]
+    for (key, value) in native_cli_environment(shell, profile, program, args, &resolved_program)? {
+        cmd.env(key, value);
+    }
     Ok(cmd)
+}
+
+#[cfg(windows)]
+fn native_cli_environment(
+    shell: &ShellConfig,
+    profile: Option<&PreparedShellProfile>,
+    program: &str,
+    args: &[String],
+    resolved: &OsStr,
+) -> Result<Vec<(String, String)>, String> {
+    if shell.environment_mode != ShellEnvironmentMode::Inherit {
+        return Ok(Vec::new());
+    }
+    let local = std::env::var_os("LOCALAPPDATA");
+    let Some(cli) = native_cli_env::recognized_program(program, args, resolved, local.as_deref())
+    else {
+        return Ok(Vec::new());
+    };
+    if cli != native_cli_env::NativeCli::Antigravity {
+        return Ok(Vec::new());
+    }
+    let environment = match profile {
+        Some(profile) => profile.env_snapshot.clone(),
+        None => base_shell_env(shell, &ShellProfileConfig::default())?,
+    };
+    Ok(native_cli_env::environment_overrides(
+        cli,
+        &environment,
+        native_cli_env::system_proxy().as_deref(),
+    ))
 }
 
 fn resolve_process_program(
     shell: &ShellConfig,
     profile: Option<&PreparedShellProfile>,
     program: &str,
+    args: &[String],
     cwd: Option<&Path>,
 ) -> Result<OsString, String> {
     #[cfg(windows)]
@@ -422,14 +474,32 @@ fn resolve_process_program(
         match super::util::resolve_program_in_path(&resolved_input, &path) {
             Some(super::util::ResolvedProgram::Native(path)) => Ok(path.into_os_string()),
             Some(super::util::ResolvedProgram::Batch(path)) => Ok(path.into_os_string()),
-            None => Err(format!(
-                "structured process executable is unavailable or has an unsupported Windows extension: {program}"
-            )),
+            None => {
+                if shell.environment_mode == ShellEnvironmentMode::Inherit
+                    && profile.is_none()
+                    && env_lookup(&shell.env, "PATH").is_none()
+                {
+                    let local = std::env::var_os("LOCALAPPDATA");
+                    if let Some(candidate) =
+                        native_cli_env::fallback_program(program, args, local.as_deref())
+                    {
+                        if let Some(super::util::ResolvedProgram::Native(path)) =
+                            super::util::resolve_program_in_path(
+                                &candidate.to_string_lossy(),
+                                OsStr::new(""),
+                            )
+                        {
+                            return Ok(path.into_os_string());
+                        }
+                    }
+                }
+                Err(format!("structured process executable is unavailable or has an unsupported Windows extension: {program}"))
+            }
         }
     }
     #[cfg(not(windows))]
     {
-        let _ = (shell, profile, cwd);
+        let _ = (shell, profile, args, cwd);
         Ok(OsString::from(program))
     }
 }
@@ -1919,7 +1989,7 @@ pub(crate) fn prepare_detached_process_launch(
         stop_requested,
     )?;
     let resolved_program =
-        resolve_process_program(shell, profile.as_deref(), executable, Some(&cwd_path))?;
+        resolve_process_program(shell, profile.as_deref(), executable, args, Some(&cwd_path))?;
     // Validate the same batch argv contract before a detached Job is accepted.
     let _ = structured_process_command(&resolved_program, args, Some(&cwd_path))?;
     let resolved_program = resolved_program.into_string().map_err(|_| {
@@ -1929,10 +1999,20 @@ pub(crate) fn prepare_detached_process_launch(
         .to_str()
         .ok_or_else(|| "structured process cwd resolved to a non-UTF-8 native path".to_string())?
         .to_string();
-    let env = match profile.as_deref() {
+    let mut env = match profile.as_deref() {
         Some(profile) => profile.env_snapshot.clone(),
         None => base_shell_env(shell, &ShellProfileConfig::default())?,
     };
+    #[cfg(windows)]
+    for (key, value) in native_cli_environment(
+        shell,
+        profile.as_deref(),
+        executable,
+        args,
+        OsStr::new(&resolved_program),
+    )? {
+        env_insert(&mut env, &key, value);
+    }
     let mut env = env.into_iter().collect::<Vec<_>>();
     env.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(PreparedDetachedProcessLaunch {

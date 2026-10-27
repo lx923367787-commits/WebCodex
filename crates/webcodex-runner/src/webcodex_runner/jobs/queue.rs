@@ -59,6 +59,15 @@ impl JobManager {
             let shutting_down = self.shutting_down.load(Ordering::SeqCst);
             let mut jobs = lock_unpoison(&self.jobs);
             if jobs.contains_key(&job_id) {
+                // An ID is not an overwrite permit: only the exact typed
+                // isolated binding is a replay of an existing live admission.
+                if let RunnerJobOperation::StartIsolatedProcess(operation) = &start.operation {
+                    if jobs[&job_id].snapshot.context.agent_execution.as_ref()
+                        != Some(&operation.start.binding)
+                    {
+                        return;
+                    }
+                }
                 return;
             }
             let active_count = jobs
@@ -74,7 +83,7 @@ impl JobManager {
                 })
                 .count();
             let inventory_full = active_count >= JOB_INVENTORY_MAX_ACTIVE_JOBS;
-            let immediate_failure = if inventory_full {
+            let mut immediate_failure = if inventory_full {
                 Some(format!(
                     "runner active job inventory limit reached ({})",
                     JOB_INVENTORY_MAX_ACTIVE_JOBS
@@ -84,6 +93,15 @@ impl JobManager {
             } else {
                 None
             };
+            if immediate_failure.is_none() {
+                if let RunnerJobOperation::StartIsolatedProcess(operation) = &start.operation {
+                    // The durable binding is frozen before queue insertion.
+                    // The same lifecycle fence covers later dequeue/spawn/close.
+                    immediate_failure = self
+                        .admit_agent_execution_locked(&operation.start, &sink)
+                        .err();
+                }
+            }
             let queue_locally = immediate_failure.is_none() && reserved >= self.max_concurrent;
             let slot_reserved = immediate_failure.is_none() && !queue_locally;
             let now = chrono::Utc::now().timestamp();
@@ -153,6 +171,7 @@ impl JobManager {
             return;
         }
         match &start.operation {
+            RunnerJobOperation::StartIsolatedProcess(_) => self.start_isolated_process_job(start),
             RunnerJobOperation::StartDetachedProcess(_) => self.start_detached_process_job(start),
             RunnerJobOperation::StartProcess(_) | RunnerJobOperation::StartScript(_) => {
                 self.start_structured_job(start)

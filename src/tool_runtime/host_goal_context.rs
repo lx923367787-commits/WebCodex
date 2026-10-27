@@ -626,7 +626,9 @@ pub(crate) fn observe_response(
     {
         projection["lifecycle_state"] = json!(lifecycle.state);
         projection["identity_source"] = json!(lifecycle.identity_source);
-        if lifecycle.state == "retired" {
+        if lifecycle.state == "stopped" {
+            projection["notice"] = json!("交接失败，已停止执行，已保留 Goal、Checkpoint 和成果。只有用户明确要求后才能人工恢复；不要继续业务或自动再开对话。");
+        } else if lifecycle.state == "retired" {
             projection["notice"] = json!("This conversation is retired and read-only. The user must open a new chat and complete required login/tool approvals; recover the same Goal there. Do not repeat business operations or reactivate this epoch.");
         } else if lifecycle.state == "draining" {
             projection["notice"] = if projection["newly_crossed"] == true {

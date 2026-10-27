@@ -1266,6 +1266,7 @@ async fn assert_mcp_image_call_returns_native_image(model_surface: ModelSurface)
         .runner_registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 client_id: client_id.to_string(),
                 runner_instance_id: runner_instance_id.to_string(),
                 runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -2066,6 +2067,7 @@ async fn mcp_show_changes_distinguishes_recording_session_id_from_query_session_
         .runner_registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,

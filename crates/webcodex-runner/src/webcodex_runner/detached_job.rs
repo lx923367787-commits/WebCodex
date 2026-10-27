@@ -9,6 +9,7 @@
 use super::output_text::{OutputTextDecoder, OutputTextSource};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -29,9 +30,11 @@ use std::time::Instant;
 use uuid::Uuid;
 use webcodex_core::runner_job_lifecycle::RunnerJobLifecycle;
 use webcodex_core::runner_protocol::{
-    validate_process_argv, ShellCommandExecutionState, ShellJobActivity, ShellJobActivityPhase,
-    ShellJobActivitySource, ShellJobActivityState, ShellJobContext, ShellJobSnapshot,
-    ShellJobStreamSnapshot, ShellProcessArgv, JOB_INVENTORY_MAX_JOBS,
+    validate_process_argv, AgentExecutionBinding, AgentExecutionCarrier, AgentExecutionClose,
+    AgentExecutionCloseReceipt, AgentExecutionStopOutcome, AgentExecutionStopReceipt,
+    ShellCommandExecutionState, ShellJobActivity, ShellJobActivityPhase, ShellJobActivitySource,
+    ShellJobActivityState, ShellJobContext, ShellJobSnapshot, ShellJobStreamSnapshot,
+    ShellProcessArgv, AGENT_EXECUTION_ID_MAX_BYTES, JOB_INVENTORY_MAX_JOBS,
     JOB_SNAPSHOT_STREAM_MAX_BYTES, JOB_TERMINAL_RETENTION_SECS, PROCESS_CWD_MAX_BYTES,
     PROCESS_STDIN_MAX_BYTES, STRUCTURED_EXECUTION_TIMEOUT_MAX_SECS,
     STRUCTURED_EXECUTION_TIMEOUT_MIN_SECS,
@@ -99,7 +102,240 @@ const STATE_FILE: &str = "state.json";
 const STATE_TEMP_FILE: &str = ".state.tmp";
 const STATE_LOCK_FILE: &str = "state.lock";
 const ROOT_LOCK_FILE: &str = ".root.lock";
+const AGENT_EXECUTION_METADATA_FILE: &str = ".agent-execution.json";
+const AGENT_EXECUTION_METADATA_MAX_RECORDS: usize = 128;
 const TERMINAL_RETENTION_MS: i64 = JOB_TERMINAL_RETENTION_SECS * 1_000;
+
+/// Local replay fences and observations only. This metadata never grants Store
+/// authority and never transfers process ownership to the detached supervisor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentExecutionMetadata {
+    pub(crate) version: u32,
+    pub(crate) jobs: Vec<AgentExecutionJobMetadata>,
+    pub(crate) closes: Vec<AgentExecutionCloseMetadata>,
+}
+
+impl Default for AgentExecutionMetadata {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            jobs: Vec::new(),
+            closes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentExecutionJobMetadata {
+    pub(crate) binding: AgentExecutionBinding,
+    pub(crate) resource_set_id: String,
+    pub(crate) native_create_attempted: bool,
+    pub(crate) worker_finished: bool,
+    pub(crate) stop_receipt: Option<AgentExecutionStopReceipt>,
+    #[serde(default)]
+    pub(crate) resource_cleanup: Option<AgentExecutionResourceCleanupMetadata>,
+    #[serde(default)]
+    pub(crate) workspace_snapshot:
+        Option<webcodex_core::runner_protocol::AgentExecutionWorkspaceSnapshot>,
+}
+
+/// Write-ahead resource ownership for this exact immutable job binding. Legacy
+/// records have no ownership claim and must never acquire one during recovery.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentExecutionResourceCleanupMetadata {
+    pub(crate) auth_copy_expected: bool,
+    pub(crate) auth_removed: bool,
+    pub(crate) proxy_requested: bool,
+    pub(crate) grant_intent: bool,
+    pub(crate) grant_verified: bool,
+    pub(crate) proxy_revoked: bool,
+    pub(crate) resources_stopped: bool,
+    #[serde(default)]
+    pub(crate) last_cleanup_error: Option<String>,
+}
+
+impl AgentExecutionResourceCleanupMetadata {
+    pub(crate) fn complete(&self) -> bool {
+        (!self.auth_copy_expected && !self.proxy_requested)
+            || (self.resources_stopped
+                && (!self.auth_copy_expected || self.auth_removed)
+                && (!self.grant_intent || self.proxy_revoked))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentExecutionCloseMetadata {
+    pub(crate) close: AgentExecutionClose,
+    pub(crate) receipt: Option<AgentExecutionCloseReceipt>,
+}
+
+fn validate_agent_execution_metadata(metadata: &AgentExecutionMetadata) -> Result<(), String> {
+    if metadata.version != 1 {
+        return Err("agent_execution_metadata_unsupported_version".into());
+    }
+    if metadata.jobs.len() > AGENT_EXECUTION_METADATA_MAX_RECORDS
+        || metadata.closes.len() > AGENT_EXECUTION_METADATA_MAX_RECORDS
+    {
+        return Err("agent_execution_metadata_capacity_exceeded".into());
+    }
+    let mut attempts = HashSet::new();
+    let mut job_ids = HashSet::new();
+    let mut request_ids = HashSet::new();
+    for job in &metadata.jobs {
+        job.binding.validate()?;
+        if job.resource_set_id.trim().is_empty()
+            || job.resource_set_id.len() > AGENT_EXECUTION_ID_MAX_BYTES
+            || job.resource_set_id.chars().any(char::is_control)
+        {
+            return Err("agent_execution_metadata_invalid_resource_set".into());
+        }
+        let AgentExecutionCarrier::Job {
+            job_id,
+            start_request_id,
+        } = &job.binding.carrier
+        else {
+            return Err("agent_execution_metadata_job_carrier_required".into());
+        };
+        if !attempts.insert(&job.binding.requester.cli_attempt_id)
+            || !job_ids.insert(job_id)
+            || !request_ids.insert(start_request_id)
+        {
+            return Err("agent_execution_metadata_duplicate_job_identity".into());
+        }
+        if let Some(receipt) = &job.stop_receipt {
+            if !job.worker_finished
+                || receipt.observation_revision == 0
+                || receipt.binding_sha256 != job.binding.binding_hash()?
+                || receipt.carrier != job.binding.carrier
+            {
+                return Err("agent_execution_metadata_stop_receipt_mismatch".into());
+            }
+            let complete = match &receipt.outcome {
+                AgentExecutionStopOutcome::NeverCreated {
+                    request_cancelled,
+                    worker_finished,
+                } => !job.native_create_attempted && *request_cancelled && *worker_finished,
+                AgentExecutionStopOutcome::TreeExited {
+                    leader_handle_signaled,
+                    membership_complete,
+                    member_handles_signaled,
+                    worker_finished,
+                    ..
+                } => {
+                    job.native_create_attempted
+                        && *leader_handle_signaled
+                        && *membership_complete
+                        && *member_handles_signaled
+                        && *worker_finished
+                }
+            };
+            if !complete {
+                return Err("agent_execution_metadata_stop_proof_incomplete".into());
+            }
+        }
+        if let Some(cleanup) = &job.resource_cleanup {
+            if (cleanup.auth_removed && (!cleanup.auth_copy_expected || !cleanup.resources_stopped))
+                || (cleanup.grant_intent && !cleanup.proxy_requested)
+                || (cleanup.grant_verified && !cleanup.grant_intent)
+                || (cleanup.proxy_revoked && !cleanup.grant_intent)
+                // A native worker may persist physical tree/IO completion
+                // before its own JoinHandle can be joined for formal close.
+                || (cleanup.resources_stopped
+                    && !job.native_create_attempted
+                    && job.stop_receipt.is_none())
+            {
+                return Err("agent_execution_metadata_cleanup_invalid".into());
+            }
+            if cleanup.last_cleanup_error.as_deref().is_some_and(|error| {
+                !matches!(
+                    error,
+                    "agent_execution_resource_cleanup_deadline_expired"
+                        | "agent_execution_proxy_revoke_failed"
+                        | "agent_execution_auth_cleanup_failed"
+                        | "agent_execution_resource_stop_unproven"
+                        | "agent_execution_cleanup_metadata_unavailable"
+                )
+            }) {
+                return Err("agent_execution_metadata_cleanup_error_invalid".into());
+            }
+        }
+    }
+    for (index, state) in metadata.closes.iter().enumerate() {
+        state.close.validate()?;
+        if metadata.closes[..index].iter().any(|previous| {
+            previous.close.close_ref.close_id == state.close.close_ref.close_id
+                && previous.close.target == state.close.target
+        }) {
+            return Err("agent_execution_metadata_duplicate_close_identity".into());
+        }
+        if let Some(receipt) = &state.receipt {
+            receipt.validate_for(&state.close)?;
+        }
+    }
+    let bytes =
+        serde_json::to_vec(metadata).map_err(|_| "agent_execution_metadata_encoding_failed")?;
+    if bytes.len() > DETACHED_STATE_MAX_BYTES {
+        return Err("agent_execution_metadata_too_large".into());
+    }
+    Ok(())
+}
+
+fn validate_agent_execution_metadata_transition(
+    previous: &AgentExecutionMetadata,
+    current: &AgentExecutionMetadata,
+) -> Result<(), String> {
+    for old in &previous.jobs {
+        let new = current
+            .jobs
+            .iter()
+            .find(|job| {
+                job.binding.requester.cli_attempt_id == old.binding.requester.cli_attempt_id
+            })
+            .ok_or("agent_execution_metadata_job_removed")?;
+        if new.binding != old.binding || new.resource_set_id != old.resource_set_id {
+            return Err("agent_execution_metadata_job_identity_changed".into());
+        }
+        if (old.native_create_attempted && !new.native_create_attempted)
+            || (old.worker_finished && !new.worker_finished)
+            || (old.stop_receipt.is_some() && old.stop_receipt != new.stop_receipt)
+        {
+            return Err("agent_execution_metadata_job_regressed".into());
+        }
+        match (&old.resource_cleanup, &new.resource_cleanup) {
+            (None, None) => {}
+            (Some(old), Some(new))
+                if old.auth_copy_expected == new.auth_copy_expected
+                    && old.proxy_requested == new.proxy_requested
+                    && (!old.auth_removed || new.auth_removed)
+                    && (!old.grant_intent || new.grant_intent)
+                    && (!old.grant_verified || new.grant_verified)
+                    && (!old.proxy_revoked || new.proxy_revoked)
+                    && (!old.resources_stopped || new.resources_stopped) => {}
+            _ => return Err("agent_execution_metadata_cleanup_changed".into()),
+        }
+    }
+    for old in &previous.closes {
+        let new = current
+            .closes
+            .iter()
+            .find(|state| {
+                state.close.close_ref.close_id == old.close.close_ref.close_id
+                    && state.close.target == old.close.target
+            })
+            .ok_or("agent_execution_metadata_close_removed")?;
+        if new.close != old.close {
+            return Err("agent_execution_metadata_close_identity_changed".into());
+        }
+        if old.receipt.is_some() && old.receipt != new.receipt {
+            return Err("agent_execution_metadata_close_receipt_changed".into());
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -269,6 +505,67 @@ impl DetachedJobStore {
         Self { root }
     }
 
+    /// Bootstrap only: an existing file must validate and is never replaced by
+    /// empty metadata. Normal reads/updates must not recreate a missing fence.
+    pub(crate) fn initialize_agent_execution_metadata(
+        &self,
+    ) -> Result<AgentExecutionMetadata, String> {
+        ensure_private_dir(&self.root)?;
+        let _root_lock = exclusive_lock(&self.root.join(ROOT_LOCK_FILE), true)?;
+        let path = self.root.join(AGENT_EXECUTION_METADATA_FILE);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => self.read_agent_execution_metadata_locked(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let metadata = AgentExecutionMetadata::default();
+                atomic_write_json(&path, &metadata, DETACHED_STATE_MAX_BYTES)?;
+                Ok(metadata)
+            }
+            Err(error) => Err(format!(
+                "failed to inspect agent execution metadata: {error}"
+            )),
+        }
+    }
+
+    pub(crate) fn read_agent_execution_metadata(&self) -> Result<AgentExecutionMetadata, String> {
+        reject_symlink_or_non_dir(&self.root, "detached Job state root")?;
+        let _root_lock = existing_agent_metadata_lock(&self.root.join(ROOT_LOCK_FILE))?;
+        self.read_agent_execution_metadata_locked()
+    }
+
+    fn read_agent_execution_metadata_locked(&self) -> Result<AgentExecutionMetadata, String> {
+        let metadata = read_json_bounded(
+            &self.root.join(AGENT_EXECUTION_METADATA_FILE),
+            DETACHED_STATE_MAX_BYTES,
+            "agent execution metadata",
+        )?;
+        validate_agent_execution_metadata(&metadata)?;
+        Ok(metadata)
+    }
+
+    /// The closure runs under the existing root lock. It must not acquire any
+    /// other Store lock. Only a committed, validated, monotonic update succeeds;
+    /// callers retain JobManager's lifecycle fence across admission and closure.
+    pub(crate) fn update_agent_execution_metadata<T>(
+        &self,
+        update: impl FnOnce(&mut AgentExecutionMetadata) -> Result<T, String>,
+    ) -> Result<T, String> {
+        reject_symlink_or_non_dir(&self.root, "detached Job state root")?;
+        let _root_lock = exclusive_lock(&self.root.join(ROOT_LOCK_FILE), true)?;
+        let previous = self.read_agent_execution_metadata_locked()?;
+        let mut current = previous.clone();
+        let output = update(&mut current)?;
+        validate_agent_execution_metadata(&current)?;
+        validate_agent_execution_metadata_transition(&previous, &current)?;
+        if current != previous {
+            atomic_write_json(
+                &self.root.join(AGENT_EXECUTION_METADATA_FILE),
+                &current,
+                DETACHED_STATE_MAX_BYTES,
+            )?;
+        }
+        Ok(output)
+    }
+
     /// Return the durable state root for one stable Runner identity on one Server.
     ///
     /// The per-user state base can host Runners connected to different Servers,
@@ -349,10 +646,10 @@ impl DetachedJobStore {
             if file_type.is_symlink() {
                 return Err("detached Job state root contains a symlink entry".to_string());
             }
+            if is_reserved_root_file(&entry, file_type)? {
+                continue;
+            }
             if !file_type.is_dir() {
-                if entry.file_name() == ROOT_LOCK_FILE {
-                    continue;
-                }
                 return Err(
                     "detached Job state root contains an unexpected non-directory entry"
                         .to_string(),
@@ -506,10 +803,10 @@ impl DetachedJobStore {
             if file_type.is_symlink() {
                 return Err("detached Job reclamation found a symlink state entry".to_string());
             }
+            if is_reserved_root_file(&entry, file_type)? {
+                continue;
+            }
             if !file_type.is_dir() {
-                if entry.file_name() == ROOT_LOCK_FILE {
-                    continue;
-                }
                 return Err(
                     "detached Job reclamation found an unexpected non-directory state entry"
                         .to_string(),
@@ -1456,6 +1753,16 @@ fn set_private_dir_permissions(_path: &Path) -> Result<(), String> {
     Err("detached Job durable state is unsupported on this platform".to_string())
 }
 
+fn is_reserved_root_file(entry: &fs::DirEntry, file_type: fs::FileType) -> Result<bool, String> {
+    let name = entry.file_name();
+    let reserved =
+        name == ROOT_LOCK_FILE || name == AGENT_EXECUTION_METADATA_FILE || name == STATE_TEMP_FILE;
+    if reserved && (file_type.is_symlink() || !file_type.is_file()) {
+        return Err("detached Job reserved root entry must be a regular non-symlink file".into());
+    }
+    Ok(reserved)
+}
+
 fn reject_symlink_or_non_dir(path: &Path, label: &str) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("failed to inspect {label} {}: {error}", path.display()))?;
@@ -1716,6 +2023,72 @@ fn validate_open_regular_file(file: &File, path: &Path, label: &str) -> Result<(
 #[cfg(unix)]
 struct FileLock {
     file: File,
+}
+
+/// Readout of existing Agent execution history must not create a missing lock
+/// (or change ordinary Detached Job lock creation/contended-wait behavior).
+#[cfg(unix)]
+fn existing_agent_metadata_lock(path: &Path) -> Result<FileLock, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(false)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| "agent_execution_history_lock_unavailable")?;
+    validate_open_regular_file(&file, path, "Agent execution history lock")?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err("agent_execution_history_lock_unavailable".into());
+    }
+    validate_open_regular_file(&file, path, "Agent execution history lock")?;
+    Ok(FileLock { file })
+}
+
+#[cfg(windows)]
+fn existing_agent_metadata_lock(path: &Path) -> Result<FileLock, String> {
+    use std::os::windows::fs::MetadataExt;
+    loop {
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| "agent_execution_history_lock_unavailable")?;
+        if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
+            return Err("agent_execution_history_lock_invalid".into());
+        }
+        let opened = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(false)
+            // Only this history read guard also denies replacement of its
+            // exact lock file. Generic Detached Job lifetime locks are unchanged.
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path);
+        match opened {
+            Ok(file) => {
+                let metadata = file
+                    .metadata()
+                    .map_err(|_| "agent_execution_history_lock_unavailable")?;
+                let path_metadata = fs::symlink_metadata(path)
+                    .map_err(|_| "agent_execution_history_lock_unavailable")?;
+                if !metadata.is_file()
+                    || !path_metadata.is_file()
+                    || metadata.file_attributes() & 0x400 != 0
+                    || path_metadata.file_attributes() & 0x400 != 0
+                {
+                    return Err("agent_execution_history_lock_invalid".into());
+                }
+                return Ok(FileLock { file });
+            }
+            Err(error) if error.raw_os_error() == Some(32) => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(_) => return Err("agent_execution_history_lock_unavailable".into()),
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn existing_agent_metadata_lock(_path: &Path) -> Result<(), String> {
+    Err("Agent execution history locking is unsupported".into())
 }
 
 #[cfg(unix)]
@@ -3168,3 +3541,7 @@ fn internal_mode_command(mode: &str, args: &[String]) -> Result<Command, String>
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "detached_job/agent_execution_metadata_tests.rs"]
+mod agent_execution_metadata_tests;

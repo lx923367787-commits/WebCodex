@@ -35,6 +35,9 @@ pub(crate) async fn run_server_tunnel(opts: ServerTunnelOptions) -> Result<(), S
     let local_server_url = derive_regular_tunnel_server_url(&opts.env_file)?;
     let mcp_token =
         derive_regular_tunnel_mcp_token(&opts.env_file, opts.mcp_token_file.as_deref())?;
+    if mcp_token.starts_with("wc_pat_") {
+        return Err("Native Tunnel requires local Server Bootstrap provisioning. The legacy --mcp-token-file / WEBCODEX_TUNNEL_MCP_TOKEN_FILE PAT cannot register a Host. Remove that setting and configure the Server WEBCODEX_TOKEN in --env-file; the Bootstrap credential will not be forwarded to MCP.".into());
+    }
     let runtime_parent = opts
         .env_file
         .parent()
@@ -42,15 +45,15 @@ pub(crate) async fn run_server_tunnel(opts: ServerTunnelOptions) -> Result<(), S
         .to_path_buf();
     webcodex::run_regular_server_tunnel(webcodex::RegularServerTunnelOptions {
         local_server_url,
-        mcp_token,
+        bootstrap_token: mcp_token,
         runtime_parent,
     })
     .await
 }
 
-/// Use an explicitly selected local host credential without changing Server
-/// bootstrap authority or the Tunnel's control-plane API key. Selection alone
-/// grants no file-import trust; the Server must separately allow-list its ID.
+/// Read only the local provisioning credential. The native startup exchanges
+/// it at Bootstrap-only control; it is never forwarded to MCP. A legacy PAT
+/// file may still be parsed, but cannot satisfy that Bootstrap authentication.
 pub(crate) fn derive_regular_tunnel_mcp_token(
     env_file: &Path,
     explicit_file: Option<&Path>,

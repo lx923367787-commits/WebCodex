@@ -4,7 +4,8 @@ use super::super::input_schemas::session_execution_context_schema;
 use super::common::{
     array_schema, continuation_feedback_schema, evidence_history_schema, evidence_integrity_schema,
     handoff_brief_schema, job_lifecycle_summary_schema, nullable_schema, open_object_schema,
-    permission_summary_schema, schema_type, task_outcome_schema, wrapped_output_schema,
+    permission_summary_schema, review_evidence_schema, schema_type, task_outcome_schema,
+    wrapped_output_schema,
 };
 #[cfg(any(test, feature = "root-test-support"))]
 use super::common::{
@@ -1238,28 +1239,4 @@ fn work_on_project_output_schema() -> Value {
         ),
     ];
     wrapped_output_schema(output_properties)
-}
-
-fn review_evidence_schema(description: &str) -> Value {
-    json!({
-        "type": "object",
-        "description": description,
-        "additionalProperties": true,
-        "properties": {
-            "available": schema_type("boolean", "True when review evidence summary is available."),
-            "source": schema_type("string", "Review evidence source, usually session_ledger."),
-            "total": schema_type("integer", "Total successful review evidence tool calls counted."),
-            "read_only_inspection_count": schema_type("integer", "Successful read-only inspection tool calls counted."),
-            "search_count": schema_type("integer", "Successful search tool calls counted."),
-            "diff_review_count": schema_type("integer", "Successful diff review tool calls counted."),
-            "workspace_review_count": schema_type("integer", "Successful workspace review tool calls counted."),
-            "hygiene_review_count": schema_type("integer", "Successful hygiene review tool calls counted."),
-            "tools": {
-                "type": "array",
-                "maxItems": 20,
-                "description": "Bounded unique review evidence tool names only; never file contents, diff hunks, stdout/stderr, command text, tokens, secrets, or raw input payloads.",
-                "items": schema_type("string", "Review evidence tool name.")
-            }
-        }
-    })
 }

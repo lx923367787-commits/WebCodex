@@ -61,6 +61,7 @@ pub(crate) fn is_host_goal_control(tool: &str) -> bool {
             | "goal_plan_save"
             | "goal_confirm_plan"
             | "goal_bootstrap"
+            | "goal_handoff"
             | "goal_claim_node"
             | "goal_checkpoint"
             | "goal_check_node"
@@ -1212,6 +1213,27 @@ impl ToolRuntime {
                     .map_err(store_error)?;
                 Ok(self.host_goal_page(&result.goal, None, None, Some(result.replayed)))
             }
+            ToolCall::GoalHandoff {
+                goal_id,
+                action,
+                handoff_id,
+                attempt_id,
+                checkpoint_sequence,
+                package_sha256,
+                reason,
+            } => {
+                self.host_goal_handoff_action(
+                    &goal_id,
+                    &action,
+                    handoff_id.as_deref(),
+                    attempt_id.as_deref(),
+                    checkpoint_sequence,
+                    package_sha256.as_deref(),
+                    reason.as_deref(),
+                    auth,
+                )
+                .await
+            }
             ToolCall::GoalBootstrap {
                 goal_id,
                 project,
@@ -1240,7 +1262,21 @@ impl ToolRuntime {
                 } else {
                     "explicit_context_only"
                 };
-                Ok(self.host_goal_bootstrap_result(&goal, mode)?)
+                let response = self.host_goal_bootstrap_result(&goal, mode)?;
+                if activate {
+                    if let Some(context) = context::invocation_context() {
+                        self.host_goal_db()?
+                            .record_host_goal_resume_started(
+                                &principal,
+                                &goal.goal_id,
+                                goal.revision,
+                                &context,
+                                now(),
+                            )
+                            .map_err(store_error)?;
+                    }
+                }
+                Ok(response)
             }
             ToolCall::GoalClaimNode {
                 goal_id,
@@ -1602,6 +1638,26 @@ impl ToolRuntime {
         response: &mut ToolResult,
         auth: Option<&AuthContext>,
     ) -> Result<(), ToolResult> {
+        // Publication is an old-source write chain. Register before checking
+        // the durable state so a concurrent owner commit must either wait or
+        // make this source fail closed before any Runner write is started.
+        let _publication_lease =
+            context::lease_active_operation(&goal.goal_id, "handoff_publication");
+        let handoff = self
+            .host_goal_db()?
+            .read_host_goal_handoff(&goal.owner_key, &goal.goal_id)
+            .map_err(store_error)?
+            .ok_or_else(|| {
+                failure(
+                    "goal_handoff_missing",
+                    "The saved handoff record is missing",
+                )
+            })?;
+        if matches!(handoff.status.as_str(), "committed" | "failed")
+            || context::current_epoch().as_deref() != Some(handoff.source_context_epoch.as_str())
+        {
+            return Err(failure("goal_handoff_source_inactive", "The source may no longer publish handoff files; query authoritative handoff status"));
+        }
         if goal.task_directory.is_none() {
             return Ok(());
         }

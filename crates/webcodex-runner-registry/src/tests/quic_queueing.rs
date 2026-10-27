@@ -166,6 +166,7 @@ async fn registry_allows_quic_v1_stop_job_delivery_queueing() {
     let registry = RunnerRegistry::default();
     registry
         .register(current_runner_registration(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,

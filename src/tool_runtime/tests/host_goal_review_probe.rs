@@ -201,6 +201,7 @@ async fn host_goal_review_probe_unknown_recovers_original_job_then_requires_curr
         .runner_registry
         .register(crate::test_support::current_runner_registration(
             RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 client_id: CLIENT.into(),
                 runner_instance_id: INSTANCE.into(),
                 runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -218,6 +219,7 @@ async fn host_goal_review_probe_unknown_recovers_original_job_then_requires_curr
                     structured_validation_argv: true,
                     structured_script_payload: true,
                     structured_execution_jobs: true,
+                    agent_isolated_execution_v1: false,
                     ..Default::default()
                 },
                 policy: None,

@@ -21,6 +21,10 @@ impl std::error::Error for AuthError {}
 pub enum AuthKind {
     Bootstrap,
     ApiToken,
+    /// Model-only, revocable run credential. Never an account/OAuth identity.
+    ModelAgent,
+    /// Local native relay only; never a user, OAuth subject or Agent.
+    NativeHost,
     AgentToken,
     AccountCredential,
     OAuth2Token,
@@ -45,6 +49,9 @@ pub struct AuthContext {
     pub shared_key_hash: Option<String>,
     /// Stable, non-secret identity of the configured project credential.
     pub project_grant_id: Option<String>,
+    /// Service-verified logical Agent and revocable run; never parsed from tool arguments.
+    pub(crate) agent_run: Option<webcodex_store::VerifiedAgentRun>,
+    pub(crate) native_host: Option<webcodex_store::VerifiedNativeAgentHost>,
 }
 
 impl AuthContext {
@@ -61,6 +68,8 @@ impl AuthContext {
             allowed_client_id: None,
             shared_key_hash: None,
             project_grant_id: None,
+            agent_run: None,
+            native_host: None,
         }
     }
 
@@ -69,6 +78,8 @@ impl AuthContext {
     pub(crate) fn principal_kind(&self) -> &str {
         match self.kind {
             AuthKind::ApiToken => self.token_kind.as_deref().unwrap_or("api_token"),
+            AuthKind::ModelAgent => "isolated-agent",
+            AuthKind::NativeHost => "native-host",
             AuthKind::AgentToken => "agent_token",
             AuthKind::AccountCredential => "account_credential",
             AuthKind::OAuth2Token => "oauth2",
@@ -80,10 +91,27 @@ impl AuthContext {
     }
 
     pub fn is_admin(&self) -> bool {
+        if matches!(self.kind, AuthKind::ModelAgent | AuthKind::NativeHost)
+            || self.agent_run.is_some()
+            || self.native_host.is_some()
+        {
+            return false;
+        }
         self.is_bootstrap || self.scopes.iter().any(|scope| scope == SCOPE_ADMIN)
     }
 
     pub fn has_scope(&self, scope: &str) -> bool {
+        if self.is_native_host() {
+            return self.native_host.is_some()
+                && matches!(scope, "runtime:read" | "project:read" | "project:write");
+        }
+        if matches!(self.kind, AuthKind::ModelAgent | AuthKind::NativeHost)
+            || self.agent_run.is_some()
+            || self.native_host.is_some()
+        {
+            return self.agent_run.is_some()
+                && matches!(scope, "runtime:read" | "project:read" | "project:write");
+        }
         self.is_bootstrap
             || self
                 .scopes
@@ -92,7 +120,14 @@ impl AuthContext {
     }
 
     pub fn is_bootstrap(&self) -> bool {
-        self.is_bootstrap
+        !matches!(self.kind, AuthKind::ModelAgent | AuthKind::NativeHost)
+            && self.agent_run.is_none()
+            && self.native_host.is_none()
+            && self.is_bootstrap
+    }
+
+    pub(crate) fn is_native_host(&self) -> bool {
+        self.kind == AuthKind::NativeHost || self.native_host.is_some()
     }
 
     pub fn is_agent_token(&self) -> bool {
@@ -139,6 +174,12 @@ impl AuthContext {
     /// callers historically also treat an explicit `admin` role as
     /// authoritative.
     pub fn is_admin_caller(&self) -> bool {
+        if matches!(self.kind, AuthKind::ModelAgent | AuthKind::NativeHost)
+            || self.agent_run.is_some()
+            || self.native_host.is_some()
+        {
+            return false;
+        }
         self.is_bootstrap
             || self.role.as_deref() == Some("admin")
             || self.scopes.iter().any(|s| s == SCOPE_ADMIN)
@@ -147,7 +188,7 @@ impl AuthContext {
     /// Resolve the authenticated caller's username, if any. Bootstrap callers
     /// do not have a username.
     pub fn caller_username(&self) -> Option<&str> {
-        if self.is_bootstrap {
+        if self.is_bootstrap || self.is_native_host() {
             None
         } else {
             self.username.as_deref()

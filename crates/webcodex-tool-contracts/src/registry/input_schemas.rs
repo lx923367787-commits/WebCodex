@@ -25,8 +25,16 @@ mod runner_config;
 mod sessions;
 mod skills;
 mod ssh_resources;
+pub(crate) mod team_task;
 mod text_edits;
 mod validation;
+
+pub use team_task::{
+    team_agent_observe_input_schema, team_agent_start_input_schema, team_cli_observe_input_schema,
+    team_cli_start_input_schema, team_plan_cancel_input_schema, team_plan_list_input_schema,
+    team_plan_read_input_schema, team_plan_register_input_schema, team_policy_get_input_schema,
+    team_policy_save_input_schema,
+};
 
 pub use agent_tasks::{
     assign_agent_task_input_schema, complete_agent_task_attempt_input_schema,
@@ -106,8 +114,8 @@ pub use goals::{
 pub use host_goals::{
     context_epoch_input_schema, goal_bootstrap_input_schema, goal_check_node_input_schema,
     goal_checkpoint_input_schema, goal_claim_node_input_schema, goal_confirm_plan_input_schema,
-    goal_context_input_schema, goal_mode_start_input_schema, goal_plan_save_input_schema,
-    TOOL_CALL_CONTEXT_EPOCH_FIELD, TOOL_CALL_GOAL_CONTEXT_FIELD,
+    goal_context_input_schema, goal_handoff_input_schema, goal_mode_start_input_schema,
+    goal_plan_save_input_schema, TOOL_CALL_CONTEXT_EPOCH_FIELD, TOOL_CALL_GOAL_CONTEXT_FIELD,
 };
 pub use hygiene::workspace_hygiene_check_input_schema;
 pub use jobs::{

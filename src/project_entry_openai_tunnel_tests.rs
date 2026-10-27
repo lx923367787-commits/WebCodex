@@ -84,12 +84,36 @@ fn runtime_command_inherits_only_tunnel_authority_not_server_bootstrap_or_openai
         Path::new("authorization"),
     );
 
+    let args = command
+        .as_std()
+        .get_args()
+        .map(|v| v.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(args
+        .windows(2)
+        .any(|a| a == ["--mcp.extra-headers", "Authorization: file:authorization"]));
+    assert!(!args
+        .iter()
+        .any(|a| a.contains("Bearer ") || a.contains("wc_nh_") || a.contains("wc_boot_")));
     let env = command.as_std().get_envs().collect::<Vec<_>>();
     for key in ["WEBCODEX_TOKEN", "OPENAI_ADMIN_KEY", "OPENAI_API_KEY"] {
-        assert!(env
-            .iter()
-            .any(|(name, value)| { name.to_str() == Some(key) && value.is_none() }));
+        assert!(env.iter().all(|(name, _)| name.to_str() != Some(key)));
     }
+    for forbidden in [
+        "TUNNEL_CLIENT_CONFIG",
+        "TUNNEL_CLIENT_PROFILE",
+        "TUNNEL_CLIENT_PROFILE_FILE",
+        "MCP_COMMAND",
+        "MCP_EXTRA_HEADERS",
+        "CA_BUNDLE",
+        "OPEN_WEB_UI",
+    ] {
+        assert!(env.iter().all(|(name, _)| name.to_str() != Some(forbidden)));
+    }
+    assert!(env.iter().any(
+        |(name, value)| name.to_str() == Some("CONTROL_PLANE_BASE_URL")
+            && value.and_then(|v| v.to_str()) == Some("https://api.openai.com")
+    ));
     assert!(env.iter().any(|(name, value)| {
         name.to_str() == Some("CONTROL_PLANE_TUNNEL_ID")
             && value.and_then(|value| value.to_str()) == Some(prerequisites.tunnel_id.as_str())

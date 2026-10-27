@@ -5312,7 +5312,10 @@ name = "webcodex-process"
 version = "0.4.1"
 dependencies = [
  "libc",
+ "serde",
  "tempfile",
+ "tokio",
+ "url",
  "windows-sys 0.61.2",
 ]
 

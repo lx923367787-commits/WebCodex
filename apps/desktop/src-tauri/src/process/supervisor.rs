@@ -62,6 +62,7 @@ pub struct ProcessSnapshot {
 
 struct ManagedProcess {
     child: ManagedChild,
+    owned_generation: u64,
     phase: ProcessPhase,
     exit_code: Option<i32>,
     logs: Arc<Mutex<VecDeque<String>>>,
@@ -233,6 +234,7 @@ fn machine_event_is_terminal(value: &Value) -> bool {
 pub struct ProcessSupervisor {
     processes: HashMap<ProcessKind, ManagedProcess>,
     activity: ActivityLog,
+    next_owned_generation: u64,
 }
 
 impl ProcessSupervisor {
@@ -240,6 +242,7 @@ impl ProcessSupervisor {
         Self {
             processes: HashMap::new(),
             activity,
+            next_owned_generation: 0,
         }
     }
 
@@ -280,6 +283,14 @@ impl ProcessSupervisor {
         // silently break descendants away from the Desktop's outer Job to avoid
         // nested-Job incompatibilities (notably Git for Windows/MSYS) while
         // preserving exact ownership at both lifecycle layers.
+        let owned_generation = self.next_owned_generation.checked_add(1).ok_or_else(|| {
+            DesktopError::new(
+                "process_generation_exhausted",
+                "Owned process generation exhausted",
+                "Restart Desktop.",
+            )
+        })?;
+        self.next_owned_generation = owned_generation;
         let silent_child_breakaway = kind == ProcessKind::LocalRunner;
         let mut child = ManagedChild::spawn_with_options(
             &mut command,
@@ -334,6 +345,7 @@ impl ProcessSupervisor {
             kind,
             ManagedProcess {
                 child,
+                owned_generation,
                 phase: ProcessPhase::Starting,
                 exit_code: None,
                 logs,
@@ -384,6 +396,17 @@ impl ProcessSupervisor {
                 }
             }
         }
+    }
+
+    /// A Desktop-owned handle generation, never a Server Runner instance ID.
+    pub(crate) fn owned_process_identity(&mut self, kind: ProcessKind) -> Option<(u32, u64)> {
+        self.refresh();
+        let process = self.processes.get(&kind)?;
+        matches!(
+            process.phase,
+            ProcessPhase::Starting | ProcessPhase::Running
+        )
+        .then(|| (process.child.id(), process.owned_generation))
     }
 
     pub(crate) fn latest_machine_lifecycle(&self, kind: ProcessKind) -> Option<Value> {

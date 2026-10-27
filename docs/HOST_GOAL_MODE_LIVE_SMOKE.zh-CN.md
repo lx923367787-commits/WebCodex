@@ -1,5 +1,7 @@
 # 网页目标模式：历史安装部署与在线烟测
 
+> 发布说明：本文的实例标识和本机用户目录已脱敏；验收日期、结论与构建指纹保留。
+
 > 历史记录：以下测试、计数和构建指纹仅对应记录当日，不是当前操作手册或当前安装状态。2026-09-29 源码新 epoch 默认值为 **600,000/800,000**，已有 epoch 保留原策略。当前流程见[Host Goal 操作说明](HOST_GOAL_MODE.zh-CN.md)。
 
 时间：2026-09-22 20:40 起（北京时间）。用户授权更新当前安装、重启并测试。
@@ -18,13 +20,13 @@
 
 - 旧 Server：`E:\wbecodex\anzhuang\WebCodex Desktop\webcodex-runtime\backups\host-goal-20260922-204032\webcodex-server.exe`。
 - 部署清单位于同目录的 `deployment.json`。
-- 停机数据库及状态备份：`C:\Users\Administrator\AppData\Local\dev.webcodex.desktop\runtime\local\data\backups\before-host-goal-20260922-204032`。副本保留原文件 ACL。
+- 停机数据库及状态备份：`C:\Users\<WindowsUser>\AppData\Local\dev.webcodex.desktop\runtime\local\data\backups\before-host-goal-20260922-204032`。副本保留原文件 ACL。
 
 未修改 Runner / CLI 二进制，没有版本发布、Git 提交或推送。
 
 ## 在线验证
 
-测试目标：`hgoal_8afd96f8348f4f3e9f30c53a5f4476bc`，属于已授权的 `wbecodex` 项目。新模式部署前，该身份没有当前 Host Goal。
+测试目标：`hgoal_<generated-id>`，属于已授权的 `wbecodex` 项目。新模式部署前，该身份没有当前 Host Goal。
 
 | 检查 | 实际结果 |
 | --- | --- |
@@ -43,7 +45,7 @@
 
 独立客户端使用当前安装已配置的 MCP 用户凭据访问同一 Server 的 loopback `/mcp`；凭据仅用于本机请求，没有写入测试脚本、报告或工具输出。该检查证明不同客户端可从本地存储恢复任务，不冒称自动打开了新的 ChatGPT 网页。
 
-计划目录：`C:\Users\Administrator\AppData\Local\dev.webcodex.desktop\runtime\local\data\goals\hgoal_8afd96f8348f4f3e9f30c53a5f4476bc\plans\v1`。
+计划目录：`C:\Users\<WindowsUser>\AppData\Local\dev.webcodex.desktop\runtime\local\data\goals\hgoal_<generated-id>\plans\v1`。
 
 - 确认所绑定的计划哈希：`13b209ba8312d25b7b8c0f70c0b48ab2f26944cd3c7f36e3e01f0e062fd9272e`。
 - `plan.json` 文件 SHA-256：`79EC5DB48B1AB8018A1C4E70CEAD553F7BD7874325A9DEA3F6A9DD53A2F0642B`。

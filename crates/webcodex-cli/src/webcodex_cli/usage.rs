@@ -95,6 +95,7 @@ A newly added project is loaded after that Runner restarts; adding the same proj
 Advanced: project_registry_dir is the Runner project registry directory, not a workspace root; allowed_roots remains the filesystem authority boundary.\n\n\
 Options:\n\
   --config PATH              Runner configuration created by login/init\n\
+  --expected-project-path PATH  Require the previously observed canonical project path\n\
   --json                     Print machine-readable output\n\
   -h, --help                 Print help and exit\n"
 }
@@ -102,10 +103,11 @@ Options:\n\
 pub(crate) fn project_activate_usage() -> &'static str {
     "Usage: webcodex project activate --config PATH --user-token-file PATH <PROJECT> [OPTIONS]\n\n\
 Activate one explicitly selected local project on the existing Runner.\n\
-The command preserves Runner identity, grants only the canonical exact project root, hot-reloads policy with generation CAS, and asks that Runner to resolve/register the Project.\n\n\
+The command preserves Runner identity and reuses an existing allowed root for any descendant project. Otherwise it grants only the selected canonical root. It hot-reloads policy with generation CAS when needed and asks that Runner to resolve/register the Project.\n\n\
 Options:\n\
   --config PATH              Active Runner configuration created by login/init\n\
   --user-token-file PATH     Existing user API token for operator Server calls\n\
+  --expected-project-path PATH  Require the previously observed canonical project path\n\
   --json                     Print machine-readable output\n\
   -h, --help                 Print help and exit\n"
 }

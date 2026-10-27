@@ -15,7 +15,7 @@
 | 隔离进程端到端 | 7 个脚本断言通过，实际执行 2 轮 | 真实 Server + Runner + ACP stdio 子进程、原生命令检查、独立审稿调用；ACP 模型由确定性 fixture 提供 |
 | 真实 Codex 模型 | 5 个脚本断言通过，实际执行 1 轮 | 真实执行模型生成文件，文件存在、内容、原生命令和独立模型审稿四项条件全部通过；通过后再次修改文件会取消交付就绪 |
 
-运行时的本地证据为 `../.local/reports/goal-mode/runtime-tests.txt`。最终两轮隔离进程实验的报告为 `../.local/reports/goal-mode/goal-e2e-20260921T102112Z-7614ed5e.json`，真实模型报告为 `../.local/reports/goal-mode/goal-e2e-20260921T102556Z-1f11feb7.json`。以上路径相对于源码仓库根目录，指向仓库外的本地报告，不作为 GitHub 可点击链接，也不随源码分发；跨机器复核应重新运行并记录报告。
+运行时的本地证据为 [runtime-tests.txt](../../.local/reports/goal-mode/runtime-tests.txt)。最终两轮隔离进程实验的报告为 [fixture E2E](../../.local/reports/goal-mode/goal-e2e-20260921T102112Z-7614ed5e.json)，真实模型报告为 [live E2E](../../.local/reports/goal-mode/goal-e2e-20260921T102556Z-1f11feb7.json)。这些报告保存在仓库外的本地 `.local/reports`，不随源码分发；跨机器复核应重新运行并记录报告。
 
 该 E2E 报告包含 `result_exists`、`result_ready`、`result_command`、`result_review` 四项验收条件，确认首轮不合格、第二轮通过。清理记录中 `cleanup.tree_empty`、Server/Runner 的 `exited` 及 `temporary_profile_removed` 均为 `true`。报告中的“7 个断言”与下表原始“7 条验收要求”不是一一对应关系；取消、时间预算和重启等分支另由专项用例覆盖。
 

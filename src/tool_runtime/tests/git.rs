@@ -489,6 +489,7 @@ async fn git_restore_stays_sync_on_structured_job_capable_runner() {
             async_jobs: true,
             structured_process_argv: true,
             structured_execution_jobs: true,
+            agent_isolated_execution_v1: false,
             ..Default::default()
         },
     )

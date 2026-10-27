@@ -3308,6 +3308,7 @@ mod tests {
         let auth = crate::auth::shared_key_context("runtime-console-diagnostics");
         let mut registration =
             crate::test_support::current_runner_registration(RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 client_id: "diagnostic-runner".to_string(),
                 runner_instance_id: "diagnostic-instance".to_string(),
                 runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -3405,6 +3406,7 @@ mod tests {
             .runner_registry
             .register_with_auth(
                 RunnerRegisterRequest {
+                    agent_execution_resources: Vec::new(),
                     process_started_at: None,
                     build: None,
                     job_concurrency_limit: None,

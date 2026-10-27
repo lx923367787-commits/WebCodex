@@ -9,10 +9,73 @@ use std::sync::Mutex;
 mod accounts;
 mod activity;
 mod admin_project_lifecycle;
+mod native_agent_host;
+mod native_workspaces;
+pub use native_agent_host::{
+    NativeAgentHostGrant, VerifiedNativeAgentHost, NATIVE_AGENT_HOST_TOKEN_PREFIX,
+};
+pub use native_workspaces::{
+    AgentProjectFilesGrant, NativeWorkspace, NativeWorkspaceCatalog, NativeWorkspaceFolder,
+};
+pub(crate) mod agent_cli_delivery;
+pub(crate) mod agent_execution_close;
+pub use agent_cli_delivery::{
+    AgentCliDeliveryReference, AgentCliDeliveryRejectionResult, AgentCliDeliveryReviewReference,
+    AgentCliDeliveryReviewResult, AgentCliDeliveryStopEvidence, AgentCliDeliveryView,
+    AgentCliReviewDecision, AuthenticatedAgentCliDeliverySnapshot,
+};
+#[cfg(test)]
+mod agent_cli_delivery_tests;
+pub(crate) mod agent_host_dispatch;
+pub use agent_host_dispatch::{
+    AgentCliFallbackReservation, AgentHostDispatchClaim, AgentHostDispatchStatus,
+    AgentHostLaunchMaterial, AgentHostQueueBinding, AgentHostQueueKind,
+};
+mod agent_isolation;
+pub use agent_execution_close::{
+    AgentExecutionClosePlan, AgentExecutionCloseProgress, AuthenticatedAgentExecutionCloseReceipt,
+};
+#[cfg(test)]
+mod agent_execution_close_tests;
+mod agent_meeting;
 mod agent_task;
+pub use agent_isolation::{
+    AgentAssignmentOperation, AgentEnrollmentAuthority, AgentEnrollmentClaim, AgentEnrollmentGrant,
+    AgentEnrollmentInput, AgentEnrollmentIssued, AgentEnrollmentPolicy, AgentEnrollmentProjection,
+    AgentEnrollmentPurpose, AgentEnrollmentSnapshot, AgentEnrollmentStatus,
+    AgentHostManagerBinding, AgentIsolationError, AgentRunGrant, IsolatedAgentIdentity,
+    NewAgentEnrollment, VerifiedAgentRun,
+};
+pub use agent_meeting::{
+    AgentMeetingArtifact, AgentMeetingArtifactTarget, AgentMeetingEntry, AgentMeetingKind,
+    AgentMeetingPage, AgentMeetingRoom, NewAgentMeetingEntry,
+};
+#[cfg(test)]
+mod agent_isolation_tests;
+#[cfg(test)]
+mod agent_meeting_tests;
 mod agent_wake;
 mod audit;
+mod cli_fallback;
 mod communication;
+mod team_agent;
+mod team_completion;
+pub mod team_decision;
+#[cfg(test)]
+mod team_decision_tests;
+pub mod team_task;
+pub use cli_fallback::{
+    CliFallbackClaim, CliFallbackObservation, CliFallbackRecord, CliFallbackResolution,
+    CliFallbackState,
+};
+pub use team_agent::{
+    TeamAgentClaim, TeamAgentObservation, TeamAgentRecord, TeamAgentReservation,
+    TeamAgentResolution, TeamAgentState,
+};
+pub use team_completion::{TeamCompletion, TeamMemberCompletion};
+pub use team_task::*;
+#[cfg(test)]
+mod cli_fallback_tests;
 mod execution_model;
 mod executions;
 mod goal;
@@ -28,6 +91,7 @@ mod window_activity;
 
 pub use self::admin_project_lifecycle::{AdminProjectAudit, AdminProjectIdempotencyRecord};
 pub use self::agent_task::{
+    AgentCliWorkerTaskSnapshot, AgentPublicTaskExecution, AgentPublicTaskMutation,
     AgentTaskAttemptCompletionMutation, AgentTaskAttemptHeartbeatMutation, AgentTaskAttemptRecord,
     AgentTaskAttemptStartMutation, AgentTaskAttemptState, AgentTaskCodingRunBindingIntent,
     AgentTaskCodingRunBindingRecord, AgentTaskCodingRunDispatchClaim,
@@ -65,7 +129,8 @@ pub use self::execution_model::{
 };
 pub use self::goal::{GoalMutation, GoalStoreError};
 pub use self::host_goal::{
-    HostGoalCheckpointAction, HostGoalClaimMutation, HostGoalHandoffSnapshot, HostGoalMutation,
+    AgentHandoffClaimGrant, AgentHostWindowBinding, HostGoalCheckpointAction,
+    HostGoalClaimMutation, HostGoalHandoff, HostGoalHandoffSnapshot, HostGoalMutation,
     HostGoalOperationMutation, HostGoalPlanMutation,
 };
 pub use self::host_goal_context::{HostContextMeter, HostContextState, HostGoalWindowBinding};

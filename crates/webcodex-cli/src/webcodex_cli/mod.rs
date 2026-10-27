@@ -3,6 +3,7 @@ pub(crate) mod connections;
 pub(crate) mod env;
 pub(crate) mod http;
 pub(crate) mod login;
+pub(crate) mod office;
 pub(crate) mod ops;
 pub(crate) mod output;
 pub(crate) mod pairing;
@@ -149,3 +150,5 @@ mod shell_command_tests {
         assert_eq!(shell_quote_arg("one;two"), "'one;two'");
     }
 }
+
+pub(crate) mod workspaces;

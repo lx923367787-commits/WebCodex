@@ -1,5 +1,7 @@
 # Quick Trial
 
+This trial does not install model CLIs or provide an account. If you add an external executor, install it and sign in on the Runner computer before configuring it; see [tools and accounts](EXTERNAL_TOOLS.md).
+
 [English](QUICK_START.md) | [简体中文](QUICK_START.zh-CN.md)
 
 This page does one thing: use `webcodex share` to temporarily expose one local repository so you can decide within a few minutes whether WebCodex fits your workflow. This is a **temporary, single-project, restricted experience** that ends when the command exits.

@@ -49,6 +49,15 @@ static NEXT_STATE_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 #[path = "project_management.rs"]
 mod project_management;
 
+#[path = "ai_office.rs"]
+pub(crate) mod ai_office;
+
+#[path = "team_bridge.rs"]
+pub(crate) mod team_bridge;
+
+#[path = "host_control.rs"]
+mod host_control;
+
 type SharedSupervisor = Arc<Mutex<ProcessSupervisor>>;
 
 #[derive(Debug, Clone)]
@@ -65,6 +74,7 @@ pub struct AppState {
     operations: OperationController,
     shutdown_signal: CancellationSignal,
     shutdown_started: AtomicBool,
+    host_control: Arc<Mutex<host_control::HostControlState>>,
 }
 
 impl AppState {
@@ -73,6 +83,7 @@ impl AppState {
         let published = Arc::clone(&core.published);
         let supervisor = Arc::clone(&core.supervisor);
         let activity = core.activity.clone();
+        let host_control = Arc::clone(&core.host_control);
         Ok(Self {
             core: Mutex::new(Some(core)),
             published,
@@ -81,6 +92,7 @@ impl AppState {
             activity,
             shutdown_signal: CancellationSignal::new(),
             shutdown_started: AtomicBool::new(false),
+            host_control,
         })
     }
 
@@ -96,10 +108,11 @@ impl AppState {
                     supervisor
                         .snapshot(ProcessKind::RegularTunnel)
                         .is_some_and(|process| {
-                            matches!(
-                                process.phase,
-                                ProcessPhase::Starting | ProcessPhase::Running
-                            )
+                            process.owned_by_desktop
+                                && matches!(
+                                    process.phase,
+                                    ProcessPhase::Starting | ProcessPhase::Running
+                                )
                         });
                 if let Some(exposure) = regular_tunnel_exposure(
                     &mut snapshot.regular_tunnel,
@@ -122,6 +135,7 @@ impl AppState {
                 if let Some(tunnel) = snapshot.regular_tunnel.as_mut() {
                     tunnel.status = RegularTunnelStatus::Starting;
                     tunnel.ready_for_chatgpt = false;
+                    tunnel.host_id = None;
                 }
                 snapshot.readiness = aggregate_readiness(
                     snapshot.readiness.server.clone(),
@@ -144,6 +158,34 @@ impl AppState {
 
     pub fn activity(&self) -> Vec<crate::activity::ActivityEntry> {
         self.activity.snapshot()
+    }
+
+    /// Observe the existing owned process even with no window or UI polling.
+    /// Operations retain exclusive mutation ownership; their completion makes
+    /// the same observation before returning the core to this task.
+    pub async fn observe_regular_tunnel_host(&self) {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = self.shutdown_signal.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            if self.operations.current().is_some() {
+                continue;
+            }
+            let mut slot = self.core.lock().await;
+            if self.operations.current().is_some() || self.shutdown_signal.is_cancelled() {
+                continue;
+            }
+            if let Some(core) = slot.as_mut() {
+                // Persistence failures publish a visible error and stop the
+                // owned Tunnel inside get_state; they are not reported as saved.
+                let _ = core.get_state().await;
+            }
+            drop(slot);
+            self.maintain_host_control_owner().await;
+        }
     }
 
     pub async fn inspect_project(&self, path: &str) -> DesktopResult<ProjectSelection> {
@@ -357,12 +399,16 @@ impl AppState {
             return;
         }
         self.shutdown_signal.cancel();
+        self.revoke_host_control().await;
         self.operations.cancel_active_for_shutdown();
         self.supervisor.lock().await.stop_all().await;
         let _ = self
             .operations
             .wait_until_idle(tokio::time::Instant::now() + SHUTDOWN_OPERATION_WAIT)
             .await;
+        if let Some(core) = self.core.lock().await.as_mut() {
+            let _ = core.get_state().await;
+        }
     }
 
     async fn begin_operation(
@@ -379,6 +425,7 @@ impl AppState {
             return Err(cancelled_error());
         }
         let operation = self.operations.admit(kind, cancellable)?;
+        self.pause_host_control("desktop_operation_busy").await;
         let cancellation =
             CancellationContext::new(operation.cancellation.clone(), self.shutdown_signal.clone());
         let baseline = self.capture_process_baseline().await;
@@ -418,6 +465,9 @@ impl AppState {
             let cleanup = self.cleanup_new_owned_processes(&baseline).await;
             core.reconcile_after_operation_failure(operation.kind, &baseline, cleanup, cancelled);
             core.publish_snapshot();
+        }
+        if let Err(error) = core.get_state().await {
+            result = Err(error);
         }
         {
             let mut slot = self.core.lock().await;
@@ -572,6 +622,7 @@ pub struct DesktopCore {
     supervisor: SharedSupervisor,
     activity: ActivityLog,
     published: Arc<RwLock<DesktopStateSnapshot>>,
+    host_control: Arc<Mutex<host_control::HostControlState>>,
 }
 
 impl DesktopCore {
@@ -615,6 +666,7 @@ impl DesktopCore {
             supervisor,
             activity,
             published,
+            host_control: Arc::new(Mutex::new(host_control::HostControlState::default())),
         })
     }
 
@@ -646,7 +698,64 @@ impl DesktopCore {
                 );
             }
         }
+        if sync_native_host_id(&mut self.config, self.snapshot.regular_tunnel.as_ref()) {
+            self.save_native_host_state().await?;
+        }
         Ok(self.publish_snapshot())
+    }
+
+    async fn save_native_host_state(&mut self) -> DesktopResult<()> {
+        if let Err(cause) = self.save_config().await {
+            self.stop_process(ProcessKind::RegularTunnel).await;
+            sync_native_host_id(&mut self.config, None);
+            if let Some(tunnel) = self.snapshot.regular_tunnel.as_mut() {
+                tunnel.host_id = None;
+                tunnel.status = RegularTunnelStatus::Error;
+                tunnel.ready_for_chatgpt = false;
+            }
+            self.snapshot.readiness = aggregate_readiness(
+                self.snapshot.readiness.server.clone(),
+                self.snapshot.readiness.runner.clone(),
+                ExposureReadiness::Error,
+                self.snapshot.readiness.project.clone(),
+            );
+            self.snapshot.readiness.next_action = Some(
+                "Host state could not be saved; existing disk metadata may be stale. Restore app-data access, then restart the Tunnel.".into(),
+            );
+            self.snapshot.readiness.next_action_kind =
+                Some(ReadinessNextActionKind::RestartSecureTunnel);
+            self.activity.push(
+                ActivityEventKind::OperationFailed,
+                "native_host_state",
+                ActivityLevel::Error,
+                "Host state persistence failed; the owned Tunnel was stopped. Existing disk metadata may be stale.",
+            );
+            self.publish_snapshot();
+            return Err(DesktopError::new(
+                "native_host_state_persist_failed",
+                "Desktop could not persist Host identity and stopped its Tunnel",
+                "Existing disk metadata may be stale. Restore app-data access before restarting the Tunnel.",
+            )
+            .with_details(serde_json::json!({"persisted":false,"cause":cause.code})));
+        }
+        Ok(())
+    }
+
+    async fn clear_native_host_for_runtime_change(
+        &mut self,
+        server_url: &str,
+        runner_client_id: Option<&str>,
+    ) -> DesktopResult<()> {
+        if self.config.runtime.as_ref().is_some_and(|runtime| {
+            runtime.server_url != server_url
+                || runtime.runner_client_id.as_deref() != runner_client_id
+        }) {
+            self.stop_process(ProcessKind::RegularTunnel).await;
+            self.snapshot.regular_tunnel = None;
+            sync_native_host_id(&mut self.config, None);
+            self.save_native_host_state().await?;
+        }
+        Ok(())
     }
 
     fn chatgpt_activity_probe(&self) -> Option<ChatGptActivityProbe> {
@@ -1071,7 +1180,13 @@ impl DesktopCore {
 
         let identity = self
             .adapter
-            .activate_connection_project(&identity, &runner_client_id, &project, cancellation)
+            .activate_connection_project(
+                &identity,
+                &runner_client_id,
+                project_path,
+                &project,
+                cancellation,
+            )
             .await?;
         self.wait_for_project(&identity, cancellation).await?;
         cancellation.check()?;
@@ -1153,6 +1268,10 @@ impl DesktopCore {
                 project
             }
         };
+        let requested_path = project_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .unwrap_or(&project.path);
         cancellation.check()?;
         let binaries = self.adapter.ensure_binaries(cancellation).await?.clone();
         self.snapshot.binaries = Some(binaries.info());
@@ -1207,6 +1326,11 @@ impl DesktopCore {
         };
         let reusable_identity = identity_from_config(&self.config)
             .filter(|identity| same_server(&identity.server_url, &server_url));
+        // Runtime status is a Human operator route. A saved local connection
+        // must probe with its user token instead of the Server bootstrap token.
+        let readiness_token_file = reusable_identity
+            .as_ref()
+            .map(|identity| identity.user_token_file.clone());
         let saved_runner_client_id = stored_runner_client_id(&self.config);
         cancellation.check()?;
 
@@ -1216,7 +1340,7 @@ impl DesktopCore {
             .server_status_until(
                 Some(&server_url),
                 Some(&env_file),
-                None,
+                readiness_token_file.as_deref(),
                 cancellation,
                 server_deadline,
             )
@@ -1241,7 +1365,7 @@ impl DesktopCore {
         self.wait_for_server(
             &server_url,
             Some(&env_file),
-            None,
+            readiness_token_file.as_deref(),
             cancellation,
             server_deadline,
             server_started,
@@ -1332,7 +1456,7 @@ impl DesktopCore {
             self.wait_for_server(
                 &server_url,
                 Some(&env_file),
-                None,
+                Some(&identity.user_token_file),
                 cancellation,
                 deadline,
                 true,
@@ -1401,7 +1525,13 @@ impl DesktopCore {
             self.publish_snapshot();
             identity = match self
                 .adapter
-                .activate_project(&identity, &runner_client_id, &project, cancellation)
+                .activate_project(
+                    &identity,
+                    &runner_client_id,
+                    requested_path,
+                    &project,
+                    cancellation,
+                )
                 .await
             {
                 Ok(identity) => identity,
@@ -1426,6 +1556,7 @@ impl DesktopCore {
                         .legacy_register_project(
                             &identity,
                             &runner_client_id,
+                            requested_path,
                             &project,
                             cancellation,
                         )
@@ -1487,6 +1618,8 @@ impl DesktopCore {
         // Commit the visible/saved project only after the new Runner and exact
         // project have both reached readiness. Until this point the previous
         // stored project remains the recovery authority.
+        self.clear_native_host_for_runtime_change(&identity.server_url, Some(&runner_client_id))
+            .await?;
         let previous_config = self.config.clone();
         let mut committed_project = project.clone();
         committed_project.runtime_project_id = Some(identity.runtime_project_id.clone());
@@ -1494,6 +1627,7 @@ impl DesktopCore {
         self.config.project = Some(committed_project.clone());
         self.config.runtime_autostart = Some(true);
         self.config.runtime = Some(StoredRuntime {
+            native_host_id: None,
             server_url: identity.server_url.clone(),
             server_env_file: Some(env_file.clone()),
             runner_config: Some(identity.runner_config.clone()),
@@ -1740,7 +1874,13 @@ impl DesktopCore {
             .await?;
         identity = match self
             .adapter
-            .activate_project(&identity, &runner_client_id, &project, cancellation)
+            .activate_project(
+                &identity,
+                &runner_client_id,
+                project_path,
+                &project,
+                cancellation,
+            )
             .await
         {
             Ok(identity) => identity,
@@ -1761,7 +1901,13 @@ impl DesktopCore {
                 }
                 let legacy_identity = self
                     .adapter
-                    .legacy_register_project(&identity, &runner_client_id, &project, cancellation)
+                    .legacy_register_project(
+                        &identity,
+                        &runner_client_id,
+                        project_path,
+                        &project,
+                        cancellation,
+                    )
                     .await?;
                 let legacy_deadline = Deadline::after(RUNNER_READY_TIMEOUT);
                 self.stop_process_until(ProcessKind::LocalRunner, legacy_deadline)
@@ -2105,6 +2251,13 @@ impl DesktopCore {
             .adapter
             .regular_tunnel_command(&env_file, tunnel_proxy.url.as_deref())?;
         self.tunnel_config.apply_to_command(&mut command)?;
+        // Clear any previous on-disk identity before starting a new owner. A
+        // failed save blocks startup even if the in-memory ID is already None.
+        sync_native_host_id(&mut self.config, None);
+        if let Some(tunnel) = self.snapshot.regular_tunnel.as_mut() {
+            tunnel.host_id = None;
+        }
+        self.save_native_host_state().await?;
         if deadline.is_elapsed() {
             return Err(readiness_timeout_error(
                 "tunnel_unavailable",
@@ -2117,6 +2270,7 @@ impl DesktopCore {
             .await?
             .expect("regular tunnel machine stdout requested");
         self.snapshot.regular_tunnel = Some(RegularTunnelState {
+            host_id: None,
             provider: "openai".to_string(),
             status: RegularTunnelStatus::Starting,
             clipboard_state: "pending".to_string(),
@@ -2179,6 +2333,7 @@ impl DesktopCore {
                 )
                 .await;
                 self.snapshot.regular_tunnel = Some(RegularTunnelState {
+                    host_id: None,
                     provider: "openai".to_string(),
                     status: RegularTunnelStatus::Error,
                     clipboard_state: "unavailable".to_string(),
@@ -2236,6 +2391,7 @@ impl DesktopCore {
         let id_available = self.tunnel_config.snapshot().effective_tunnel_id.is_some();
         let handoff_available = event.connection.clipboard_state == "copied" || id_available;
         self.snapshot.regular_tunnel = Some(RegularTunnelState {
+            host_id: event.host_id,
             provider: event.provider,
             status: RegularTunnelStatus::Ready,
             clipboard_state: event.connection.clipboard_state,
@@ -2243,7 +2399,8 @@ impl DesktopCore {
             ready_for_chatgpt: (event.ready_for_chatgpt || id_available) && handoff_available,
         });
         self.config.preferred_connection = Some(RegularConnectionPreference::OpenAiTunnel);
-        self.save_config().await?;
+        sync_native_host_id(&mut self.config, self.snapshot.regular_tunnel.as_ref());
+        self.save_native_host_state().await?;
         // The daemon and clipboard handoff prove only Desktop-managed Tunnel
         // readiness. Actual ChatGPT use is observed independently from canonical
         // Window activity and projected through `chatgpt_activity` on refresh.
@@ -2278,7 +2435,8 @@ impl DesktopCore {
         self.snapshot.regular_tunnel = None;
         self.snapshot.topology = self.config.topology.clone();
         self.config.preferred_connection = Some(RegularConnectionPreference::NoChatGpt);
-        self.save_config().await?;
+        sync_native_host_id(&mut self.config, None);
+        self.save_native_host_state().await?;
         self.activity.push(
             ActivityEventKind::RegularTunnelStopped,
             "regular_tunnel",
@@ -2300,7 +2458,8 @@ impl DesktopCore {
         self.snapshot.regular_tunnel = None;
         self.stop_process(ProcessKind::LocalRunner).await;
         self.config.runtime_autostart = Some(false);
-        self.save_config().await?;
+        sync_native_host_id(&mut self.config, None);
+        self.save_native_host_state().await?;
         self.stop_process(ProcessKind::LocalServer).await;
         self.snapshot.topology = self.config.topology.clone();
         let exposure = exposure_readiness(self.config.topology.as_ref());
@@ -2332,10 +2491,11 @@ impl DesktopCore {
         let active = supervisor
             .snapshot(ProcessKind::RegularTunnel)
             .is_some_and(|process| {
-                matches!(
-                    process.phase,
-                    ProcessPhase::Starting | ProcessPhase::Running
-                )
+                process.owned_by_desktop
+                    && matches!(
+                        process.phase,
+                        ProcessPhase::Starting | ProcessPhase::Running
+                    )
             });
         (
             active,
@@ -2355,16 +2515,57 @@ impl DesktopCore {
         cancellation: &CancellationContext,
     ) -> DesktopResult<Option<MachineEventReceiver>> {
         cancellation.check()?;
+        let config_change = if kind == ProcessKind::LocalRunner {
+            self.host_control.lock().await.revoke();
+            let control = host_control::carrier_path(&self.data_dir);
+            let directory = control.parent().expect("private control parent");
+            crate::bundled_tools::prepare_host_control_directory(directory)?;
+            if control.exists() {
+                return Err(DesktopError::new(
+                    "host_control_carrier_conflict",
+                    "An unconfirmed Host control carrier already exists",
+                    "Recover the previous Desktop owner before starting this Runner.",
+                ));
+            }
+            let arguments: Vec<_> = command.get_args().collect();
+            let configs: Vec<_> = arguments
+                .windows(2)
+                .filter(|pair| pair[0].to_str() == Some("--config"))
+                .map(|pair| PathBuf::from(pair[1]))
+                .collect();
+            if configs.len() != 1 {
+                return Err(DesktopError::new(
+                    "host_control_runner_config_invalid",
+                    "Owned Runner configuration is ambiguous",
+                    "Restore the Desktop-managed Runner command.",
+                ));
+            }
+            crate::host_control_config::configure(&configs[0], &control, &self.config_path)?
+        } else {
+            None
+        };
         let mut supervisor = self.supervisor.lock().await;
         cancellation.check()?;
-        supervisor.spawn_owned(kind, command, machine_stdout).await
+        let result = supervisor.spawn_owned(kind, command, machine_stdout).await;
+        if result.is_ok() {
+            if let Some(change) = config_change {
+                change.commit();
+            }
+        }
+        result
     }
 
     async fn stop_process(&self, kind: ProcessKind) {
+        if matches!(kind, ProcessKind::LocalRunner | ProcessKind::LocalServer) {
+            self.host_control.lock().await.revoke();
+        }
         self.supervisor.lock().await.stop(kind).await;
     }
 
     async fn stop_process_until(&self, kind: ProcessKind, deadline: Deadline) {
+        if matches!(kind, ProcessKind::LocalRunner | ProcessKind::LocalServer) {
+            self.host_control.lock().await.revoke();
+        }
         self.supervisor
             .lock()
             .await
@@ -2578,10 +2779,16 @@ impl DesktopCore {
         server_env_file: Option<PathBuf>,
         runner_client_id: Option<String>,
     ) -> DesktopResult<()> {
+        self.clear_native_host_for_runtime_change(
+            &identity.server_url,
+            runner_client_id.as_deref(),
+        )
+        .await?;
         let mut project = project.clone();
         project.runtime_project_id = Some(identity.runtime_project_id.clone());
         self.config.project = Some(project.clone());
         self.config.runtime = Some(StoredRuntime {
+            native_host_id: None,
             server_url: identity.server_url.clone(),
             server_env_file,
             runner_config: Some(identity.runner_config.clone()),
@@ -2821,7 +3028,7 @@ enum StoredConfigFile {
 
 fn load_config(path: &Path, activity: &ActivityLog) -> DesktopResult<StoredDesktopConfig> {
     let backup_path = desktop_state_backup_path(path);
-    match read_stored_config(path)? {
+    let mut config = match read_stored_config(path)? {
         StoredConfigFile::Valid { config, .. } => Ok(config),
         StoredConfigFile::Missing => match read_stored_config(&backup_path)? {
             StoredConfigFile::Missing => Ok(StoredDesktopConfig::default()),
@@ -2838,7 +3045,15 @@ fn load_config(path: &Path, activity: &ActivityLog) -> DesktopResult<StoredDeskt
             }
             StoredConfigFile::Missing | StoredConfigFile::Corrupt => Err(desktop_state_corrupt()),
         },
+    }?;
+    // A persisted Host ID is not a current owned-process observation. Clear it
+    // before the existing state file is available to a Host queue consumer.
+    if sync_native_host_id(&mut config, None) {
+        let encoded = serde_json::to_vec_pretty(&config)
+            .map_err(|_| desktop_state_unavailable("Desktop could not clear cached Host state"))?;
+        save_config_atomically(path, &encoded)?;
     }
+    Ok(config)
 }
 
 fn recover_config_from_backup(
@@ -3061,6 +3276,25 @@ fn reserve_loopback_address() -> DesktopResult<String> {
     Ok(address.to_string())
 }
 
+fn sync_native_host_id(
+    config: &mut StoredDesktopConfig,
+    tunnel: Option<&RegularTunnelState>,
+) -> bool {
+    let Some(runtime) = config.runtime.as_mut() else {
+        return false;
+    };
+    let next = tunnel
+        .filter(|state| state.status == RegularTunnelStatus::Ready)
+        .and_then(|state| state.host_id.as_ref())
+        .filter(|id| crate::models::is_native_host_id(id))
+        .cloned();
+    if runtime.native_host_id == next {
+        return false;
+    }
+    runtime.native_host_id = next;
+    true
+}
+
 fn regular_tunnel_exposure(
     state: &mut Option<RegularTunnelState>,
     process_active: bool,
@@ -3071,6 +3305,7 @@ fn regular_tunnel_exposure(
     if !process_active {
         state.status = RegularTunnelStatus::Error;
         state.ready_for_chatgpt = false;
+        state.host_id = None;
         return Some(ExposureReadiness::Error);
     }
     if let Some(event) = event {
@@ -3078,6 +3313,7 @@ fn regular_tunnel_exposure(
             Some("reconnecting") => {
                 state.status = RegularTunnelStatus::Starting;
                 state.ready_for_chatgpt = false;
+                state.host_id = None;
             }
             Some("ready") => {
                 let ready = serde_json::from_value::<RegularTunnelReadyEvent>(event.clone())
@@ -3090,17 +3326,20 @@ fn regular_tunnel_exposure(
                     });
                 if let Some(ready) = ready {
                     state.status = RegularTunnelStatus::Ready;
+                    state.host_id = ready.host_id;
                     state.ready_for_chatgpt = (ready.ready_for_chatgpt || id_available)
                         && (ready.connection.clipboard_state == "copied" || id_available);
                     state.clipboard_state = ready.connection.clipboard_state;
                 } else {
                     state.status = RegularTunnelStatus::Error;
                     state.ready_for_chatgpt = false;
+                    state.host_id = None;
                 }
             }
             _ => {
                 state.status = RegularTunnelStatus::Error;
                 state.ready_for_chatgpt = false;
+                state.host_id = None;
             }
         }
     }
@@ -3550,6 +3789,279 @@ mod tests {
         }
     }
 
+    fn native_host_config() -> StoredDesktopConfig {
+        let mut config = test_stored_config("native-host");
+        config.runtime = Some(StoredRuntime {
+            native_host_id: None,
+            server_url: "http://127.0.0.1:19500".into(),
+            server_env_file: None,
+            runner_config: None,
+            user_token_file: None,
+            runner_client_id: Some("owned-runner".into()),
+            project_id: None,
+            runtime_project_id: None,
+        });
+        config
+    }
+
+    fn native_host_ready_event(host_id: Option<&str>) -> Value {
+        let mut event = serde_json::json!({
+            "event":"ready", "schema_version":1, "provider":"openai", "ready_for_chatgpt":true,
+            "connection":{"kind":"openai_tunnel", "clipboard_state":"copied", "clipboard_contains":"tunnel_id"}
+        });
+        if let Some(host_id) = host_id {
+            event["host_id"] = serde_json::json!(host_id);
+        }
+        event
+    }
+
+    fn native_host_tunnel() -> Option<RegularTunnelState> {
+        Some(RegularTunnelState {
+            host_id: None,
+            provider: "openai".into(),
+            status: RegularTunnelStatus::Starting,
+            clipboard_state: "pending".into(),
+            clipboard_contains: "tunnel_id".into(),
+            ready_for_chatgpt: false,
+        })
+    }
+
+    #[test]
+    fn native_host_lifecycle_persists_only_current_owned_ready_identity() {
+        let dir = unique_state_dir("native-host-lifecycle");
+        let path = dir.join("desktop-state.json");
+        let first = format!("wc_host_{}", "a".repeat(32));
+        let second = format!("wc_host_{}", "b".repeat(32));
+        let mut config = native_host_config();
+        let mut tunnel = native_host_tunnel();
+        for (active, event, expected) in [
+            (
+                true,
+                native_host_ready_event(Some(&first)),
+                Some(first.as_str()),
+            ),
+            (true, serde_json::json!({"event":"reconnecting"}), None),
+            (
+                true,
+                native_host_ready_event(Some(&second)),
+                Some(second.as_str()),
+            ),
+            (true, serde_json::json!({"event":"stopped"}), None),
+            (
+                true,
+                native_host_ready_event(Some(&first)),
+                Some(first.as_str()),
+            ),
+            (false, native_host_ready_event(Some(&first)), None),
+        ] {
+            regular_tunnel_exposure(&mut tunnel, active, Some(&event), false);
+            assert!(sync_native_host_id(&mut config, tunnel.as_ref()));
+            save_config_atomically(&path, &serde_json::to_vec(&config).unwrap()).unwrap();
+            let persisted: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(persisted["runtime"]["native_host_id"].as_str(), expected);
+            assert_eq!(tunnel.as_ref().unwrap().host_id.as_deref(), expected);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_host_invalid_ready_is_rejected_and_legacy_ready_has_no_host() {
+        let valid = format!("wc_host_{}", "a".repeat(32));
+        for invalid in [
+            "wc_host_short".to_string(),
+            format!("wc_host_{}", "A".repeat(32)),
+            format!("wc_host_{} ", "a".repeat(32)),
+            format!("other_{}", "a".repeat(32)),
+        ] {
+            assert!(
+                serde_json::from_value::<RegularTunnelReadyEvent>(native_host_ready_event(Some(
+                    &invalid
+                )))
+                .is_err()
+            );
+            let mut tunnel = native_host_tunnel();
+            regular_tunnel_exposure(
+                &mut tunnel,
+                true,
+                Some(&native_host_ready_event(Some(&valid))),
+                false,
+            );
+            regular_tunnel_exposure(
+                &mut tunnel,
+                true,
+                Some(&native_host_ready_event(Some(&invalid))),
+                false,
+            );
+            assert_eq!(tunnel.as_ref().unwrap().status, RegularTunnelStatus::Error);
+            assert!(tunnel.as_ref().unwrap().host_id.is_none());
+        }
+        let mut tunnel = native_host_tunnel();
+        regular_tunnel_exposure(
+            &mut tunnel,
+            true,
+            Some(&native_host_ready_event(Some(&valid))),
+            false,
+        );
+        assert_eq!(
+            regular_tunnel_exposure(
+                &mut tunnel,
+                true,
+                Some(&native_host_ready_event(None)),
+                false
+            ),
+            Some(ExposureReadiness::LocalReady)
+        );
+        assert!(tunnel.unwrap().host_id.is_none());
+    }
+
+    #[test]
+    fn loading_saved_host_identity_clears_primary_and_recovered_cache() {
+        for recover_backup in [false, true] {
+            let dir = unique_state_dir("native-host-cache");
+            let path = dir.join("desktop-state.json");
+            let mut config = native_host_config();
+            config.runtime.as_mut().unwrap().native_host_id =
+                Some(format!("wc_host_{}", "a".repeat(32)));
+            let source = if recover_backup {
+                desktop_state_backup_path(&path)
+            } else {
+                path.clone()
+            };
+            save_config_atomically(&source, &serde_json::to_vec(&config).unwrap()).unwrap();
+            let loaded = load_config(&path, &ActivityLog::default()).unwrap();
+            assert!(loaded.runtime.unwrap().native_host_id.is_none());
+            let persisted: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert!(persisted["runtime"]["native_host_id"].is_null());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn native_host_background_observer_clears_exited_owner_without_ui_calls() {
+        let dir = unique_state_dir("native-host-observer");
+        let app = AppState::new(dir.clone(), dir.join("resources")).unwrap();
+        let host_id = format!("wc_host_{}", "a".repeat(32));
+        {
+            let mut slot = app.core.lock().await;
+            let core = slot.as_mut().unwrap();
+            core.config = native_host_config();
+            core.snapshot.regular_tunnel = native_host_tunnel();
+            regular_tunnel_exposure(
+                &mut core.snapshot.regular_tunnel,
+                true,
+                Some(&native_host_ready_event(Some(&host_id))),
+                false,
+            );
+            sync_native_host_id(&mut core.config, core.snapshot.regular_tunnel.as_ref());
+            core.save_config().await.unwrap();
+        }
+        // No managed child remains. The background owner observes this without
+        // a GUI getter, external command or a replacement process.
+        let monitor = async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                let persisted: Value =
+                    serde_json::from_slice(&std::fs::read(dir.join("desktop-state.json")).unwrap())
+                        .unwrap();
+                if persisted["runtime"]["native_host_id"].is_null() {
+                    break;
+                }
+                assert!(tokio::time::Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            app.shutdown_signal.cancel();
+        };
+        tokio::join!(app.observe_regular_tunnel_host(), monitor);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_host_persistence_failure_is_visible_and_runtime_switch_clears_context() {
+        let dir = unique_state_dir("native-host-save-failure");
+        let mut core = DesktopCore::new(dir.clone(), dir.join("resources")).unwrap();
+        core.config = native_host_config();
+        let host_id = format!("wc_host_{}", "a".repeat(32));
+        core.config.runtime.as_mut().unwrap().native_host_id = Some(host_id.clone());
+        core.snapshot.regular_tunnel = native_host_tunnel();
+        regular_tunnel_exposure(
+            &mut core.snapshot.regular_tunnel,
+            true,
+            Some(&native_host_ready_event(Some(&host_id))),
+            false,
+        );
+        let real_path = core.config_path.clone();
+        core.config_path = dir.join("blocked-state");
+        std::fs::create_dir_all(&core.config_path).unwrap();
+        let error = core.save_native_host_state().await.unwrap_err();
+        assert_eq!(error.code, "native_host_state_persist_failed");
+        assert!(core
+            .config
+            .runtime
+            .as_ref()
+            .unwrap()
+            .native_host_id
+            .is_none());
+        assert_eq!(
+            core.snapshot.regular_tunnel.as_ref().unwrap().status,
+            RegularTunnelStatus::Error
+        );
+        assert!(core.activity.snapshot().iter().any(
+            |entry| entry.source == "native_host_state" && entry.level == ActivityLevel::Error
+        ));
+        core.config_path = real_path;
+        core.config.runtime.as_mut().unwrap().native_host_id = Some(host_id);
+        core.clear_native_host_for_runtime_change("http://127.0.0.1:19501", Some("other-runner"))
+            .await
+            .unwrap();
+        let persisted: Value =
+            serde_json::from_slice(&std::fs::read(&core.config_path).unwrap()).unwrap();
+        assert!(persisted["runtime"]["native_host_id"].is_null());
+        assert!(core.snapshot.regular_tunnel.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_host_observer_defers_to_operation_owner_then_reconciles_on_finish() {
+        let dir = unique_state_dir("native-host-operation");
+        let app = AppState::new(dir.clone(), dir.join("resources")).unwrap();
+        let (operation, cancellation, mut core, baseline) = app
+            .begin_operation(DesktopOperationKind::RuntimeRefresh, false)
+            .await
+            .unwrap();
+        let host_id = format!("wc_host_{}", "a".repeat(32));
+        core.config = native_host_config();
+        core.snapshot.regular_tunnel = native_host_tunnel();
+        regular_tunnel_exposure(
+            &mut core.snapshot.regular_tunnel,
+            true,
+            Some(&native_host_ready_event(Some(&host_id))),
+            false,
+        );
+        sync_native_host_id(&mut core.config, core.snapshot.regular_tunnel.as_ref());
+        core.save_config().await.unwrap();
+        let result = Ok(core.snapshot.clone());
+        let finish = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let before: Value =
+                serde_json::from_slice(&std::fs::read(dir.join("desktop-state.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                before["runtime"]["native_host_id"].as_str(),
+                Some(host_id.as_str())
+            );
+            app.finish_operation(operation, cancellation, core, baseline, result)
+                .await
+                .unwrap();
+            let after: Value =
+                serde_json::from_slice(&std::fs::read(dir.join("desktop-state.json")).unwrap())
+                    .unwrap();
+            assert!(after["runtime"]["native_host_id"].is_null());
+            app.shutdown_signal.cancel();
+        };
+        tokio::join!(app.observe_regular_tunnel_host(), finish);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn chatgpt_activity_observation_is_fenced_to_the_captured_project_identity() {
         let data_dir = unique_state_dir("chatgpt-activity-fence");
@@ -3569,6 +4081,7 @@ mod tests {
             runtime_project_id: Some("agent:desktop:project-b".to_string()),
         });
         core.config.runtime = Some(StoredRuntime {
+            native_host_id: None,
             server_url: "http://127.0.0.1:8080".to_string(),
             server_env_file: None,
             runner_config: Some(runner_config),
@@ -3666,6 +4179,7 @@ mod tests {
     fn legacy_runtime_project_identity_recovers_runner_client_id_without_project_coupling() {
         let mut config = test_stored_config("legacy");
         config.runtime = Some(StoredRuntime {
+            native_host_id: None,
             server_url: "https://example.test".to_string(),
             server_env_file: None,
             runner_config: None,
@@ -3695,6 +4209,7 @@ mod tests {
         std::fs::create_dir_all(saved_runner.parent().unwrap()).unwrap();
         std::fs::write(&saved_runner, "previous project fixture").unwrap();
         config.runtime = Some(StoredRuntime {
+            native_host_id: None,
             server_url: "http://127.0.0.1:7890".into(),
             server_env_file: None,
             runner_config: Some(saved_runner.clone()),
@@ -3817,6 +4332,7 @@ mod tests {
     #[test]
     fn stored_runtime_contains_paths_not_credentials() {
         let runtime = StoredRuntime {
+            native_host_id: None,
             server_url: "https://example.com".to_string(),
             server_env_file: Some(PathBuf::from("webcodex.env")),
             runner_config: Some(PathBuf::from("runner.toml")),
@@ -3870,6 +4386,7 @@ mod tests {
             enrollment: Enrollment::ManagedPairing,
         });
         config.runtime = Some(StoredRuntime {
+            native_host_id: None,
             server_url: "http://127.0.0.1:58208".to_string(),
             server_env_file: None,
             runner_config: None,
@@ -3978,6 +4495,7 @@ mod tests {
             preferred_connection: None,
             tunnel_proxy: TunnelProxyConfig::default(),
             runtime: Some(StoredRuntime {
+                native_host_id: None,
                 server_url: "https://example.test".to_string(),
                 server_env_file: None,
                 runner_config: Some(PathBuf::from("missing-runner.toml")),
@@ -4704,6 +5222,7 @@ mod tests {
     #[test]
     fn regular_tunnel_child_death_only_degrades_connection_readiness() {
         let mut state = Some(RegularTunnelState {
+            host_id: None,
             provider: "openai".to_string(),
             status: RegularTunnelStatus::Ready,
             clipboard_state: "copied".to_string(),
@@ -4734,6 +5253,7 @@ mod tests {
     #[test]
     fn regular_tunnel_recovery_replaces_cached_ready_and_rejects_unverified_recovery() {
         let mut state = Some(RegularTunnelState {
+            host_id: None,
             provider: "openai".to_string(),
             status: RegularTunnelStatus::Ready,
             clipboard_state: "copied".to_string(),
@@ -4826,6 +5346,7 @@ mod tests {
             ProjectReadiness::Ready,
         );
         core.snapshot.regular_tunnel = Some(RegularTunnelState {
+            host_id: None,
             provider: "openai".to_string(),
             status: RegularTunnelStatus::Ready,
             clipboard_state: "copied".to_string(),
@@ -4898,3 +5419,6 @@ mod tests {
         );
     }
 }
+
+#[path = "workspaces.rs"]
+pub(crate) mod workspaces;

@@ -1,5 +1,7 @@
 # MyCodex 实施与验收报告
 
+> 发布说明：本文的实例标识和本机用户目录已脱敏；验收日期、结论与构建指纹保留。
+
 验收日期：2026-09-20（Asia/Shanghai）。
 
 ## 实现范围
@@ -94,7 +96,7 @@ Claude 当前配置的辅助模型返回 429/1309（套餐已到期），未提�
 未重启或替换已有服务；核心未修改，未运行全 Rust workspace 测试。
 
 最新成功 E2E 的自有进程树已停止、临时目录已清理。首轮失败测试留下的
-`C:\Users\Administrator\AppData\Local\Temp\mycodex-mcp-e2e-lwevwfsq`
+`C:\Users\<WindowsUser>\AppData\Local\Temp\mycodex-mcp-e2e-lwevwfsq`
 包含合成测试配置/数据；其测试进程已停止。自动审批审查拒绝对该目录的递归清理，
 仅返回 `blocked by policy`，因此未重试或绕过拒绝，目录暂时保留。
 

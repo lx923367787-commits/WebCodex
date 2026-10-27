@@ -186,6 +186,13 @@ fn review_binding(
     if attempt.context_epoch.as_deref() != epoch {
         return Err(conflict("Review belongs to another conversation; prepare and deliver material in the current attempt"));
     }
+    let context = attempt.context_epoch.zip(attempt.identity_source).map(
+        |(context_epoch, identity_source)| HostGoalInvocationContext {
+            context_epoch,
+            identity_source,
+        },
+    );
+    context_goal_gate(conn, owner, context.as_ref(), &binding.goal_id, true)?;
     Ok(goal)
 }
 
@@ -304,6 +311,14 @@ impl Database {
             .map_err(unavailable)?;
         let goal = read(&tx, owner, &binding.goal_id)?.ok_or_else(not_found)?;
         check_binding(&goal, binding)?;
+        let attempt: HostGoalAttempt = decode(tx.query_row("SELECT snapshot_json FROM wc_host_goal_attempts WHERE goal_id=?1 AND attempt_id=?2",params![binding.goal_id,binding.attempt_id], |r| r.get::<_,String>(0)).map_err(unavailable)?)?;
+        let context = attempt.context_epoch.zip(attempt.identity_source).map(
+            |(context_epoch, identity_source)| HostGoalInvocationContext {
+                context_epoch,
+                identity_source,
+            },
+        );
+        context_goal_gate(&tx, owner, context.as_ref(), &binding.goal_id, true)?;
         let plan = current_plan(&tx, &goal)?;
         let node = plan
             .plan

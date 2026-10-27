@@ -35,6 +35,9 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(windows)]
+pub mod windows_lpac;
+
 #[cfg(unix)]
 pub use unix::ManagedChild;
 
@@ -92,3 +95,7 @@ impl SpawnOptions {
         Self::default()
     }
 }
+
+/// Fixed, bounded native CLI metadata discovery for trusted controllers.
+#[cfg(feature = "cli-catalog")]
+pub mod cli_catalog;

@@ -12,6 +12,9 @@ use webcodex_connector_runtime::{
 };
 
 pub(super) fn stable_subject_id(auth: &AuthContext) -> Result<String, String> {
+    if auth.agent_run.is_some() || auth.is_native_host() {
+        return Err("agent_connector_not_isolated".into());
+    }
     if let Some(user_id) = auth.user_id.as_deref() {
         return Ok(format!("user:{user_id}"));
     }
@@ -32,6 +35,7 @@ pub(super) fn stable_subject_id(auth: &AuthContext) -> Result<String, String> {
         | AuthKind::AccountCredential => {
             Err("authenticated identity has no stable connector subject".to_string())
         }
+        AuthKind::ModelAgent | AuthKind::NativeHost => Err("agent_connector_not_isolated".into()),
     }
 }
 

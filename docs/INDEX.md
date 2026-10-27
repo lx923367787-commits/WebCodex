@@ -1,5 +1,7 @@
 # Documentation Index
 
+[External tools, accounts and migration](EXTERNAL_TOOLS.md) — what ships, what users install/login to, Runner acceptance and packaging boundaries.
+
 [English](INDEX.md) | [简体中文](INDEX.zh-CN.md)
 
 Start with the goal that matches what you are trying to do.

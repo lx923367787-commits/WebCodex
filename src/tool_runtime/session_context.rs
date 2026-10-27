@@ -858,6 +858,12 @@ pub(crate) fn runtime_observation_principal(
     let Some(auth) = auth else {
         return Ok(("dev".to_string(), "dev".to_string()));
     };
+    if auth.is_native_host() {
+        return Err("native_host_has_no_runtime_principal".into());
+    }
+    if let Some(binding) = auth.agent_run.as_ref() {
+        return Ok(("isolated-agent".to_string(), binding.run_id().to_string()));
+    }
     if auth.is_bootstrap {
         return Ok((
             "bootstrap".to_string(),

@@ -1,5 +1,7 @@
 # 本地办公绘图验收记录
 
+> 发布说明：本文的实例标识和本机用户目录已脱敏；验收日期、结论与构建指纹保留。
+
 验收日期：2026-09-21。范围：流程图、分组架构图、Excel/CSV 数据图表的本地生成、修改重画、真实图片回传和文件导出。
 
 ## 实现与安装
@@ -10,7 +12,7 @@
 - 绘图依赖使用独立 `drawing/vendor`；没有覆盖 Office 的 Python 包、修改通道密钥或重启服务。原 Office `MANIFEST.json` SHA256 保持 `7eb27513e84ae775037591b669b05a6a3f9a6100548cc9e7134627b6e97e8575`。
 - 新增绘图清单 SHA256：`e69d15ef1eb1faa4a64e4cd142af472c31c7748c4bc38d49c051fda261684195`。
 - 运行时实测：Matplotlib 3.11.2、NumPy 2.4.6、openpyxl 3.1.5、Pillow 12.3.0、pypdf 6.19.0，字体 Microsoft YaHei。Graphviz 16.1.0 官方便携 ZIP SHA256 为 `733e49626c492242eb8dca30ea627b6ead20710e207998c7933b4909d92d6abc`，构建时同时校验 ZIP 和已解压文件。
-- 两个已登记工作目录均新建简短 `DRAWING_GUIDE.md`：`E:\wbecodex`、`C:\Users\Administrator\Desktop\web codex`。
+- 两个已登记工作目录均新建简短 `DRAWING_GUIDE.md`：`E:\wbecodex`、`C:\Users\<WindowsUser>\Desktop\web codex`。
 - 增量构建目录：`E:\wbecodex\.local\drawing-build\addon-20260921-v1`。安装与回退记录：`E:\wbecodex\.local\rollback\drawing-addon-20260921`。旧 Office 文件未被替换。
 
 ## 自动化结果

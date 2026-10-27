@@ -16,6 +16,28 @@ mod admin_http;
 mod admin_project_lifecycle;
 #[cfg(test)]
 mod agent_continuation_tests;
+mod agent_enrollment;
+#[cfg(test)]
+mod agent_enrollment_tests;
+mod agent_goal_adapter;
+#[cfg(test)]
+mod agent_goal_adapter_tests;
+mod agent_goal_handoff;
+mod agent_handoff_control;
+mod agent_host_auth;
+#[cfg(test)]
+mod agent_host_auth_tests;
+mod agent_isolation;
+#[cfg(test)]
+mod agent_isolation_tests;
+mod agent_private_files;
+mod agent_team;
+mod agent_team_catalog;
+mod agent_team_decision;
+mod agent_team_delivery;
+mod agent_team_execution;
+#[cfg(test)]
+mod agent_team_tests;
 mod agent_wake;
 mod audit_http;
 mod auth;
@@ -25,12 +47,20 @@ mod connector_runtime;
 mod console_web;
 mod db;
 mod host_console_http;
+#[cfg(test)]
+mod human_operator_http_tests;
 mod job_observation;
 mod mcp;
 mod mcp_gateway;
 mod model_surface;
 mod models;
+mod native_agent_host;
+#[cfg(test)]
+mod native_agent_host_tests;
 mod oauth_http;
+mod office_http;
+#[cfg(test)]
+mod office_http_tests;
 mod openapi;
 mod pairing_http;
 mod plugin_gateway;
@@ -367,6 +397,14 @@ only for local/trusted-network demos."
         .push(runtime_console_http::routes())
         .push(admin_http::routes())
         .push(
+            Router::with_path(route_metadata::api_path(RouteId::OfficeControl))
+                .post(office_http::control),
+        )
+        .push(
+            Router::with_path(route_metadata::api_path(RouteId::AgentIsolationControl))
+                .post(agent_isolation::control),
+        )
+        .push(
             Router::with_path(route_metadata::api_path(RouteId::ToolsList))
                 .post(runtime_http::tools_list),
         )
@@ -582,6 +620,12 @@ only for local/trusted-network demos."
         .push(Router::with_path(route_metadata::api_path(RouteId::RunnerPoll)).post(runner_poll))
         .push(
             Router::with_path(route_metadata::api_path(RouteId::RunnerResult)).post(runner_result),
+        )
+        .push(
+            Router::with_path(route_metadata::api_path(
+                RouteId::RunnerAgentExecutionCloseReceipt,
+            ))
+            .post(runner_http::runner_agent_execution_close_receipt),
         )
         .push(
             Router::with_path(route_metadata::api_path(
@@ -966,3 +1010,6 @@ mod tests {
         assert_eq!(safe, "file_name.txt");
     }
 }
+mod agent_handoff_access;
+#[cfg(test)]
+mod agent_handoff_access_tests;

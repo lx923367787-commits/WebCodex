@@ -344,7 +344,22 @@ impl ToolRuntime {
                         continue;
                     }
                     let objective = bounded(&goal.objective, 256);
-                    goals.push(json!({"driver":"host","goal_id":goal.goal_id,"project":goal.project,"objective":objective,"objective_truncated":objective.len()<goal.objective.len(),"phase":goal.phase,"state":goal.phase,"spec":{"project":goal.project,"objective":objective,"provider_id":null},"revision":goal.revision,"plan_version":goal.plan_version,"current_node_id":goal.current_node_id,"created_at":goal.created_at,"updated_at":goal.updated_at,"plan_materialized":goal.plan_materialized,"confirmation_required":!goal.confirmed()}));
+                    let latest_handoff = match self.host_goal_db().and_then(|db| {
+                        db.read_host_goal_handoff(&owner, &goal.goal_id)
+                            .map_err(super::host_goal::store_error)
+                    }) {
+                        Ok(handoff) => handoff.map(|h| {
+                            json!({
+                                "source_context_epoch": h.source_context_epoch,
+                                "checkpoint_sequence": h.checkpoint_sequence,
+                                "retired_at": h.committed_at,
+                                "created_at": h.created_at,
+                                "status": h.status,
+                            })
+                        }),
+                        Err(error) => return error,
+                    };
+                    goals.push(json!({"driver":"host","goal_id":goal.goal_id,"project":goal.project,"objective":objective,"objective_truncated":objective.len()<goal.objective.len(),"phase":goal.phase,"state":goal.phase,"spec":{"project":goal.project,"objective":objective,"provider_id":null},"revision":goal.revision,"plan_version":goal.plan_version,"current_node_id":goal.current_node_id,"created_at":goal.created_at,"updated_at":goal.updated_at,"plan_materialized":goal.plan_materialized,"confirmation_required":!goal.confirmed(),"latest_handoff":latest_handoff}));
                 }
                 if page_len < 100 || goals.len() >= limit {
                     break;

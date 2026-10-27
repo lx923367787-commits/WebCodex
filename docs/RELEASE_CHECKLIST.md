@@ -36,6 +36,8 @@ During implementation/review, run focused lanes when touching runtime metadata, 
 
 Confirm the user-facing docs tell one story:
 
+- Apply [tools, accounts and migration](EXTERNAL_TOOLS.md) to every distributable: model CLIs (including nested Goal executors), user credentials, browser profiles and generated Runner configuration must not ship. Verify manifests and content, not only checksums. For Windows tool bundles run `python windows/package_payload_policy.py <payload>`; passing the path gate does not replace content review. Users install and authenticate external model tools on each Runner computer.
+
 - README states the product position in the first screen and clearly separates full daily use from temporary `share`.
 - Full Setup has one recommended regular Server + Runner path for ordinary daily use; Quick Trial stays focused on temporary single-project `share`.
 - Concepts explains server, Runner, Runner-registered projects, runtime project ids, ToolRuntime, MCP, GPT Actions, session, handoff, validation, review/hygiene, and `run_shell` as a bounded shell primitive for real shell semantics or short related command chains.

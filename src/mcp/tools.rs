@@ -736,6 +736,9 @@ pub(super) async fn handle_list(
     compact_schemas: bool,
 ) -> McpOutcome {
     let result = match runtime.runtime_exposure() {
+        _ if auth.is_some_and(|auth| auth.agent_run.is_some()) => {
+            crate::agent_isolation::tool_specs()
+        }
         RuntimeExposure::ProjectConnector => {
             project_connector_tools_list_payload_for_auth(compact_schemas, auth)
         }
@@ -1087,6 +1090,8 @@ pub(super) fn host_file_import_trust_for_call(
 
 fn mcp_auth_kind_classification(auth: Option<&AuthContext>) -> &'static str {
     match auth.map(|auth| auth.kind) {
+        Some(crate::auth::AuthKind::ModelAgent) => "isolated_agent",
+        Some(crate::auth::AuthKind::NativeHost) => "native_host",
         None => "none",
         Some(crate::auth::AuthKind::OAuth2Token) => "oauth2",
         Some(crate::auth::AuthKind::ApiToken) => "api_token",
@@ -1380,6 +1385,12 @@ pub(super) async fn handle_call(
             return McpOutcome::BadRequest(rpc_error(id, -32602, format!("Invalid params: {}", e)));
         }
     };
+    if auth.is_some_and(|auth| auth.agent_run.is_some()) {
+        let result = runtime
+            .isolated_model_call_async(&params.name, params.arguments, auth)
+            .await;
+        return McpOutcome::Ok(rpc_result(id, mcp_runtime_tool_result_fallback(result)));
+    }
     if runtime.runtime_exposure() == RuntimeExposure::ProjectConnector {
         if let Some(lc) = lifecycle.as_deref() {
             lc.capture_payload("raw_arguments", &params.arguments);

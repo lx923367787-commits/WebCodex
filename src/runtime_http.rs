@@ -231,6 +231,13 @@ pub async fn tools_list(req: &mut Request, depot: &mut Depot, res: &mut Response
         }
     };
     let mut payload = runtime.list_tools_payload(options);
+    if depot
+        .obtain::<crate::auth::AuthContext>()
+        .ok()
+        .is_some_and(|auth| auth.agent_run.is_some())
+    {
+        payload = crate::agent_isolation::tool_specs();
+    }
     payload["success"] = json!(true);
     res.render(Json(payload));
 }
@@ -239,6 +246,13 @@ pub async fn tools_list(req: &mut Request, depot: &mut Depot, res: &mut Response
 pub async fn tools_call(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let mut guard =
         ToolRequestLifecycle::new("api", new_trace_id(), "-", "POST /api/tools/call", None);
+    if depot
+        .obtain::<crate::auth::AuthContext>()
+        .ok()
+        .is_some_and(|a| a.agent_run.is_some())
+    {
+        guard.suppress_private_payloads();
+    }
     guard.received();
 
     let audit = ActionAudit::start(req, depot, "/api/tools/call", "callTool");

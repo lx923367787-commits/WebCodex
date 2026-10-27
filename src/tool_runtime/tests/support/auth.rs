@@ -8,6 +8,8 @@ pub(in crate::tool_runtime::tests) fn auth_context(
         ("user".to_string(), Vec::new())
     };
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: if is_bootstrap {
             crate::auth::AuthKind::Bootstrap
         } else {
@@ -34,6 +36,8 @@ pub(in crate::tool_runtime::tests) fn shared_key_auth_context(
     hash: &str,
 ) -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::SharedKey,
         user_id: None,
         username: None,
@@ -62,6 +66,8 @@ pub(in crate::tool_runtime::tests) fn oauth_bridge_auth_context(
     scopes: &[&str],
 ) -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::OAuth2Token,
         user_id: None,
         username: None,
@@ -81,6 +87,8 @@ pub(in crate::tool_runtime::tests) fn managed_oauth_auth_context(
     shared_key_hash: Option<&str>,
 ) -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::OAuth2Token,
         user_id: Some(format!("user-{}", username)),
         username: Some(username.to_string()),
@@ -101,6 +109,8 @@ pub(in crate::tool_runtime::tests) fn managed_oauth_auth_context(
 
 pub(in crate::tool_runtime::tests) fn open_auth_context() -> crate::auth::AuthContext {
     crate::auth::AuthContext {
+        agent_run: None,
+        native_host: None,
         kind: crate::auth::AuthKind::OpenAnonymous,
         user_id: None,
         username: None,

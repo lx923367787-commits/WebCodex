@@ -56,6 +56,8 @@ pub(crate) enum RouteSurface {
     OAuth,
     Mcp,
     RuntimeApi,
+    /// Dedicated first-party human PAT operations, never a model dispatcher.
+    HumanOperator,
     Connector,
     HostConsole,
     RuntimeConsole,
@@ -161,6 +163,8 @@ pub(crate) enum RouteId {
     RuntimeConsoleCommunicationInbox,
     RuntimeConsoleCommunicationInboxConsume,
     AdminDashboard,
+    AgentIsolationControl,
+    OfficeControl,
     AdminProjectsRegister,
     AdminProjectsCreate,
     AdminProjectsEnable,
@@ -221,6 +225,7 @@ pub(crate) enum RouteId {
     RunnerOffline,
     RunnerPoll,
     RunnerResult,
+    RunnerAgentExecutionCloseReceipt,
     RunnerPersistentShellResult,
     RunnerJobUpdate,
     RunnerWs,
@@ -459,7 +464,7 @@ mod tests {
             AdminWebStylesCss as usize + 1,
             "canonical iteration must cover every RouteId exactly once",
         );
-        assert_eq!(iter_routes().count(), 142, "canonical route closure");
+        assert_eq!(iter_routes().count(), 144, "canonical route closure");
         assert_eq!(lookup("GET", "/mcp").unwrap().id, McpGet);
         assert_eq!(lookup("POST", "/mcp").unwrap().id, McpPost);
     }
@@ -495,6 +500,28 @@ mod tests {
     }
 
     #[test]
+    fn human_operator_audience_is_limited_to_the_five_dedicated_routes() {
+        let actual: BTreeSet<_> = iter_routes()
+            .filter(|spec| spec.surface == HumanOperator)
+            .map(|spec| spec.path)
+            .collect();
+        assert_eq!(
+            actual,
+            BTreeSet::from([
+                "/api/projects/list",
+                "/api/projects/resolve-or-register",
+                "/api/runners/config/check",
+                "/api/runners/config/reload",
+                "/api/runtime/status",
+            ])
+        );
+        for spec in iter_routes().filter(|spec| spec.surface == HumanOperator) {
+            assert_eq!(spec.auth, RouteAuth::AuthMiddleware);
+            assert_eq!(spec.method, RouteMethod::Post);
+        }
+    }
+
+    #[test]
     fn openapi_projection_is_closed_unique_and_connector_bijective() {
         let mut public_operation_ids = BTreeSet::new();
         let mut connector_capabilities = BTreeSet::new();
@@ -504,7 +531,14 @@ mod tests {
                 Hidden => {}
                 PublicAction(operation) => {
                     assert_eq!(route_spec.method, RouteMethod::Post, "{:?}", route_spec.id);
-                    assert_eq!(route_spec.surface, RuntimeApi, "{:?}", route_spec.id);
+                    // Projection metadata does not grant model authority.
+                    // Dedicated operator URLs retain their existing schema;
+                    // their bearer audience is enforced by AuthMiddleware.
+                    assert!(
+                        matches!(route_spec.surface, RuntimeApi | HumanOperator),
+                        "{:?}",
+                        route_spec.id
+                    );
                     assert_eq!(
                         route_spec.auth,
                         RouteAuth::AuthMiddleware,
@@ -587,7 +621,7 @@ mod tests {
             );
             references += 1;
         }
-        assert_eq!(references, 142, "A2 production leaf RouteId closure");
+        assert_eq!(references, 144, "A2 production leaf RouteId closure");
     }
 
     #[test]
@@ -714,6 +748,21 @@ mod tests {
                 None => {}
             }
         }
+    }
+
+    #[test]
+    fn agent_execution_close_receipt_remains_exact_hidden_runner_transport() {
+        let route = spec(RunnerAgentExecutionCloseReceipt);
+        assert_eq!(
+            route.path,
+            webcodex_core::runner_protocol::RUNNER_AGENT_EXECUTION_CLOSE_RECEIPT_PATH
+        );
+        assert_eq!(route.surface, RunnerTransport);
+        assert_eq!(route.scope_policy, AgentSurface);
+        assert_eq!(route.openapi_projection, Hidden);
+        assert_eq!(route.auth, RouteAuth::AuthMiddleware);
+        assert!(lookup("GET", route.path).is_none());
+        assert!(lookup("POST", &format!("{}/extra", route.path)).is_none());
     }
 
     #[test]

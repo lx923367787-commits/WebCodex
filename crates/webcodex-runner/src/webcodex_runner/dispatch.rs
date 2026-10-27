@@ -219,6 +219,12 @@ fn submit_decode_failure(
 ) -> Result<bool, SubmitResultError> {
     let request_id = request.request_id.clone();
     match request.kind.as_str() {
+        "close_agent_execution" | "start_agent_isolated_process_job" => {
+            // Malformed isolated messages cannot manufacture a close receipt
+            // through the generic command-result/stdout channel.
+            eprintln!("webcodex-runner isolated execution request rejected by canonical decoder");
+            Ok(true)
+        }
         "start_job"
         | "start_validation_job"
         | "start_process_job"
@@ -395,6 +401,36 @@ pub(crate) fn dispatch_request_with_outcome(
     let shell = &config.shell;
 
     let dispatch_result = match invocation.operation {
+        RunnerOperation::AgentCliCatalog(query) => {
+            let result = super::agent_cli::bounded_json_result(
+                jobs.agent_cli_catalog(&sink, &query),
+                webcodex_core::agent_cli::AGENT_CLI_CATALOG_MAX_BYTES,
+            );
+            sink.submit_result_with_metadata(request_id, result, config, runtime)
+                .map(|_| true)
+        }
+        RunnerOperation::AgentCliDelivery(query) => {
+            let result = super::agent_cli::bounded_json_result(
+                jobs.agent_cli_delivery_snapshot(&sink, &query),
+                webcodex_core::agent_cli::AGENT_CLI_DELIVERY_RESPONSE_MAX_BYTES,
+            );
+            sink.submit_result_with_metadata(request_id, result, config, runtime)
+                .map(|_| true)
+        }
+        RunnerOperation::AgentExecutionClose(close) => {
+            match jobs.close_agent_execution(&sink, &close) {
+                Ok(receipt) => sink
+                    .send_agent_execution_close_receipt(&request_id, &receipt)
+                    .map_err(SubmitResultError::TransportClosed)
+                    .map(|_| true),
+                Err(error) => {
+                    // Handled is only a dispatcher outcome. No receipt means no
+                    // close confirmation; Server retains its original deadline.
+                    eprintln!("webcodex-runner isolated close not proven: {error}");
+                    Ok(true)
+                }
+            }
+        }
         RunnerOperation::CodingAgent(operation) => {
             let response = match runtime.coding_agents() {
                 Some(manager) => manager.handle(operation, project_registry_dir),

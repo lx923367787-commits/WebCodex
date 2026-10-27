@@ -1531,6 +1531,61 @@ fn apply_text_edits_agent_stdout_result(
     )
 }
 
+fn validate_project_file_write(
+    path: &str,
+    content: &str,
+    overwrite: bool,
+    expected_sha256: Option<&str>,
+) -> Result<(), ToolResult> {
+    if let Err(e) = validate_edit_file_path(&path) {
+        return Err(super::permissions::edit_path_policy_rejected_result(
+            path, e,
+        ));
+    }
+    if content.contains('\0') {
+        return Err(write_project_file_preflight_rejection(
+            "content cannot contain NUL bytes",
+            "invalid_content",
+            "remove the NUL byte and retry",
+        ));
+    }
+    if content.len() > MAX_WRITE_CONTENT_BYTES {
+        return Err(write_project_file_preflight_rejection(
+            format!("content exceeds {MAX_WRITE_CONTENT_BYTES} bytes"),
+            "content_too_large",
+            "use apply_text_edits for a smaller local change or reduce the full rewrite",
+        ));
+    }
+    if let Some(hash) = expected_sha256 {
+        if !is_hex_sha256(hash) {
+            return Err(write_project_file_preflight_rejection(
+                "expected_sha256 must be a lowercase 64-character hex digest",
+                "invalid_expected_sha256",
+                "reread the file and provide its exact current sha256",
+            ));
+        }
+    }
+    match (overwrite, expected_sha256.is_some()) {
+            (true, false) => {
+                return Err(write_project_file_preflight_rejection(
+                    "overwrite=true requires expected_sha256",
+                    "missing_expected_sha256",
+                    "reread the existing file and retry with its exact current sha256",
+                ))
+            }
+            (false, true) => {
+                return Err(write_project_file_preflight_rejection(
+                    "expected_sha256 is allowed only when overwrite=true",
+                    "unexpected_expected_sha256",
+                    "omit expected_sha256 for a new-file create, or set overwrite=true for an existing-file rewrite",
+                ))
+            }
+            _ => {}
+        }
+
+    Ok(())
+}
+
 fn write_project_file_agent_stdout_result(stdout: &str) -> ToolResult {
     let stdout = stdout.trim();
     let mut obj: Value = match serde_json::from_str::<Value>(stdout) {
@@ -2096,57 +2151,37 @@ impl ToolRuntime {
         overwrite: Option<bool>,
         expected_sha256: Option<String>,
     ) -> ToolResult {
-        // ---- Input validation (before project resolution) ----
-        if let Err(e) = validate_edit_file_path(&path) {
-            return super::permissions::edit_path_policy_rejected_result(&path, e);
+        if let Err(result) = validate_project_file_write(
+            &path,
+            &content,
+            overwrite.unwrap_or(false),
+            expected_sha256.as_deref(),
+        ) {
+            return result;
         }
-        if content.contains('\0') {
-            return write_project_file_preflight_rejection(
-                "content cannot contain NUL bytes",
-                "invalid_content",
-                "remove the NUL byte and retry",
-            );
-        }
-        if content.len() > MAX_WRITE_CONTENT_BYTES {
-            return write_project_file_preflight_rejection(
-                format!("content exceeds {MAX_WRITE_CONTENT_BYTES} bytes"),
-                "content_too_large",
-                "use apply_text_edits for a smaller local change or reduce the full rewrite",
-            );
-        }
-        let overwrite = overwrite.unwrap_or(false);
-        if let Some(hash) = expected_sha256.as_deref() {
-            if !is_hex_sha256(hash) {
-                return write_project_file_preflight_rejection(
-                    "expected_sha256 must be a lowercase 64-character hex digest",
-                    "invalid_expected_sha256",
-                    "reread the file and provide its exact current sha256",
-                );
-            }
-        }
-        match (overwrite, expected_sha256.is_some()) {
-            (true, false) => {
-                return write_project_file_preflight_rejection(
-                    "overwrite=true requires expected_sha256",
-                    "missing_expected_sha256",
-                    "reread the existing file and retry with its exact current sha256",
-                )
-            }
-            (false, true) => {
-                return write_project_file_preflight_rejection(
-                    "expected_sha256 is allowed only when overwrite=true",
-                    "unexpected_expected_sha256",
-                    "omit expected_sha256 for a new-file create, or set overwrite=true for an existing-file rewrite",
-                )
-            }
-            _ => {}
-        }
-
-        // ---- Project resolution (Runner-registered only) ----
         let proj = match self.execution().resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
+        self.write_resolved_project_file(&proj, path, content, overwrite, expected_sha256)
+            .await
+    }
+
+    pub(crate) async fn write_resolved_project_file(
+        &self,
+        proj: &crate::projects::ProjectConfig,
+        path: String,
+        content: String,
+        overwrite: Option<bool>,
+        expected_sha256: Option<String>,
+    ) -> ToolResult {
+        let overwrite = overwrite.unwrap_or(false);
+        if let Err(result) =
+            validate_project_file_write(&path, &content, overwrite, expected_sha256.as_deref())
+        {
+            return result;
+        }
+
         let client_id = proj.client_id.clone();
 
         let payload = json!({
@@ -2394,6 +2429,27 @@ impl ToolRuntime {
         changes: Vec<ApplyFileChangeInput>,
         dry_run: Option<bool>,
     ) -> ToolResult {
+        self.apply_text_edits_in_project(project, None, changes, dry_run)
+            .await
+    }
+
+    pub(crate) async fn apply_resolved_text_edits(
+        &self,
+        project: &ProjectConfig,
+        changes: Vec<ApplyFileChangeInput>,
+        dry_run: Option<bool>,
+    ) -> ToolResult {
+        self.apply_text_edits_in_project(String::new(), Some(project), changes, dry_run)
+            .await
+    }
+
+    async fn apply_text_edits_in_project(
+        &self,
+        project: String,
+        pinned: Option<&ProjectConfig>,
+        changes: Vec<ApplyFileChangeInput>,
+        dry_run: Option<bool>,
+    ) -> ToolResult {
         if changes.is_empty() {
             return apply_text_edits_preflight_rejection(
                 "changes must contain at least one file change",
@@ -2532,9 +2588,12 @@ impl ToolRuntime {
             }
         };
 
-        let proj = match self.execution().resolve_project(&project).await {
-            Ok(p) => p,
-            Err(e) => return ToolResult::err(e),
+        let proj = match pinned {
+            Some(project) => project.clone(),
+            None => match self.execution().resolve_project(&project).await {
+                Ok(p) => p,
+                Err(e) => return ToolResult::err(e),
+            },
         };
         let client_id = proj.client_id.clone();
 

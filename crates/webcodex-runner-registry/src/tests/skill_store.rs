@@ -6,6 +6,7 @@ use webcodex_core::skill_store::SkillStoreRequest;
 
 fn skill_store_registration(instance: &str, read: bool, manage: bool) -> RunnerRegisterRequest {
     current_runner_registration(RunnerRegisterRequest {
+        agent_execution_resources: Vec::new(),
         client_id: "skill-store-runner".to_string(),
         runner_instance_id: instance.to_string(),
         runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,

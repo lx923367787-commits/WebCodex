@@ -17,6 +17,11 @@ const DEFAULT_COMMUNICATION_LIST_LIMIT: usize = 50;
 pub(super) fn communication_principal(
     auth: Option<&AuthContext>,
 ) -> Result<CommunicationPrincipal, ToolResult> {
+    if auth.is_some_and(|a| a.is_native_host()) {
+        return Err(communication_principal_unavailable(
+            "Native relay is not a communication principal",
+        ));
+    }
     let (kind, subject) = match auth {
         None => ("local-development", "local-development".to_string()),
         Some(auth) if auth.is_oauth_shared_key_subject() => (
@@ -28,6 +33,11 @@ pub(super) fn communication_principal(
             })?,
         ),
         Some(auth) => match auth.kind {
+            AuthKind::ModelAgent | AuthKind::NativeHost => {
+                return Err(communication_principal_unavailable(
+                    "Agent collaboration requires its authorized meeting room",
+                ))
+            }
             AuthKind::Bootstrap => (
                 "bootstrap",
                 auth.user_id

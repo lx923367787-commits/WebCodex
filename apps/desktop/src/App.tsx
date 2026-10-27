@@ -10,16 +10,18 @@ import type {
 } from "./models/topology";
 import { FirstRun } from "./features/onboarding/FirstRun";
 import { Dashboard } from "./features/dashboard/Dashboard";
-import { ProjectsPanel } from "./features/projects/ProjectsPanel";
+import { NamedProjectsPanel } from "./features/projects/NamedProjectsPanel";
 import { ConnectionPanel } from "./features/connection/ConnectionPanel";
 import { ActivityPanel } from "./features/activity/ActivityPanel";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
+import { AiOffice } from "./features/ai-office/AiOffice";
+import { aiOfficeApi } from "./lib/ai-office-api";
 import { LANGUAGES, useLocale } from "./i18n/locale";
 import { desktopErrorPresentation, normalizeDesktopError, runtimeLabel, operationLabel } from "./i18n/presentation";
 
-type Navigation = "home" | "projects" | "connection" | "activity" | "settings";
+type Navigation = "home" | "projects" | "connection" | "activity" | "settings" | "office";
 
-const NAVIGATION: Navigation[] = ["home", "projects", "connection", "activity", "settings"];
+const NAVIGATION: Navigation[] = ["home", "projects", "connection", "activity", "settings", "office"];
 
 const REGULAR_TUNNEL_OBSERVATION_INTERVAL_MS = 1_500;
 const CHATGPT_ACTIVITY_OBSERVATION_INTERVAL_MS = 30_000;
@@ -127,6 +129,9 @@ export default function App() {
         if (!initial.topology) setShowSetup(true);
         commitState(initial);
         if (initial.current_operation) return;
+        // The native startup owns automatic recovery, including hidden launches.
+        // Keep this path only for an explicit startup retry.
+        if (startupAttempt === 0) return;
         const resumeExisting = Boolean(
           initial.topology
           && initial.runtime_autostart
@@ -453,11 +458,12 @@ export default function App() {
           />
         ))}
         {navigation === "projects" && (
-          <ProjectsPanel state={state} onState={commitState} onChooseProject={() => void chooseLocalProject()} />
+          <NamedProjectsPanel state={state} onState={commitState} onChooseProject={() => void chooseLocalProject()} />
         )}
         {navigation === "connection" && <ConnectionPanel state={state} onState={commitState} />}
         {navigation === "activity" && <ActivityPanel activity={activity} />}
         {navigation === "settings" && <SettingsPanel state={state} onState={commitState} />}
+        {navigation === "office" && <AiOffice api={aiOfficeApi} />}
       </main>
     </div>
   );

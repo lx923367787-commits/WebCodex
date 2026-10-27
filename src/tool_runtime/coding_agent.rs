@@ -27,7 +27,8 @@ use webcodex_core::coding_agent::{
 const IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 const START_RESPONSE_WAIT_SECS: u64 = 32;
 const CONTROL_RESPONSE_WAIT_SECS: u64 = 65;
-const DEFAULT_RUN_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_RUN_TIMEOUT_SECS: u64 =
+    webcodex_core::coding_agent::CODING_AGENT_RESPONSE_TIMEOUT_SECS;
 const PUBLIC_TOKEN_PREFIX: &str = "wcar2_";
 const PUBLIC_TOKEN_MAX_BYTES: usize = 192;
 const PUBLIC_TOKEN_EPOCH_BYTES: usize = 32;
@@ -1285,6 +1286,9 @@ fn validate_start_input(
 }
 
 pub(super) fn goal_owner_key(auth: Option<&AuthContext>) -> Result<String, String> {
+    if let Some(binding) = auth.and_then(|auth| auth.agent_run.as_ref()) {
+        return Ok(binding.host_goal_owner_key());
+    }
     stable_principal(auth).map(|principal| authority_fingerprint(&principal))
 }
 
@@ -1339,6 +1343,10 @@ fn authority_fingerprint(principal: &str) -> String {
     hasher.update(b"webcodex-coding-agent-authority-v1\0");
     hasher.update(principal.as_bytes());
     format!("auth_{:x}", hasher.finalize())
+}
+
+pub(super) fn coding_agent_authority_matches(auth: Option<&AuthContext>, expected: &str) -> bool {
+    stable_principal(auth).is_ok_and(|principal| authority_fingerprint(&principal) == expected)
 }
 
 fn deterministic_run_id(principal: &str, key: &str) -> String {

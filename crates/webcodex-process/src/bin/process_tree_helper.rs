@@ -25,6 +25,131 @@ fn main() {
     let mode = args.get(1).map(String::as_str).unwrap_or("sleep");
 
     match mode {
+        "--version" => println!("synthetic-metadata-cli 1.2.3"),
+        "--help" => {
+            println!("--model <model> Currently supported: (synthetic-model-a, synthetic-model-b)");
+            println!("--effort <effort> Supported: (low, high)");
+        }
+        "models" => {
+            println!("synthetic-model-a Synthetic Model A\nsynthetic-model-b Synthetic Model B")
+        }
+        "lpac-publish-delivery" => {
+            let manifest = args.get(2).expect("explicit synthetic manifest");
+            let artifact = args.get(3).expect("synthetic artifact text");
+            let ready = args.get(4).expect("readiness file");
+            let release = args.get(5).expect("release file");
+            std::fs::create_dir_all("publish/files").expect("create explicit publish directory");
+            std::fs::write("publish/files/artifact.txt", artifact)
+                .expect("write declared artifact");
+            std::fs::write("publish/manifest.json", manifest).expect("write explicit manifest");
+            std::fs::write("raw-log.txt", b"must-not-be-delivered-log")
+                .expect("write excluded synthetic log");
+            std::fs::write("../home/private.txt", b"must-not-be-delivered-home")
+                .expect("write excluded synthetic home");
+            std::fs::write(ready, b"explicit-publish-ready").expect("write ready marker");
+            wait_observation_release(release);
+        }
+        "lpac-resource-boundary" => {
+            let authorized = args.get(2).expect("authorized relative input");
+            let outside = args.get(3).expect("outside absolute sentinel");
+            let ready = args.get(4).expect("ready relative path");
+            let release = args.get(5).expect("release relative path");
+            assert_eq!(
+                std::fs::read(authorized).expect("read authorized input"),
+                b"authorized-input"
+            );
+            std::fs::write("owned-output.txt", b"workspace-write-ok")
+                .expect("write owned workspace");
+            let denied_read =
+                std::fs::read(outside).expect_err("outside private sentinel must be denied");
+            let denied_write = std::fs::OpenOptions::new()
+                .write(true)
+                .open(authorized)
+                .expect_err("immutable input write must be denied");
+            std::fs::write(ready, format!("authorized-input-read; workspace-write; outside-read-denied={:?}; input-write-denied={:?}", denied_read.raw_os_error(), denied_write.raw_os_error()))
+                .expect("write boundary readiness");
+            wait_observation_release(release);
+        }
+        "lpac-project-workspace" => {
+            let host_source = args.get(2).expect("host source sentinel");
+            let other_private = args.get(3).expect("other Agent sentinel");
+            assert_eq!(
+                std::fs::read_to_string("src/main.txt").unwrap(),
+                "source-v1"
+            );
+            std::fs::write("src/main.txt", "source-v2").unwrap();
+            assert!(
+                std::fs::read(host_source).is_err(),
+                "host source must remain outside the sandbox"
+            );
+            assert!(
+                std::fs::read(other_private).is_err(),
+                "other Agent private state must remain denied"
+            );
+            let manifest = std::env::var("WEBCODEX_PROJECT_MANIFEST").unwrap();
+            assert!(std::fs::read_to_string(&manifest)
+                .unwrap()
+                .contains("src/main.txt"));
+            assert!(std::fs::OpenOptions::new()
+                .write(true)
+                .open(&manifest)
+                .is_err());
+            assert!(observation_command()
+                .arg("lpac-project-verify")
+                .status()
+                .unwrap()
+                .success());
+            std::fs::write(
+                "project-ready",
+                "source-read; copy-edited; child-validation-passed; host-and-other-private-denied",
+            )
+            .unwrap();
+            wait_observation_release("release");
+        }
+        "lpac-project-verify" => {
+            assert_eq!(
+                std::fs::read_to_string("src/main.txt").unwrap(),
+                "source-v2"
+            );
+        }
+        "lpac-observe-tree" => {
+            let ready = args.get(2).expect("ready base");
+            let release = args.get(3).expect("release file");
+            let depth: usize = args.get(4).expect("depth").parse().expect("depth integer");
+            assert!(depth <= 2);
+            let mut child = if depth > 0 {
+                let mut command = observation_command();
+                command.args([
+                    "lpac-observe-tree",
+                    ready,
+                    release,
+                    &(depth - 1).to_string(),
+                ]);
+                Some(command.spawn().expect("spawn bounded observation child"))
+            } else {
+                None
+            };
+            std::fs::write(format!("{ready}.{depth}"), b"ready").expect("write ready");
+            wait_observation_release(release);
+            if let Some(child) = child.as_mut() {
+                let _ = child.wait();
+            }
+        }
+        "lpac-observe-short" => {
+            let done = args.get(2).expect("done file");
+            let release = args.get(3).expect("release file");
+            let count: usize = args.get(4).expect("count").parse().expect("count integer");
+            assert!((1..=16).contains(&count));
+            for _ in 0..count {
+                assert!(observation_command()
+                    .args(["sleep", "0"])
+                    .status()
+                    .expect("short child")
+                    .success());
+            }
+            std::fs::write(done, b"finished").expect("write completion marker");
+            wait_observation_release(release);
+        }
         "sleep" => {
             let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
             let code: i32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -86,6 +211,33 @@ fn main() {
             eprintln!("process_tree_helper: unknown mode: {other}");
             std::process::exit(2);
         }
+    }
+}
+
+fn observation_command() -> Command {
+    let mut command = Command::new(std::env::current_exe().expect("current_exe"));
+    // The strict LPAC fixture has no NUL-device grant. Reuse the already
+    // granted pipe handles instead of opening another device for child stdio.
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW: synthetic probes never open UI.
+    }
+    command
+}
+
+fn wait_observation_release(path: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !std::path::Path::new(path).is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "observation release deadline"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 

@@ -6,6 +6,8 @@
 
 mod access;
 mod access_control;
+mod agent_cli;
+mod agent_execution;
 mod capabilities;
 mod job_status;
 mod job_updates;
@@ -119,6 +121,14 @@ pub(crate) mod test_support {
 }
 
 pub use access::{DetachedInitiatorIdentity, RunnerAccess, RunnerAccessGroup};
+pub use agent_cli::{
+    AgentCliDeliveryStoreEvidence, AgentCliDeliveryStoreProof, VerifiedAgentCliDeliverySnapshot,
+};
+pub use agent_execution::{
+    AgentExecutionCloseDispatch, AgentExecutionDispatch, AgentExecutionStoreAdmission,
+    AgentExecutionStorePreparationEvidence, AgentExecutionTargetReservation,
+    PreparedAgentExecution, VerifiedAgentExecutionCloseReceipt,
+};
 pub use capabilities::{RunnerFeature, RunnerFeatureSet};
 pub use job_status::job_status_is_active;
 pub use job_updates::{

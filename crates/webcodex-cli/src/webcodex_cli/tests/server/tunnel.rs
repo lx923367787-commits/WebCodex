@@ -1,5 +1,35 @@
 use super::super::support::*;
 
+#[tokio::test]
+async fn legacy_pat_tunnel_configuration_reports_migration_before_launch() {
+    let _guard = env_test_guard();
+    let _env = EnvGuard::new().set("WEBCODEX_ADDR", "127.0.0.1:48001");
+    let tmp = tempfile::tempdir().unwrap();
+    let env_file = tmp.path().join("server.env");
+    let token_file = tmp.path().join("legacy-pat");
+    std::fs::write(
+        &env_file,
+        "WEBCODEX_ADDR=127.0.0.1:48001\nWEBCODEX_TOKEN=synthetic-bootstrap\n",
+    )
+    .unwrap();
+    std::fs::write(&token_file, "wc_pat_synthetic_legacy").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let error = crate::webcodex_cli::server::run_server_tunnel(ServerTunnelOptions {
+        env_file,
+        mcp_token_file: Some(token_file),
+    })
+    .await
+    .unwrap_err();
+    assert!(error.contains("Bootstrap provisioning"), "{error}");
+    assert!(error.contains("--mcp-token-file"));
+    assert!(!error.contains("wc_pat_synthetic_legacy"));
+    assert!(!error.contains("synthetic-bootstrap"));
+}
+
 #[test]
 fn server_tunnel_parser_is_machine_owned_and_openai_only() {
     let parsed = parse_server_tunnel(&args(&[

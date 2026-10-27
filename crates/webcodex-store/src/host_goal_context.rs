@@ -50,13 +50,14 @@ pub(super) fn context_gate(
     let Some(context) = context else {
         return Ok(());
     };
+    agent_run_context_gate(conn, owner, Some(context))?;
     for value in [&context.context_epoch, &context.identity_source] {
         bounded(value, 128)
             .map_err(|_| GoalStoreError::new("goal_context_missing", "Invalid context identity"))?;
     }
     if !matches!(
         context.identity_source.as_str(),
-        "window_bound" | "explicit_context_only"
+        "window_bound" | "explicit_context_only" | "agent_run"
     ) {
         return Err(GoalStoreError::new(
             "goal_context_identity_mismatch",
@@ -86,6 +87,12 @@ pub(super) fn context_gate(
                 "The source conversation is retired and read-only",
             ))
         }
+        Some(4) => {
+            return Err(GoalStoreError::new(
+                "goal_handoff_failed",
+                "Handoff failed; this execution is stopped and requires explicit user recovery",
+            ))
+        }
         Some(2) if !allow_draining => {
             return Err(GoalStoreError::new(
                 "goal_context_draining",
@@ -98,6 +105,48 @@ pub(super) fn context_gate(
     Ok(())
 }
 
+/// Run fencing precedes replay as well as ordinary mutation. Unlike the
+/// complete context gate, it does not alter historical window replay semantics.
+pub(super) fn agent_run_context_gate(
+    conn: &Connection,
+    owner: &str,
+    context: Option<&HostGoalInvocationContext>,
+) -> Result<(), GoalStoreError> {
+    if let Some(context) = context.filter(|context| context.identity_source == "agent_run") {
+        super::agent_isolation::verify_agent_run_context_on_connection(
+            conn,
+            owner,
+            &context.context_epoch,
+        )
+        .map_err(|_| GoalStoreError::new("agent_run_invalid", "Agent run is unavailable"))?;
+    }
+    Ok(())
+}
+
+pub(super) fn agent_run_goal_context_gate(
+    conn: &Connection,
+    owner: &str,
+    context: Option<&HostGoalInvocationContext>,
+    goal_id: Option<&str>,
+) -> Result<(), GoalStoreError> {
+    if let Some(context) = context.filter(|context| context.identity_source == "agent_run") {
+        let binding = super::agent_isolation::verify_agent_run_context_on_connection(
+            conn,
+            owner,
+            &context.context_epoch,
+        )
+        .map_err(|e| GoalStoreError::new(e.code(), "Agent run is unavailable"))?;
+        super::agent_isolation::agent_run_goal_scope_on_connection(conn, &binding, goal_id)
+            .map_err(|e| {
+                GoalStoreError::new(
+                    e.code(),
+                    "Agent run is limited to its authorized handoff Goal",
+                )
+            })?;
+    }
+    Ok(())
+}
+
 /// Closeout permission cannot be redirected to a second owned Goal while draining.
 pub(super) fn context_goal_gate(
     conn: &Connection,
@@ -106,6 +155,42 @@ pub(super) fn context_goal_gate(
     goal_id: &str,
     allow_draining: bool,
 ) -> Result<(), GoalStoreError> {
+    agent_run_goal_context_gate(conn, owner, context, Some(goal_id))?;
+    let handoff: Option<(String, String, Option<String>)> = conn.query_row(
+        "SELECT json_extract(snapshot_json,'$.status'),json_extract(snapshot_json,'$.execution_owner_epoch'),json_extract(snapshot_json,'$.successor_agent_run_id') FROM wc_host_goal_handoffs WHERE owner_key=?1 AND goal_id=?2",
+        params![owner, goal_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional().map_err(context_storage)?;
+    if let Some((status, execution_owner, successor_run)) = handoff {
+        if status != "committed" {
+            return Err(GoalStoreError::new(if status == "failed" {"goal_handoff_failed"} else {"goal_handoff_pending"}, "Goal execution is suspended during handoff; only handoff recovery reads and confirmation are allowed"));
+        }
+        let owns = match context {
+            Some(c) if c.identity_source == "agent_run" => {
+                let binding = super::agent_isolation::verify_agent_run_context_on_connection(
+                    conn,
+                    owner,
+                    &c.context_epoch,
+                )
+                .map_err(|e| GoalStoreError::new(e.code(), "Agent run is unavailable"))?;
+                successor_run.as_deref() == Some(binding.run_id())
+                    && super::agent_isolation::agent_run_task_goal_on_connection(conn, &binding)
+                        .map_err(|e| GoalStoreError::new(e.code(), "Agent run is unavailable"))?
+                        .as_deref()
+                        == Some(goal_id)
+            }
+            Some(c) => {
+                successor_run.is_none()
+                    && c.identity_source == "window_bound"
+                    && c.context_epoch == execution_owner
+            }
+            None => false,
+        };
+        if !owns {
+            return Err(GoalStoreError::new(
+                "goal_execution_owner_mismatch",
+                "Only the server-bound current Goal execution owner may mutate this Goal",
+            ));
+        }
+    }
     context_gate(conn, owner, context, allow_draining)?;
     if let Some(context) = context {
         let draining: bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_host_context_states WHERE owner_key=?1 AND context_epoch=?2 AND state=2)",params![owner,context.context_epoch],|r|r.get(0)).map_err(context_storage)?;
@@ -131,7 +216,68 @@ fn bounded(value: &str, limit: usize) -> anyhow::Result<()> {
 }
 
 impl Database {
+    /// Construct and initialize the Agent run context without trusting model
+    /// metadata. Existing thresholds and retired/draining state remain intact.
+    pub fn ensure_agent_host_context(
+        &self,
+        binding: &super::VerifiedAgentRun,
+        thresholds: Option<(u64, u64)>,
+    ) -> Result<HostGoalInvocationContext, GoalStoreError> {
+        let (warning, handoff) = thresholds.unwrap_or((600_000, 800_000));
+        if !(1000..=10_000_000).contains(&warning) || handoff <= warning || handoff > 20_000_000 {
+            return Err(GoalStoreError::new(
+                "invalid_context_thresholds",
+                "Invalid context thresholds",
+            ));
+        }
+        let owner = binding.host_goal_owner_key();
+        let epoch = binding.run_id();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(context_storage)?;
+        super::agent_isolation::validate_agent_run_on_connection(&tx, binding)
+            .map_err(|_| GoalStoreError::new("agent_run_invalid", "Agent run is unavailable"))?;
+        let existing:Option<Option<String>>=tx.query_row(
+            "SELECT identity_source FROM wc_host_context_states WHERE owner_key=?1 AND context_epoch=?2",
+            params![owner,epoch],|row|row.get(0)).optional().map_err(context_storage)?;
+        if existing
+            .as_ref()
+            .and_then(|source| source.as_deref())
+            .is_some_and(|source| source != "agent_run")
+        {
+            return Err(GoalStoreError::new(
+                "goal_context_identity_mismatch",
+                "Context identity source differs",
+            ));
+        }
+        let count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM wc_host_context_meters", [], |row| {
+                row.get(0)
+            })
+            .map_err(context_storage)?;
+        if existing.is_none() && count >= 32768 {
+            return Err(GoalStoreError::new(
+                "goal_store_unavailable",
+                "Context capacity exhausted",
+            ));
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO wc_host_context_meters VALUES(?1,?2,0,?3,?4,0,0,0)",
+            params![owner, epoch, warning as i64, handoff as i64],
+        )
+        .map_err(context_storage)?;
+        tx.execute("INSERT INTO wc_host_context_states(owner_key,context_epoch,state,identity_source) VALUES(?1,?2,0,'agent_run') ON CONFLICT(owner_key,context_epoch) DO UPDATE SET identity_source=COALESCE(identity_source,'agent_run')",
+            params![owner,epoch]).map_err(context_storage)?;
+        tx.commit().map_err(context_storage)?;
+        Ok(HostGoalInvocationContext {
+            context_epoch: epoch.into(),
+            identity_source: "agent_run".into(),
+        })
+    }
+
     pub(super) fn ensure_host_goal_context_schema(conn: &Connection) -> anyhow::Result<()> {
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS wc_host_goal_handoffs (owner_key TEXT NOT NULL, goal_id TEXT NOT NULL REFERENCES wc_host_goals(goal_id), snapshot_json TEXT NOT NULL, PRIMARY KEY(owner_key,goal_id));")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS wc_host_goal_windows (
             owner_key TEXT NOT NULL, window_key TEXT NOT NULL, binding_json TEXT NOT NULL,
@@ -166,6 +312,19 @@ impl Database {
         if !has_node {
             // Old whole-goal receipts cannot authorize any specific node.
             conn.execute("ALTER TABLE wc_host_goal_context_reads ADD COLUMN node_id TEXT NOT NULL DEFAULT ''", [])?;
+        }
+        let has_resume: bool = conn
+            .prepare("PRAGMA table_info(wc_host_context_states)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|name| name == "resume_started_json");
+        if !has_resume {
+            // An old binding or context read is not evidence of a successor bootstrap.
+            conn.execute(
+                "ALTER TABLE wc_host_context_states ADD COLUMN resume_started_json TEXT",
+                [],
+            )?;
         }
         Ok(())
     }
@@ -212,7 +371,7 @@ impl Database {
         Self::ensure_host_goal_context_schema(&conn).map_err(context_storage)?;
         conn.query_row("SELECT state,identity_source,retirement_goal_id,checkpoint_sequence,retired_at FROM wc_host_context_states WHERE owner_key=?1 AND context_epoch=?2",params![owner,epoch],|r| {
             let state: i64 = r.get(0)?;
-            Ok(HostContextState {context_epoch:epoch.into(),state:match state {3=>"retired",2=>"draining",1=>"warning",_=>"active"}.into(),identity_source:r.get(1)?,retirement_goal_id:r.get(2)?,checkpoint_sequence:r.get(3)?,retired_at:r.get(4)?})
+            Ok(HostContextState {context_epoch:epoch.into(),state:match state {4=>"stopped",3=>"retired",2=>"draining",1=>"warning",_=>"active"}.into(),identity_source:r.get(1)?,retirement_goal_id:r.get(2)?,checkpoint_sequence:r.get(3)?,retired_at:r.get(4)?})
         }).optional().map_err(context_storage)
     }
 
@@ -225,6 +384,16 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         Self::ensure_host_goal_context_schema(&conn).map_err(context_storage)?;
         context_gate(&conn, owner, context, allow_draining)
+    }
+
+    pub fn gate_host_goal_execution(
+        &self,
+        owner: &str,
+        goal_id: &str,
+        context: Option<&HostGoalInvocationContext>,
+    ) -> Result<(), GoalStoreError> {
+        let conn = self.conn.lock().unwrap();
+        context_goal_gate(&conn, owner, context, goal_id, false)
     }
 
     pub fn bind_host_goal_window(
@@ -390,6 +559,58 @@ impl Database {
         Ok(())
     }
 
+    /// A complete node package delivered to the exact active Agent run. The
+    /// receipt cannot be written by a retired run or for a superseded snapshot.
+    pub fn ack_agent_host_goal_context_read(
+        &self,
+        binding: &super::VerifiedAgentRun,
+        goal_id: &str,
+        revision: u64,
+        plan_version: u64,
+        node_id: &str,
+    ) -> Result<(), GoalStoreError> {
+        bounded(node_id, 64).map_err(context_storage)?;
+        let owner = binding.host_goal_owner_key();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(context_storage)?;
+        super::agent_isolation::validate_agent_run_on_connection(&tx, binding)
+            .map_err(|_| GoalStoreError::new("agent_run_invalid", "Agent run is unavailable"))?;
+        super::agent_isolation::agent_run_goal_scope_on_connection(&tx, binding, Some(goal_id))
+            .map_err(|e| {
+                GoalStoreError::new(
+                    e.code(),
+                    "Agent run is limited to its authorized handoff Goal",
+                )
+            })?;
+        let owned:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM wc_host_goals WHERE owner_key=?1 AND goal_id=?2 AND revision=?3 AND json_extract(snapshot_json,'$.plan_version')=?4)",params![owner,goal_id,revision,plan_version],|row|row.get(0)).map_err(context_storage)?;
+        if !owned {
+            return Err(GoalStoreError::new(
+                "goal_context_read_unavailable",
+                "Goal snapshot changed",
+            ));
+        }
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM wc_host_goal_context_reads",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(context_storage)?;
+        let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM wc_host_goal_context_reads WHERE owner_key=?1 AND context_epoch=?2 AND goal_id=?3)",params![owner,binding.run_id(),goal_id],|row|row.get(0)).map_err(context_storage)?;
+        if !exists && count >= 131072 {
+            return Err(GoalStoreError::new(
+                "goal_context_read_unavailable",
+                "Context read capacity reached",
+            ));
+        }
+        tx.execute("INSERT INTO wc_host_goal_context_reads(owner_key,context_epoch,goal_id,revision,plan_version,node_id) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(owner_key,context_epoch,goal_id) DO UPDATE SET revision=excluded.revision,plan_version=excluded.plan_version,node_id=excluded.node_id",
+            params![owner,binding.run_id(),goal_id,revision,plan_version,node_id]).map_err(context_storage)?;
+        tx.commit().map_err(context_storage)?;
+        Ok(())
+    }
+
     pub fn host_goal_context_read_matches(
         &self,
         owner: &str,
@@ -417,6 +638,41 @@ impl Database {
         unmeasured: bool,
         thresholds: Option<(u64, u64)>,
     ) -> anyhow::Result<HostContextMeter> {
+        self.observe_host_context_impl(owner, epoch, event_id, tokens, unmeasured, thresholds, None)
+    }
+
+    /// Count only observed input/output sizes under the exact current run. The
+    /// immutable existing threshold policy is shared with the Host Goal meter.
+    pub fn observe_agent_host_context(
+        &self,
+        binding: &super::VerifiedAgentRun,
+        event_id: &str,
+        tokens: u64,
+        unmeasured: bool,
+    ) -> Result<HostContextMeter, GoalStoreError> {
+        self.observe_host_context_impl(
+            &binding.host_goal_owner_key(),
+            binding.run_id(),
+            event_id,
+            tokens,
+            unmeasured,
+            None,
+            Some(binding),
+        )
+        .map_err(context_storage)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_host_context_impl(
+        &self,
+        owner: &str,
+        epoch: &str,
+        event_id: &str,
+        tokens: u64,
+        unmeasured: bool,
+        thresholds: Option<(u64, u64)>,
+        agent_run: Option<&super::VerifiedAgentRun>,
+    ) -> anyhow::Result<HostContextMeter> {
         bounded(owner, 512)?;
         bounded(epoch, 128)?;
         bounded(event_id, 128)?;
@@ -428,6 +684,17 @@ impl Database {
         let mut conn = self.conn.lock().unwrap();
         Self::ensure_host_goal_context_schema(&conn)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(binding) = agent_run {
+            super::agent_isolation::validate_agent_run_on_connection(&tx, binding)?;
+            let existing:Option<Option<String>>=tx.query_row("SELECT identity_source FROM wc_host_context_states WHERE owner_key=?1 AND context_epoch=?2",
+                params![owner,epoch],|row|row.get(0)).optional()?;
+            anyhow::ensure!(
+                existing
+                    .flatten()
+                    .is_none_or(|source| source == "agent_run"),
+                "Agent context source differs"
+            );
+        }
         let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM wc_host_context_meters WHERE owner_key=?1 AND context_epoch=?2)", params![owner,epoch], |r| r.get(0))?;
         let count: i64 = tx.query_row("SELECT COUNT(*) FROM wc_host_context_meters", [], |r| {
             r.get(0)
@@ -467,6 +734,9 @@ impl Database {
         };
         tx.execute("UPDATE wc_host_context_meters SET warned_level=MAX(warned_level,?3) WHERE owner_key=?1 AND context_epoch=?2",params![owner,epoch,level])?;
         tx.execute("INSERT INTO wc_host_context_states(owner_key,context_epoch,state) VALUES(?1,?2,?3) ON CONFLICT(owner_key,context_epoch) DO UPDATE SET state=MAX(state,excluded.state)",params![owner,epoch,level])?;
+        if agent_run.is_some() {
+            tx.execute("UPDATE wc_host_context_states SET identity_source=COALESCE(identity_source,'agent_run') WHERE owner_key=?1 AND context_epoch=?2",params![owner,epoch])?;
+        }
         tx.commit()?;
         Ok(HostContextMeter {
             context_epoch: epoch.into(),

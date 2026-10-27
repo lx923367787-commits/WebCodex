@@ -1,6 +1,6 @@
 //! Owner-scoped, revision-fenced host goals. Plan publication never authorizes execution.
 
-use super::host_goal_context::{context_gate, context_goal_gate};
+use super::host_goal_context::{agent_run_goal_context_gate, context_gate, context_goal_gate};
 use super::{Database, GoalStoreError, HostContextState};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -9,10 +9,14 @@ use std::path::PathBuf;
 use webcodex_core::goal::GoalCriterion;
 use webcodex_core::host_goal::*;
 
+#[path = "host_goal_handoff.rs"]
+mod handoff;
 #[path = "host_goal_repair.rs"]
 mod repair;
 #[path = "host_goal_review.rs"]
 mod review;
+pub(crate) use handoff::recover_handoff_run_on_connection;
+pub use handoff::{AgentHandoffClaimGrant, AgentHostWindowBinding, HostGoalHandoff};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostGoalMutation {
@@ -49,6 +53,15 @@ pub struct HostGoalHandoffSnapshot {
     pub attempt: Option<HostGoalAttempt>,
     pub business_operation: Option<HostGoalOperation>,
     pub unresolved_operation_count: u64,
+    pub resume_started: Option<HostGoalResumeStarted>,
+}
+
+/// The first accepted successor bootstrap, not an execution claim or completion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostGoalResumeStarted {
+    pub context_epoch: String,
+    pub identity_source: String,
+    pub started_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +70,8 @@ pub enum HostGoalCheckpointAction {
     Progress,
     Handoff,
     Pause,
+    /// Private Agent exit: pause and remove this exact run's binding atomically.
+    Exit,
     Block,
     Cancel,
     Replan,
@@ -494,6 +509,42 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, None)?;
+        crate::agent_isolation::authorize_agent_goal_creation_on_connection(
+            &tx,
+            owner,
+            context,
+            task_directory.as_deref(),
+        )
+        .map_err(|e| {
+            GoalStoreError::new(
+                e.code(),
+                "Agent assignment does not authorize this Goal directory",
+            )
+        })?;
+        if context.is_some_and(|c| c.identity_source == "agent_run") && task_directory.is_none() {
+            // The previous private adapter translated an omitted wire directory
+            // into explicit "workspace". Replay its exact receipt without
+            // relocating the Goal or upgrading its historical authorization.
+            let old_workspace_fingerprint =
+                request_hash(&(project, project_root, "workspace", objective))?;
+            match replay::<HostGoalMutation>(&tx, owner, "create", key, &old_workspace_fingerprint)
+            {
+                Ok(Some(mut value))
+                    if value.goal.task_directory.as_deref() == Some("workspace")
+                        && value.goal.project == project
+                        && value.goal.project_root == project_root
+                        && value.goal.objective == objective =>
+                {
+                    value.goal.owner_key = owner.into();
+                    value.replayed = true;
+                    return Ok(value);
+                }
+                Ok(_) => {}
+                Err(error) if error.code() == "goal_idempotency_conflict" => {}
+                Err(error) => return Err(error),
+            }
+        }
         if task_directory.as_deref() == Some(".") {
             // An upgraded caller's omitted task_directory defaults to ".".
             // Recover the exact historical creation receipt without moving
@@ -523,10 +574,25 @@ impl Database {
         if count >= 4096 {
             return Err(invalid("Host goal storage limit reached"));
         }
+        let goal_id = format!("hgoal_{}", uuid::Uuid::new_v4().simple());
+        let task_directory = if context.is_some_and(|c| c.identity_source == "agent_run")
+            && task_directory.is_none()
+        {
+            Some(format!("workspace/{goal_id}"))
+        } else {
+            task_directory
+        };
         let goal = HostGoalRecord {
-            goal_id: format!("hgoal_{}", uuid::Uuid::new_v4().simple()), owner_key: owner.into(), project: project.into(), project_root: project_root.into(), task_directory, objective: objective.into(), phase: HostGoalPhase::Planning, revision: 1, plan_version: 0, acceptance_contract_version: 0, plan_hash: None, plan_materialized: false, confirmation: None, current_node_id: None, current_attempt_id: None, fence: 0, completed_node_ids: Vec::new(), state: HostGoalState { next_step: "Discuss requirements and save a plan with final acceptance criteria; wait for the user's explicit instruction to start.".into(), ..Default::default() }, created_at: now, updated_at: now,
+            goal_id, owner_key: owner.into(), project: project.into(), project_root: project_root.into(), task_directory, objective: objective.into(), phase: HostGoalPhase::Planning, revision: 1, plan_version: 0, acceptance_contract_version: 0, plan_hash: None, plan_materialized: false, confirmation: None, current_node_id: None, current_attempt_id: None, fence: 0, completed_node_ids: Vec::new(), state: HostGoalState { next_step: "Discuss requirements and save a plan with final acceptance criteria; wait for the user's explicit instruction to start.".into(), ..Default::default() }, created_at: now, updated_at: now,
         };
         tx.execute("INSERT INTO wc_host_goals(goal_id,owner_key,project,project_root,phase,revision,created_at,updated_at,snapshot_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,?8)",params![goal.goal_id,owner,project,project_root,goal.phase.as_str(),goal.revision,now,encode(&goal)?]).map_err(unavailable)?;
+        crate::agent_isolation::bind_agent_enrollment_goal_on_connection(
+            &tx,
+            owner,
+            context,
+            &goal.goal_id,
+        )
+        .map_err(|e| GoalStoreError::new(e.code(), "Agent assignment already owns another Goal"))?;
         select_current(&tx, &goal, now)?;
         let result = HostGoalMutation {
             goal,
@@ -543,6 +609,52 @@ impl Database {
         id: &str,
     ) -> Result<Option<HostGoalRecord>, GoalStoreError> {
         read(&self.conn.lock().unwrap(), owner, id)
+    }
+
+    /// One authorized snapshot for the private Agent adapter. The run fence,
+    /// owned Goal, current plan and current attempt are observed together.
+    pub fn read_host_goal_for_agent_run(
+        &self,
+        binding: &super::VerifiedAgentRun,
+        id: &str,
+    ) -> Result<
+        (
+            HostGoalRecord,
+            Option<HostGoalPlanVersion>,
+            Option<HostGoalAttempt>,
+        ),
+        GoalStoreError,
+    > {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(unavailable)?;
+        super::agent_isolation::validate_agent_run_on_connection(&tx, binding)
+            .map_err(|_| GoalStoreError::new("agent_run_invalid", "Agent run is unavailable"))?;
+        super::agent_isolation::agent_run_goal_scope_on_connection(&tx, binding, Some(id))
+            .map_err(|e| {
+                GoalStoreError::new(
+                    e.code(),
+                    "Agent run is limited to its authorized handoff Goal",
+                )
+            })?;
+        let owner = binding.host_goal_owner_key();
+        let goal = read(&tx, &owner, id)?
+            .filter(|goal| goal.project == binding.project())
+            .ok_or_else(not_found)?;
+        let plan = if goal.plan_version > 0 {
+            Some(current_plan(&tx, &goal)?)
+        } else {
+            None
+        };
+        let attempt = if let Some(attempt_id) = goal.current_attempt_id.as_deref() {
+            tx.query_row("SELECT snapshot_json FROM wc_host_goal_attempts WHERE goal_id=?1 AND attempt_id=?2",
+                params![goal.goal_id,attempt_id],|row|row.get::<_,String>(0)).optional().map_err(unavailable)?.map(decode).transpose()?
+        } else {
+            None
+        };
+        tx.commit().map_err(unavailable)?;
+        Ok((goal, plan, attempt))
     }
 
     pub fn list_host_goals(
@@ -607,7 +719,7 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
-        context_gate(&tx, owner, context, false)?;
+        context_goal_gate(&tx, owner, context, id, false)?;
         let goal = read(&tx, owner, id)?.ok_or_else(not_found)?;
         select_current(&tx, &goal, now)?;
         tx.commit().map_err(unavailable)?;
@@ -678,6 +790,7 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, Some(id))?;
         if let Some(mut value) =
             replay::<HostGoalPlanMutation>(&tx, owner, &scope, key, &fingerprint)?
         {
@@ -685,7 +798,7 @@ impl Database {
             value.replayed = true;
             return Ok(value);
         }
-        context_gate(&tx, owner, context, false)?;
+        context_goal_gate(&tx, owner, context, id, false)?;
         let mut goal = required(&tx, owner, id, revision)?;
         if goal.phase == HostGoalPhase::Cancelled {
             return Err(conflict("Cancelled goal cannot be replanned"));
@@ -828,6 +941,7 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, Some(id))?;
         let mut goal = read(&tx, owner, id)?.ok_or_else(not_found)?;
         if goal.plan_version != version || goal.plan_hash.as_deref() != Some(plan_hash) {
             return Err(conflict("Saved plan was superseded during publication"));
@@ -849,7 +963,7 @@ impl Database {
                 replayed: true,
             });
         }
-        context_gate(&tx, owner, context, false)?;
+        context_goal_gate(&tx, owner, context, id, false)?;
         if goal.phase != HostGoalPhase::Planning || goal.revision != plan.preparation_revision {
             return Err(conflict("Goal changed during plan publication; read current state before publishing a new version"));
         }
@@ -923,13 +1037,14 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, Some(id))?;
         if let Some(mut result) = replay::<HostGoalMutation>(&tx, owner, &scope, key, &fingerprint)?
         {
             result.goal.owner_key = owner.into();
             result.replayed = true;
             return Ok(result);
         }
-        context_gate(&tx, owner, context, false)?;
+        context_goal_gate(&tx, owner, context, id, false)?;
         let mut goal = required(&tx, owner, id, revision)?;
         if !matches!(
             goal.phase,
@@ -1090,6 +1205,7 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, Some(id))?;
         if let Some(mut result) =
             replay::<HostGoalClaimMutation>(&tx, owner, &scope, key, &fingerprint)?
         {
@@ -1097,9 +1213,16 @@ impl Database {
             result.replayed = true;
             return Ok(result);
         }
-        context_gate(&tx, owner, context, false)?;
+        context_goal_gate(&tx, owner, context, id, false)?;
         let mut goal = required(&tx, owner, id, revision)?;
         if let Some(version) = plan_version {
+            if let Some(context) = context.filter(|context| context.identity_source == "agent_run")
+            {
+                let complete:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM wc_host_goal_context_reads WHERE owner_key=?1 AND context_epoch=?2 AND goal_id=?3 AND revision=?4 AND plan_version=?5 AND node_id=?6)",params![owner,context.context_epoch,id,revision,version,node_id],|row|row.get(0)).map_err(unavailable)?;
+                if !complete {
+                    return Err(GoalStoreError::new("goal_context_read_required","Read this exact node's complete requirements in the current Agent run before claiming"));
+                }
+            }
             if goal.plan_version != version
                 || goal.current_attempt_id.as_deref() != takeover_attempt_id
             {
@@ -1280,6 +1403,7 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, Some(id))?;
         read(&tx, owner, id)?.ok_or_else(not_found)?;
         let replay = client_request_replay(
             &tx,
@@ -1381,6 +1505,18 @@ impl Database {
         context: Option<&HostGoalInvocationContext>,
         verified_background_operations: &[HostGoalOperation],
     ) -> Result<HostGoalMutation, GoalStoreError> {
+        if action == HostGoalCheckpointAction::Exit && context.is_none() {
+            return Err(GoalStoreError::new(
+                "goal_context_missing",
+                "Exit requires its exact invocation context",
+            ));
+        }
+        if action == HostGoalCheckpointAction::Handoff
+            && context
+                .is_none_or(|c| !matches!(c.identity_source.as_str(), "window_bound" | "agent_run"))
+        {
+            return Err(GoalStoreError::new("goal_handoff_identity_required", "Handoff requires a server-bound conversation identity; an anonymous or self-declared context cannot transfer execution"));
+        }
         state.validate().map_err(invalid)?;
         bounded(reason, 4096, "checkpoint reason")?;
         if resolutions.len() > 8 {
@@ -1394,6 +1530,12 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, Some(id))?;
+        if action == HostGoalCheckpointAction::Exit {
+            // Exit removes an execution binding, so even exact receipt replay
+            // is unavailable after this context starts draining or retires.
+            context_goal_gate(&tx, owner, context, id, false)?;
+        }
         if let Some(request_hash) = client_request_hash {
             read(&tx, owner, id)?.ok_or_else(not_found)?;
             if let Some(result) = client_request_replay(
@@ -1419,7 +1561,10 @@ impl Database {
             owner,
             context,
             id,
-            action != HostGoalCheckpointAction::Replan,
+            !matches!(
+                action,
+                HostGoalCheckpointAction::Replan | HostGoalCheckpointAction::Exit
+            ),
         )?;
         let mut goal = required(&tx, owner, id, revision)?;
         if goal.phase.terminal() {
@@ -1527,7 +1672,7 @@ impl Database {
         goal.state = state.clone();
         match action {
             HostGoalCheckpointAction::Progress | HostGoalCheckpointAction::Handoff => {}
-            HostGoalCheckpointAction::Pause => {
+            HostGoalCheckpointAction::Pause | HostGoalCheckpointAction::Exit => {
                 fence_attempt(&tx, &mut goal, now)?;
                 goal.phase = HostGoalPhase::Paused;
             }
@@ -1555,6 +1700,7 @@ impl Database {
                 HostGoalCheckpointAction::Progress => "progress",
                 HostGoalCheckpointAction::Handoff => "handoff",
                 HostGoalCheckpointAction::Pause => "pause",
+                HostGoalCheckpointAction::Exit => "exit",
                 HostGoalCheckpointAction::Block => "block",
                 HostGoalCheckpointAction::Cancel => "cancel",
                 HostGoalCheckpointAction::Replan => "replan",
@@ -1570,10 +1716,11 @@ impl Database {
         )
         .map_err(unavailable)?;
         if let Some(context) = context.filter(|_| action == HostGoalCheckpointAction::Handoff) {
-            let changed = tx.execute("UPDATE wc_host_context_states SET state=3,identity_source=COALESCE(identity_source,?3),retirement_goal_id=?4,checkpoint_sequence=?5,retired_at=?6 WHERE owner_key=?1 AND context_epoch=?2 AND state<3",params![owner,context.context_epoch,context.identity_source,id,checkpoint.sequence,now]).map_err(unavailable)?;
-            if changed != 1 {
-                return Err(conflict("Source context retirement changed during handoff"));
-            }
+            handoff::prepare(&tx, &goal, &checkpoint, context, now)?;
+        }
+        if let Some(context) = context.filter(|_| action == HostGoalCheckpointAction::Exit) {
+            tx.execute("DELETE FROM wc_host_goal_windows WHERE owner_key=?1 AND window_key=?2 AND json_extract(binding_json,'$.context_epoch')=?2 AND json_extract(binding_json,'$.goal_id')=?3",
+                params![owner,context.context_epoch,id]).map_err(unavailable)?;
         }
         let result = HostGoalMutation {
             goal,
@@ -1792,6 +1939,7 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, Some(id))?;
         read(&tx, owner, id)?.ok_or_else(not_found)?;
         let replay = check_request_replay(&tx, owner, id, key, request_hash)?;
         if replay.is_none() {
@@ -1920,6 +2068,7 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, Some(&binding.goal_id))?;
         let goal = read(&tx, owner, &binding.goal_id)?.ok_or_else(not_found)?;
         let old:Option<String>=tx.query_row("SELECT snapshot_json FROM wc_host_goal_operations WHERE goal_id=?1 AND operation_id=?2",params![binding.goal_id,operation_id],|r|r.get(0)).optional().map_err(unavailable)?;
         if let Some(old) = old {
@@ -2123,7 +2272,7 @@ impl Database {
         let goal = read(&tx, owner, id)?.ok_or_else(not_found)?;
         let source=tx.query_row("SELECT state,identity_source,retirement_goal_id,checkpoint_sequence,retired_at FROM wc_host_context_states WHERE owner_key=?1 AND context_epoch=?2",params![owner,source_epoch],|r| {
             let state: i64=r.get(0)?;
-            Ok(HostContextState {context_epoch:source_epoch.into(),state:match state {3=>"retired",2=>"draining",1=>"warning",_=>"active"}.into(),identity_source:r.get(1)?,retirement_goal_id:r.get(2)?,checkpoint_sequence:r.get(3)?,retired_at:r.get(4)?})
+            Ok(HostContextState {context_epoch:source_epoch.into(),state:match state {4=>"stopped",3=>"retired",2=>"draining",1=>"warning",_=>"active"}.into(),identity_source:r.get(1)?,retirement_goal_id:r.get(2)?,checkpoint_sequence:r.get(3)?,retired_at:r.get(4)?})
         }).optional().map_err(unavailable)?;
         let checkpoint = if let Some(sequence) = source
             .as_ref()
@@ -2131,6 +2280,11 @@ impl Database {
             .and_then(|s| s.checkpoint_sequence)
         {
             tx.query_row("SELECT snapshot_json FROM wc_host_goal_checkpoints WHERE goal_id=?1 AND sequence=?2",params![id,sequence],|r|r.get::<_,String>(0)).optional().map_err(unavailable)?.map(decode::<HostGoalCheckpoint>).transpose()?
+        } else {
+            None
+        };
+        let resume_started = if checkpoint.is_some() {
+            tx.query_row("SELECT resume_started_json FROM wc_host_context_states WHERE owner_key=?1 AND context_epoch=?2 AND retirement_goal_id=?3", params![owner,source_epoch,id], |r| r.get::<_,Option<String>>(0)).optional().map_err(unavailable)?.flatten().map(decode::<HostGoalResumeStarted>).transpose()?
         } else {
             None
         };
@@ -2155,7 +2309,64 @@ impl Database {
             attempt,
             business_operation,
             unresolved_operation_count,
+            resume_started,
         })
+    }
+
+    /// Discover the latest committed handoff without guessing from mutable current-chat pointers.
+    pub fn latest_host_goal_handoff(
+        &self,
+        owner: &str,
+        id: &str,
+    ) -> Result<Option<(String, u64, i64)>, GoalStoreError> {
+        let conn = self.conn.lock().unwrap();
+        read(&conn, owner, id)?.ok_or_else(not_found)?;
+        if let Some(value) = conn
+            .query_row(
+                "SELECT snapshot_json FROM wc_host_goal_handoffs WHERE owner_key=?1 AND goal_id=?2",
+                params![owner, id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(unavailable)?
+        {
+            let handoff: HostGoalHandoff = decode(value)?;
+            return Ok(Some((
+                handoff.source_context_epoch,
+                handoff.checkpoint_sequence,
+                handoff.committed_at.unwrap_or(handoff.created_at),
+            )));
+        }
+        conn.query_row("SELECT context_epoch,checkpoint_sequence,retired_at FROM wc_host_context_states WHERE owner_key=?1 AND retirement_goal_id=?2 AND state=3 AND checkpoint_sequence IS NOT NULL AND retired_at IS NOT NULL ORDER BY checkpoint_sequence DESC LIMIT 1", params![owner,id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional().map_err(unavailable)
+    }
+
+    /// Record only an accepted activating bootstrap after the source handoff.
+    /// The source row owns the receipt, so repeated reads, rebindings and later
+    /// handoffs cannot replace it. This bookkeeping grants no execution authority.
+    pub fn record_host_goal_resume_started(
+        &self,
+        owner: &str,
+        id: &str,
+        revision: u64,
+        context: &HostGoalInvocationContext,
+        now: i64,
+    ) -> Result<(), GoalStoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(unavailable)?;
+        context_gate(&tx, owner, Some(context), false)?;
+        required(&tx, owner, id, revision)?;
+        let source: Option<String> = tx.query_row("SELECT context_epoch FROM wc_host_context_states WHERE owner_key=?1 AND retirement_goal_id=?2 AND state=3 AND checkpoint_sequence IS NOT NULL AND retired_at IS NOT NULL ORDER BY checkpoint_sequence DESC LIMIT 1", params![owner,id], |r| r.get(0)).optional().map_err(unavailable)?;
+        if let Some(source) = source.filter(|source| source != &context.context_epoch) {
+            let receipt = HostGoalResumeStarted {
+                context_epoch: context.context_epoch.clone(),
+                identity_source: context.identity_source.clone(),
+                started_at: now,
+            };
+            tx.execute("UPDATE wc_host_context_states SET resume_started_json=?4 WHERE owner_key=?1 AND context_epoch=?2 AND retirement_goal_id=?3 AND resume_started_json IS NULL", params![owner,source,id,encode(&receipt)?]).map_err(unavailable)?;
+        }
+        tx.commit().map_err(unavailable)
     }
 
     /// Bounded evidence lookup remains correct after arbitrarily long operation history.
@@ -2305,6 +2516,7 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
+        agent_run_goal_context_gate(&tx, owner, context, Some(&binding.goal_id))?;
         if let Some(request_hash) = client_request_hash {
             read(&tx, owner, &binding.goal_id)?.ok_or_else(not_found)?;
             if let Some(result) =

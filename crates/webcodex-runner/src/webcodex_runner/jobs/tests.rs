@@ -369,6 +369,7 @@ fn detached_job_request(
         client_id: "detached-agent".to_string(),
         runner_instance_id: "old-runner-instance".to_string(),
         context: ShellJobContext {
+            agent_execution: None,
             document: None,
             runtime_project_id: Some("agent:detached-agent:project".to_string()),
             workflow_session_id: None,
@@ -742,7 +743,11 @@ fn job_manager_stop_terminates_the_process_group() {
         .current_dir(temp.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let child = Arc::new(Mutex::new(ManagedChild::spawn(&mut command).unwrap()));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(
+            ManagedChild::spawn(&mut command).unwrap(),
+        ),
+    ));
     let leader_pid = child.lock().unwrap().id();
     let pid_file = temp.path().join("descendant.pid");
     let descendant_pid = wait_for_pid_marker(
@@ -797,7 +802,11 @@ fn job_shutdown_reaps_a_sigterm_responsive_child() {
         .current_dir(temp.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let child = Arc::new(Mutex::new(ManagedChild::spawn(&mut command).unwrap()));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(
+            ManagedChild::spawn(&mut command).unwrap(),
+        ),
+    ));
     let leader_pid = child.lock().unwrap().id();
     assert!(wait_until(Duration::from_secs(5), || ready.exists()));
     let manager = JobManager::new(1);
@@ -837,7 +846,11 @@ fn job_shutdown_escalates_ignored_sigterm_for_parent_and_descendant() {
         .current_dir(temp.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let child = Arc::new(Mutex::new(ManagedChild::spawn(&mut command).unwrap()));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(
+            ManagedChild::spawn(&mut command).unwrap(),
+        ),
+    ));
     let leader_pid = child.lock().unwrap().id();
     let pid_file = temp.path().join("descendant.pid");
     let descendant_pid = wait_for_pid_marker(
@@ -4404,7 +4417,7 @@ fn extract_grandchild_pid(text: &str) -> Option<u32> {
 fn insert_running_job(
     manager: &JobManager,
     job_id: &str,
-    child: Option<Arc<Mutex<ManagedChild>>>,
+    child: Option<Arc<Mutex<crate::webcodex_runner::jobs::child::JobChild>>>,
 ) -> Arc<AtomicBool> {
     let stop_requested = Arc::new(AtomicBool::new(false));
     lock_unpoison(&manager.jobs).insert(
@@ -4455,7 +4468,9 @@ fn seed_running_job_tree(
     );
     let parent_pid = managed.id();
     let grandchild_pid = read_grandchild_pid(&output);
-    let child = Arc::new(Mutex::new(managed));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(managed),
+    ));
     let stop_requested = insert_running_job(manager, job_id, Some(child));
     (
         RunningJobTreeFixture {
@@ -4520,7 +4535,9 @@ fn runner_real_process_job_cleanup_after_parent_exit_terminates_descendant_and_r
         OutputTextSource::LocalProcess,
     )];
     drop(tx);
-    let child = Arc::new(Mutex::new(managed));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(managed),
+    ));
 
     // The direct child exits on its own right after spawning the grandchild;
     // collect its pid line from the production reader's chunk stream.
@@ -4647,7 +4664,9 @@ fn runner_real_process_job_stop_twice_is_idempotent() {
 fn runner_real_process_job_stop_after_natural_exit_does_not_panic() {
     let (managed, _rx) = spawn_helper_raw("sleep", &["0", "0"]);
     let parent_pid = managed.id();
-    let child = Arc::new(Mutex::new(managed));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(managed),
+    ));
     assert!(
         wait_until(Duration::from_secs(30), || lock_unpoison(&child)
             .try_wait()
@@ -4694,7 +4713,9 @@ fn runner_real_process_last_job_manager_owner_drop_terminates_running_tree_with_
 #[ignore = "runner real-process lane: spawns the JobManager process-tree fixture"]
 fn runner_real_process_cleanup_managed_tree_on_exited_tree_does_not_panic() {
     let (managed, _rx) = spawn_helper_raw("sleep", &["0", "0"]);
-    let child = Arc::new(Mutex::new(managed));
+    let child = Arc::new(Mutex::new(
+        crate::webcodex_runner::jobs::child::JobChild::from(managed),
+    ));
     assert!(wait_until(Duration::from_secs(30), || lock_unpoison(
         &child
     )

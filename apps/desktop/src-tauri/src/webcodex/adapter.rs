@@ -15,6 +15,16 @@ use url::Url;
 #[path = "project_management.rs"]
 mod project_management;
 
+#[cfg(all(test, windows))]
+#[path = "project_activation_tests.rs"]
+mod project_activation_tests;
+
+#[path = "ai_office.rs"]
+mod ai_office;
+
+#[path = "office.rs"]
+mod office;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConnection {
     pub runner_config: PathBuf,
@@ -588,12 +598,14 @@ impl WebCodexAdapter {
         &mut self,
         identity: &ProjectRuntimeIdentity,
         expected_client_id: &str,
+        requested_path: &str,
         project: &ProjectSelection,
         cancellation: &CancellationContext,
     ) -> DesktopResult<ProjectRuntimeIdentity> {
         self.activate_connection_project(
             &identity.connection(),
             expected_client_id,
+            requested_path,
             project,
             cancellation,
         )
@@ -604,6 +616,7 @@ impl WebCodexAdapter {
         &mut self,
         identity: &RuntimeConnection,
         expected_client_id: &str,
+        requested_path: &str,
         project: &ProjectSelection,
         cancellation: &CancellationContext,
     ) -> DesktopResult<ProjectRuntimeIdentity> {
@@ -615,7 +628,11 @@ impl WebCodexAdapter {
             identity.runner_config.to_string_lossy().to_string(),
             "--user-token-file".into(),
             identity.user_token_file.to_string_lossy().to_string(),
+            "--expected-project-path".into(),
             project.path.clone(),
+            // The CLI must inspect the original entry for escaping links.
+            // Bind the inspected identity before any CLI side effects as well.
+            requested_path.into(),
             "--json".into(),
         ];
         let output: ProjectActivationOutput =
@@ -641,6 +658,7 @@ impl WebCodexAdapter {
         &mut self,
         identity: &ProjectRuntimeIdentity,
         client_id: &str,
+        requested_path: &str,
         project: &ProjectSelection,
         cancellation: &CancellationContext,
     ) -> DesktopResult<ProjectRuntimeIdentity> {
@@ -650,7 +668,9 @@ impl WebCodexAdapter {
             "register".into(),
             "--config".into(),
             identity.runner_config.to_string_lossy().to_string(),
+            "--expected-project-path".into(),
             project.path.clone(),
+            requested_path.into(),
             "--json".into(),
         ];
         let output: LegacyProjectRegisterOutput =
@@ -1308,3 +1328,6 @@ mod tests {
         }
     }
 }
+
+#[path = "workspaces.rs"]
+mod workspaces;

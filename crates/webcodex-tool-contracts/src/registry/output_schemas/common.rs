@@ -1155,3 +1155,27 @@ fn failure_identity_schema() -> Value {
         "required": ["kind", "name"]
     })
 }
+
+pub(super) fn review_evidence_schema(description: &str) -> Value {
+    json!({
+        "type": "object",
+        "description": description,
+        "additionalProperties": true,
+        "properties": {
+            "available": schema_type("boolean", "True when review evidence summary is available."),
+            "source": schema_type("string", "Review evidence source, usually session_ledger."),
+            "total": schema_type("integer", "Total successful review evidence tool calls counted."),
+            "read_only_inspection_count": schema_type("integer", "Successful read-only inspection tool calls counted."),
+            "search_count": schema_type("integer", "Successful search tool calls counted."),
+            "diff_review_count": schema_type("integer", "Successful diff review tool calls counted."),
+            "workspace_review_count": schema_type("integer", "Successful workspace review tool calls counted."),
+            "hygiene_review_count": schema_type("integer", "Successful hygiene review tool calls counted."),
+            "tools": {
+                "type": "array",
+                "maxItems": 20,
+                "description": "Bounded unique review evidence tool names only; never file contents, diff hunks, stdout/stderr, command text, tokens, secrets, or raw input payloads.",
+                "items": schema_type("string", "Review evidence tool name.")
+            }
+        }
+    })
+}

@@ -1,6 +1,4 @@
-use super::{
-    cloudflared_service, executable_name, remove_npm_wrapper_network_environment, ProductError,
-};
+use super::{cloudflared_service, executable_name, ProductError};
 use reqwest::header::USER_AGENT;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -190,6 +188,7 @@ async fn start_verified_tunnel_child(
     session_dir: &Path,
     deadline: Instant,
 ) -> Result<Child, ProductError> {
+    native_tunnel_binary_digest(&prerequisites.binary)?;
     run_doctor(prerequisites, mcp_url, authorization_file, deadline).await?;
     run_control_plane_probe(prerequisites, deadline).await?;
 
@@ -231,13 +230,43 @@ async fn start_verified_tunnel_child(
     Ok(child)
 }
 
+// Native authority is only injected into this controlled relay. Profiles,
+// alternate control-plane origins, MCP bindings, extra headers, trace toggles,
+// custom CA bundles and broad credentials cannot be inherited accidentally.
+fn configure_relay_environment(command: &mut Command, tunnel_id: &str) {
+    command.env_clear();
+    for key in [
+        "SYSTEMROOT",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "CONTROL_PLANE_API_KEY",
+        "CONTROL_PLANE_CLIENT_CERT",
+        "CONTROL_PLANE_CLIENT_KEY",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command
+        .env("CONTROL_PLANE_TUNNEL_ID", tunnel_id)
+        .env("CONTROL_PLANE_BASE_URL", "https://api.openai.com")
+        .env("CONTROL_PLANE_URL_PATH", "")
+        .env("NO_PROXY", "localhost,127.0.0.1,::1")
+        .env("no_proxy", "localhost,127.0.0.1,::1");
+}
+
 fn configure_runtime_command(
     command: &mut Command,
     prerequisites: &OpenAiTunnelPrerequisites,
     mcp_url: &str,
     authorization_file: &Path,
 ) {
-    remove_npm_wrapper_network_environment(command);
+    configure_relay_environment(command, &prerequisites.tunnel_id);
     command
         .env("CONTROL_PLANE_TUNNEL_ID", &prerequisites.tunnel_id)
         // The runtime key remains in the inherited environment. Explicitly keep
@@ -320,7 +349,7 @@ async fn run_control_plane_probe(
 ) -> Result<(), ProductError> {
     let mut command = Command::new(&prerequisites.binary);
     suppress_windows_console(&mut command);
-    remove_npm_wrapper_network_environment(&mut command);
+    configure_relay_environment(&mut command, &prerequisites.tunnel_id);
     command
         .arg("admin")
         .arg("tunnels")
@@ -507,6 +536,21 @@ fn valid_tunnel_id(value: &str) -> bool {
     })
 }
 
+/// Local source verification shared by native launcher and Bootstrap control.
+pub(crate) fn native_tunnel_binary_digest(path: &Path) -> Result<String, ProductError> {
+    if !path.is_absolute() {
+        return Err(tunnel_runtime_error("native relay binary must be absolute"));
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| tunnel_runtime_error("native relay binary unavailable"))?;
+    if !metadata.file_type().is_file() || metadata.len() > TUNNEL_CLIENT_MAX_BINARY_BYTES {
+        return Err(tunnel_runtime_error("native relay binary unavailable"));
+    }
+    let asset = tunnel_client_asset_for(std::env::consts::OS, std::env::consts::ARCH)?;
+    verify_sha256(path, asset.binary_sha256, "native relay binary")?;
+    Ok(asset.binary_sha256.to_owned())
+}
+
 async fn resolve_tunnel_client() -> Result<PathBuf, ProductError> {
     let override_bin = std::env::var_os(TUNNEL_CLIENT_OVERRIDE).map(PathBuf::from);
     if let Some(binary) = override_bin.as_deref() {
@@ -517,6 +561,7 @@ async fn resolve_tunnel_client() -> Result<PathBuf, ProductError> {
                 Some("Fix or unset WEBCODEX_TUNNEL_CLIENT_BIN, then retry webcodex share --tunnel openai."),
             ));
         }
+        native_tunnel_binary_digest(binary)?;
         verify_tunnel_client_version(binary).await?;
         return Ok(binary.to_path_buf());
     }
@@ -524,7 +569,10 @@ async fn resolve_tunnel_client() -> Result<PathBuf, ProductError> {
     if let Some(path) = std::env::var_os("PATH") {
         for directory in std::env::split_paths(&path) {
             let candidate = directory.join(executable_name("tunnel-client"));
-            if candidate.is_file() && verify_tunnel_client_version(&candidate).await.is_ok() {
+            if candidate.is_file()
+                && native_tunnel_binary_digest(&candidate).is_ok()
+                && verify_tunnel_client_version(&candidate).await.is_ok()
+            {
                 return Ok(candidate);
             }
         }

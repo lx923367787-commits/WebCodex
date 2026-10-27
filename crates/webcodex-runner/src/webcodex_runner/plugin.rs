@@ -28,6 +28,10 @@ use webcodex_core::plugin::{
 };
 use webcodex_process::ManagedChild;
 
+#[path = "plugin_runtime_lifecycle.rs"]
+mod runtime_lifecycle;
+use runtime_lifecycle::{ProcessCustody, RuntimeState};
+
 const PLUGIN_READER_QUEUE: usize = 16;
 const PLUGIN_WRITER_QUEUE: usize = 1;
 const PLUGIN_STOP_POLL: Duration = Duration::from_millis(25);
@@ -147,10 +151,11 @@ struct ProviderEntry {
     process: Arc<ProviderProcess>,
     catalog: OnceLock<PluginCatalog>,
     session: Mutex<Option<ProviderConnection>>,
+    runtime: Option<Mutex<RuntimeState>>,
 }
 
 struct ProviderProcess {
-    child: Mutex<Option<ManagedChild>>,
+    child: Mutex<ProcessCustody>,
     stderr: Arc<Mutex<PluginStderrDiagnostics>>,
     stderr_drained: Arc<AtomicBool>,
 }
@@ -224,6 +229,7 @@ struct ProviderPreparationFailure {
 enum PluginReloadAttempt {
     Committed {
         providers: Vec<PluginProviderView>,
+        activation_failures: Vec<PluginReloadFailure>,
     },
     Rejected {
         providers: Vec<PluginProviderView>,
@@ -233,6 +239,13 @@ enum PluginReloadAttempt {
         code: &'static str,
         message: &'static str,
     },
+}
+
+/// Ok from config application means the configuration has already committed.
+/// Activation failures describe unavailable providers in that new generation.
+#[derive(Debug)]
+pub(crate) struct PluginCommitReport {
+    pub(crate) activation_failures: Vec<PluginReloadFailure>,
 }
 
 fn initialize_failure_detail(code: &str) -> &'static str {
@@ -357,6 +370,45 @@ impl PluginManager {
             next_generation: AtomicU64::new(2),
             stopping,
         }
+    }
+
+    pub(crate) fn activate_committed_startup(&self) -> Result<PluginCommitReport, &'static str> {
+        let _candidate_guard = match self.candidate_gate.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => return Err("plugin_reload_busy"),
+            Err(TryLockError::Poisoned(_)) => return Err("plugin_reload_state_failed"),
+        };
+        Ok(PluginCommitReport {
+            activation_failures: self.activate_committed(),
+        })
+    }
+
+    fn activate_committed(&self) -> Vec<PluginReloadFailure> {
+        let providers = self
+            .committed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .providers
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        providers
+            .into_iter()
+            .filter_map(|provider| {
+                provider
+                    .activate_runtime(&self.stopping)
+                    .err()
+                    .map(|failure| {
+                        if !provider.failed.load(Ordering::SeqCst) {
+                            provider.retire(failure.code);
+                        }
+                        PluginReloadFailure {
+                            provider_id: provider.config.id.clone(),
+                            code: failure.code.into(),
+                        }
+                    })
+            })
+            .collect()
     }
 
     /// Runner-local diagnostic projection only. This is intentionally not part
@@ -788,7 +840,7 @@ impl PluginManager {
         // An explicit Plugin reload is also the code-reload primitive: the
         // executable or script may have changed without changing runner.toml.
         // Always prepare a fresh provider set for this path.
-        self.reload_attempt_response(self.reload_candidate_locked(&candidate, true))
+        self.reload_attempt_response(self.reload_candidate_locked(&candidate, true, || {}))
     }
 
     /// Apply an already parsed/validated runner.toml candidate through the same
@@ -798,22 +850,29 @@ impl PluginManager {
         &self,
         candidate: &RunnerConfig,
         after_plugin_commit: impl FnOnce(),
-    ) -> Result<(), &'static str> {
+    ) -> Result<PluginCommitReport, &'static str> {
         let _candidate_guard = match self.candidate_gate.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::WouldBlock) => return Err("plugin_reload_busy"),
             Err(TryLockError::Poisoned(_)) => return Err("plugin_reload_state_failed"),
         };
-        match self.reload_candidate_locked(candidate, false) {
-            PluginReloadAttempt::Committed { .. } => {
-                // Keep the Plugin candidate gate held until the caller commits
-                // the rest of the same Runner-config activation. Otherwise a
-                // specialized Plugin reload could interleave after Plugin
-                // commit but before the generic Hot config snapshot advances.
-                after_plugin_commit();
-                Ok(())
+        match self.reload_candidate_locked(candidate, false, after_plugin_commit) {
+            PluginReloadAttempt::Committed {
+                activation_failures,
+                ..
+            } => Ok(PluginCommitReport {
+                activation_failures,
+            }),
+            PluginReloadAttempt::Rejected { failures, .. } => {
+                if failures
+                    .iter()
+                    .any(|failure| failure.code == "plugin_runtime_stop_unconfirmed")
+                {
+                    Err("plugin_runtime_stop_unconfirmed")
+                } else {
+                    Err("plugin_reload_failed")
+                }
             }
-            PluginReloadAttempt::Rejected { .. } => Err("plugin_reload_failed"),
             PluginReloadAttempt::NotStarted { code, .. } => Err(code),
         }
     }
@@ -822,7 +881,14 @@ impl PluginManager {
         &self,
         candidate: &RunnerConfig,
         force_provider_restart: bool,
+        after_plugin_commit: impl FnOnce(),
     ) -> PluginReloadAttempt {
+        if self.stopping.load(Ordering::SeqCst) {
+            return PluginReloadAttempt::NotStarted {
+                code: "plugin_manager_stopping",
+                message: "Plugin manager is stopping; configuration was not replaced",
+            };
+        }
         let candidate_environment =
             PluginEnvironmentSnapshot::from_config(&candidate.shell, &candidate.plugins);
         {
@@ -834,12 +900,12 @@ impl PluginManager {
                 && committed.config == candidate.plugins
                 && committed.environment == candidate_environment
             {
+                drop(committed);
+                after_plugin_commit();
+                let activation_failures = self.activate_committed();
                 return PluginReloadAttempt::Committed {
-                    providers: committed
-                        .providers
-                        .values()
-                        .map(|provider| provider.view())
-                        .collect(),
+                    providers: self.provider_views(),
+                    activation_failures,
                 };
             }
         }
@@ -885,6 +951,31 @@ impl PluginManager {
             };
         }
 
+        // Candidates remain passive. Close old managed runtimes before making
+        // any replacement visible; an old Arc must not admit new business.
+        let old = self
+            .committed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .providers
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for provider in &old {
+            if provider.runtime.is_some() && provider.stop_runtime().is_err() {
+                for candidate in prepared.values() {
+                    candidate.shutdown();
+                }
+                return PluginReloadAttempt::Rejected {
+                    providers: self.provider_views(),
+                    failures: vec![PluginReloadFailure {
+                        provider_id: provider.config.id.clone(),
+                        code: "plugin_runtime_stop_unconfirmed".into(),
+                    }],
+                };
+            }
+        }
+
         // Config/environment identity and provider instances commit together.
         // Retired provider teardown happens after the lock is released.
         let retired = {
@@ -906,21 +997,33 @@ impl PluginManager {
             committed.environment = candidate_environment;
             std::mem::replace(&mut committed.providers, prepared)
         };
+        // The caller's HotConfig generation must be committed before activation.
+        // No manager map lock is held across that callback or provider IO.
+        after_plugin_commit();
+        let activation_failures = self.activate_committed();
+        for provider in retired
+            .values()
+            .filter(|provider| provider.runtime.is_some())
+        {
+            provider.shutdown();
+        }
         drop(retired);
 
         PluginReloadAttempt::Committed {
             providers: self.provider_views(),
+            activation_failures,
         }
     }
 
     fn reload_attempt_response(&self, attempt: PluginReloadAttempt) -> PluginGatewayResponse {
         match attempt {
-            PluginReloadAttempt::Committed { providers } => {
-                PluginGatewayResponse::success(PluginGatewayResponsePayload::Reloaded {
-                    providers,
-                    failures: Vec::new(),
-                })
-            }
+            PluginReloadAttempt::Committed {
+                providers,
+                activation_failures,
+            } => PluginGatewayResponse::success(PluginGatewayResponsePayload::Reloaded {
+                providers,
+                failures: activation_failures,
+            }),
             PluginReloadAttempt::Rejected {
                 providers,
                 failures,
@@ -994,6 +1097,9 @@ impl ProviderEntry {
         if self.failed.load(Ordering::SeqCst) {
             return Err(ProviderFailure::not_started("plugin_provider_unavailable"));
         }
+        if !self.runtime_allows_business() {
+            return Err(ProviderFailure::not_started("plugin_runtime_not_active"));
+        }
         let mut session = match self.session.try_lock() {
             Ok(session) => session,
             Err(TryLockError::WouldBlock) => {
@@ -1012,6 +1118,11 @@ impl ProviderEntry {
             self.retire("plugin_provider_unavailable");
             return Err(ProviderFailure::not_started("plugin_provider_unavailable"));
         };
+        // Closing may have begun after the first check but before this session
+        // was acquired. Existing Arc holders cannot cross that admission fence.
+        if !self.runtime_allows_business() {
+            return Err(ProviderFailure::not_started("plugin_runtime_not_active"));
+        }
         let timeout = self.timeout;
         match f(connection, timeout) {
             Ok(value) => Ok(value),
@@ -1070,7 +1181,8 @@ impl ProviderEntry {
     }
 
     fn shutdown(&self) {
-        self.process.terminate();
+        self.shutdown_runtime_and_process();
+        self.process.wait_for_stderr_drain();
         if let Ok(mut session) = self.session.try_lock() {
             *session = None;
         }
@@ -1109,7 +1221,7 @@ impl PluginStderrDiagnostics {
 impl ProviderProcess {
     fn new() -> Self {
         Self {
-            child: Mutex::new(None),
+            child: Mutex::new(ProcessCustody::default()),
             stderr: Arc::new(Mutex::new(PluginStderrDiagnostics::default())),
             stderr_drained: Arc::new(AtomicBool::new(true)),
         }
@@ -1127,20 +1239,46 @@ impl ProviderProcess {
             .child
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        debug_assert!(slot.is_none());
-        *slot = Some(child);
+        debug_assert!(slot.child.is_none() && !slot.native_exit_confirmed);
+        slot.child = Some(child);
     }
 
     fn terminate(&self) {
-        let child = self
-            .child
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(mut child) = child {
-            terminate_provider_process(&mut child);
-        }
+        self.terminate_until(Instant::now() + PLUGIN_TERMINATION_BUDGET);
         self.wait_for_stderr_drain();
+    }
+
+    fn terminate_until(&self, deadline: Instant) -> bool {
+        let mut custody = loop {
+            match self.child.try_lock() {
+                Ok(custody) => break custody,
+                Err(TryLockError::Poisoned(_)) => return false,
+                Err(TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        };
+        if custody.native_exit_confirmed {
+            return true;
+        }
+        let Some(child) = custody.child.as_mut() else {
+            return runtime_lifecycle::confirms_native_stop(
+                runtime_lifecycle::NativeStopObservation::MissingChild,
+            );
+        };
+        if terminate_provider_process(child, deadline) {
+            custody.native_exit_confirmed = true;
+            // Proof is cached before ownership is released. A competing stop
+            // observes either this proof or the still-owned original child.
+            custody.child.take();
+            true
+        } else {
+            // Keep custody after a timeout/error. None is never exit evidence.
+            false
+        }
     }
 
     fn wait_for_stderr_drain(&self) {
@@ -1161,9 +1299,11 @@ impl Drop for ProviderProcess {
             .child
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .child
             .take();
         if let Some(mut child) = child {
-            terminate_provider_process(&mut child);
+            let _ =
+                terminate_provider_process(&mut child, Instant::now() + PLUGIN_TERMINATION_BUDGET);
         }
         self.wait_for_stderr_drain();
     }
@@ -1194,7 +1334,24 @@ fn prepare_provider(
         process: Arc::clone(&process),
         catalog: OnceLock::new(),
         session: Mutex::new(None),
+        runtime: config
+            .runtime_lifecycle
+            .as_ref()
+            .map(|_| Mutex::new(RuntimeState::Passive)),
     });
+    if config.runtime_lifecycle.is_some() && config.id != "chat-agents" {
+        entry.retire("plugin_runtime_provider_invalid");
+        return (
+            entry,
+            None,
+            Some(ProviderPreparationFailure {
+                phase: PluginCheckPhase::Config,
+                code: "plugin_runtime_provider_invalid",
+                detail: "runtime lifecycle is restricted to the configured chat-agents provider",
+                diagnostic: None,
+            }),
+        );
+    }
     let cwd = config
         .cwd
         .as_deref()
@@ -1413,7 +1570,7 @@ fn prepare_provider(
         .timeout_secs
         .map(Duration::from_secs)
         .unwrap_or(request_timeout);
-    if let Err(failure) = connection.initialize(timeout) {
+    if let Err(failure) = connection.initialize(timeout, config.runtime_lifecycle.is_some()) {
         process.terminate();
         entry.retire(failure.code);
         return (
@@ -1501,7 +1658,11 @@ struct PluginToolsListResult {
 }
 
 impl ProviderConnection {
-    fn initialize(&mut self, timeout: Duration) -> Result<(), ProviderFailure> {
+    fn initialize(
+        &mut self,
+        timeout: Duration,
+        runtime_required: bool,
+    ) -> Result<(), ProviderFailure> {
         let result = self.request(
             "initialize",
             json!({"protocolVersion": PLUGIN_PROTOCOL_VERSION}),
@@ -1524,7 +1685,7 @@ impl ProviderConnection {
                 "plugin_protocol_version_mismatch",
             ));
         }
-        Ok(())
+        runtime_lifecycle::validate_capability(&result, runtime_required)
     }
 
     fn tools_list_with_diagnostic(
@@ -1593,6 +1754,17 @@ impl ProviderConnection {
         // serialization. Queue admission, the complete write+flush ack, and the
         // response wait all consume this same absolute budget.
         let deadline = Instant::now() + timeout;
+        self.request_until(method, params, deadline, effectful, false)
+    }
+
+    fn request_until(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Instant,
+        effectful: bool,
+        allow_while_stopping: bool,
+    ) -> Result<Value, ProviderFailure> {
         match self.incoming.try_recv() {
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) | Ok(ReaderEvent::Eof) => {
@@ -1630,7 +1802,7 @@ impl ProviderConnection {
             ack: ack_sender,
         };
         loop {
-            if self.stopping.load(Ordering::SeqCst) {
+            if !allow_while_stopping && self.stopping.load(Ordering::SeqCst) {
                 return Err(ProviderFailure::not_started("plugin_manager_stopping"));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1653,8 +1825,8 @@ impl ProviderConnection {
         // already have started writing. A timeout or transport failure before
         // the full write+flush ack is therefore OutcomeUnknown for effects.
         loop {
-            if self.stopping.load(Ordering::SeqCst) {
-                self.process.terminate();
+            if !allow_while_stopping && self.stopping.load(Ordering::SeqCst) {
+                self.process.terminate_until(deadline);
                 return Err(ProviderFailure::after_send(
                     "plugin_manager_stopping",
                     effectful,
@@ -1677,8 +1849,8 @@ impl ProviderConnection {
         }
 
         loop {
-            if self.stopping.load(Ordering::SeqCst) {
-                self.process.terminate();
+            if !allow_while_stopping && self.stopping.load(Ordering::SeqCst) {
+                self.process.terminate_until(deadline);
                 return Err(ProviderFailure::after_send(
                     "plugin_manager_stopping",
                     effectful,
@@ -1706,22 +1878,35 @@ impl ProviderConnection {
     }
 }
 
-fn terminate_provider_process(child: &mut ManagedChild) {
-    let deadline = Instant::now() + PLUGIN_TERMINATION_BUDGET;
-    let _ = child.terminate_tree();
-    let _ = child.wait_tree_exit(deadline.saturating_duration_since(Instant::now()));
-    loop {
+fn terminate_provider_process(child: &mut ManagedChild, deadline: Instant) -> bool {
+    let termination_succeeded = child.terminate_tree().is_ok();
+    let tree_empty = matches!(
+        child.wait_tree_exit(deadline.saturating_duration_since(Instant::now())),
+        Ok(true)
+    );
+    let leader_exited = loop {
         match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
+            Ok(Some(_)) => break true,
+            Err(_) => break false,
             Ok(None) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return;
+                    break false;
                 }
                 std::thread::sleep(Duration::from_millis(10).min(remaining));
             }
         }
-    }
+    };
+    // A Windows ManagedChild retains its original, non-breakaway Job handle.
+    // A Unix process group cannot prove descendants did not escape via setsid.
+    cfg!(windows)
+        && runtime_lifecycle::confirms_native_stop(
+            runtime_lifecycle::NativeStopObservation::Observed {
+                termination_succeeded,
+                tree_empty,
+                leader_exited,
+            },
+        )
 }
 
 fn provider_stdin_writer(mut stdin: ChildStdin, requests: mpsc::Receiver<WriteRequest>) {

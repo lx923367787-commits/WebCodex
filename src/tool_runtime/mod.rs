@@ -5,9 +5,15 @@
 
 pub mod activity;
 mod agent_task;
+mod batch_output;
 mod cargo;
 mod cargo_tools;
 mod checkpoint;
+mod cli_fallback;
+pub(crate) use cli_fallback::failure_reason as agent_cli_failure_reason;
+pub(crate) use jobs::is_terminal_job_status as agent_cli_job_terminal;
+pub(crate) use process::classify_process_failure as agent_cli_process_failure;
+pub(crate) use team_task::{fixed_cli_process, structured_failure_code};
 mod coding_agent;
 mod coding_task;
 mod coding_task_tools;
@@ -29,8 +35,16 @@ mod host_goal;
 mod host_goal_checks;
 mod host_goal_context;
 mod host_goal_files;
+pub(crate) mod office_control;
+mod team_agent;
+mod team_task;
+pub(crate) use host_goal_context::{
+    estimate_visible as agent_context_estimate, meter_projection as agent_context_meter_projection,
+};
+pub(crate) use host_goal_files::markdown as agent_goal_plan_markdown;
 mod host_goal_project_files;
 mod host_goal_review;
+mod host_goal_takeover_access;
 mod runner_authorization;
 mod runner_config;
 #[cfg(test)]
@@ -173,3 +187,5 @@ pub(crate) use surface::registered_tool_categories;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) mod named_project_files;

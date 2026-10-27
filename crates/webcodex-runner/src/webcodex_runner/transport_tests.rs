@@ -16,6 +16,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 fn test_runner_config(server_url: String) -> RunnerConfig {
     RunnerConfig {
+        agent_execution_resources: Default::default(),
         server_url,
         token: "test-token".to_string(),
         client_id: "oe".to_string(),

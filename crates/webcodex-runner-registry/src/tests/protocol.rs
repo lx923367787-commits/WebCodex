@@ -193,6 +193,7 @@ async fn runner_supports_reflects_registered_capabilities() {
     });
     registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -272,6 +273,7 @@ async fn coding_agent_run_lookup_is_exact_when_bound_and_ambiguous_when_unbound(
         let provider_instance_id = format!("provider_{client_id}");
         registry
             .register(RunnerRegisterRequest {
+                agent_execution_resources: Vec::new(),
                 process_started_at: None,
                 build: None,
                 job_concurrency_limit: None,
@@ -337,6 +339,7 @@ async fn coding_agent_registration_rejects_semantically_contradictory_snapshot()
     let registry = RunnerRegistry::default();
     let register =
         |run: webcodex_core::coding_agent::CodingAgentRunSnapshot| RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -422,6 +425,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
     let registry = RunnerRegistry::default();
     registry
         .register(RunnerRegisterRequest {
+            agent_execution_resources: Vec::new(),
             process_started_at: None,
             build: None,
             job_concurrency_limit: None,
@@ -445,6 +449,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
             hostname: None,
             host_context: None,
             capabilities: RunnerCapabilities {
+                agent_isolated_execution_v1: false,
                 shell: true,
                 file_read: true,
                 file_write: true,

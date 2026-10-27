@@ -1621,8 +1621,15 @@ impl ToolRequestLifecycle {
     }
 
     pub fn set_tool_name(&mut self, tool_name: Option<String>) {
-        self.suppress_payload_capture = tool_name.as_deref() == Some("read_tool_trace");
+        self.suppress_payload_capture |= tool_name.as_deref() == Some("read_tool_trace");
         self.tool_name = tool_name;
+    }
+
+    pub(crate) fn suppress_private_payloads(&mut self) {
+        // Isolated runs use the dedicated IDs/action/code security audit. Raw
+        // protocol IDs, method names and unknown tool names are model input too.
+        self.mode = ToolRequestTraceMode::Off;
+        self.suppress_payload_capture = true;
     }
 
     pub fn set_jsonrpc_id(&mut self, jsonrpc_id: impl Into<String>) {

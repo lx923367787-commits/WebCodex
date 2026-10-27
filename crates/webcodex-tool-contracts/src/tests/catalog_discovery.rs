@@ -1,6 +1,41 @@
 use super::*;
 use std::collections::BTreeSet;
 
+#[test]
+fn agent_cli_discovery_defaults_to_process_jobs_without_provider_registration() {
+    use crate::tool_definition::{lookup_tool_definition, RunnerCapabilityRequirement};
+    let group = TOOL_DISCOVERY_GROUPS
+        .iter()
+        .find(|group| group.name == "coding_agent")
+        .unwrap();
+    assert_eq!(&group.tools[..2], &["run_process", "run_detached_process"]);
+    let flow = TOOL_RECOMMENDED_FLOWS
+        .iter()
+        .find(|flow| flow.name == "agent_cli")
+        .unwrap();
+    assert_eq!(flow.tools[0], "run_process");
+    let specs = registered_tool_specs();
+    for name in ["run_process", "run_detached_process"] {
+        let spec = spec_named(&specs, name);
+        let properties = spec.input_schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("executable") && properties.contains_key("args"));
+        for field in ["provider_id", "agent_id", "attempt_id"] {
+            assert!(
+                !properties.contains_key(field),
+                "{name} must not require {field}"
+            );
+        }
+        let definition = lookup_tool_definition(name).unwrap();
+        assert_ne!(
+            definition.runner_capability,
+            Some(RunnerCapabilityRequirement::CodingAgentRuns)
+        );
+    }
+    assert!(flow
+        .manifest_purpose
+        .contains("confirm termination before replacement"));
+}
+
 fn registered_tool_categories() -> Value {
     Value::Object(
         TOOL_DISCOVERY_GROUPS
