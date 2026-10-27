@@ -10,6 +10,16 @@ use webcodex_core::runner_protocol::{
 
 #[test]
 fn agent_team_catalog_failure_preserves_denial_and_redacts_unknown_text() {
+    let unavailable = inventory_unavailable("agent_cli_launcher_requires_adapter");
+    assert_eq!(
+        unavailable.output["reason_code"],
+        "agent_cli_launcher_requires_adapter"
+    );
+    assert!(
+        !serde_json::to_string(&inventory_unavailable("private path or credential"))
+            .unwrap()
+            .contains("private path")
+    );
     let busy = catalog_unavailable(
         "agent_team_host_catalog_unavailable:profiles_read:plugin_provider_busy",
     );
@@ -532,6 +542,26 @@ fn agent_team_execution_catalog_rejects_stale_wrong_scope_and_invalid_hash_facts
         manifest.providers[0].resource_manifest_hash = malformed;
         assert!(validate_catalog(&_db, &manifest, &binding, 1_500).is_err());
     }
+}
+
+#[test]
+fn execution_catalog_accepts_more_than_two_registered_ids_without_granting_execution() {
+    let (_temp, db, binding) = run_fixture();
+    let providers = ["first-cli", "second-cli", "third-cli"]
+        .into_iter()
+        .map(|id| {
+            let mut observed = provider("workbuddy");
+            observed.provider_id = id.into();
+            observed.controls = None;
+            observed
+        })
+        .collect();
+    let observed = catalog(binding.project(), providers);
+    validate_catalog(&db, &observed, &binding, 1_500).unwrap();
+    assert!(observed
+        .providers
+        .iter()
+        .all(|entry| require_provider_controls(entry).is_err()));
 }
 
 #[test]

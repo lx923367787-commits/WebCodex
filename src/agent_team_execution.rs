@@ -1,6 +1,6 @@
 //! Unified CLI entry and the retained explicit isolated team protocol.
-//! Local calls use task-owned native jobs. Isolated calls retain their original
-//! resource/attempt fences; neither path manufactures a user AuthContext.
+//! Local calls use task-owned native jobs. Isolated calls retain their resource
+//! and attempt fences; neither path manufactures a user AuthContext.
 use crate::tool_runtime::{ToolResult, ToolRuntime};
 use crate::Database;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,13 @@ pub(crate) trait AgentTeamAssets: Send + Sync {
         _provider: Option<AgentCliProvider>,
     ) -> AssetFuture<'a, webcodex_core::agent_cli::AgentCliInventory> {
         Box::pin(async { Err("agent_cli_inventory_unavailable".into()) })
+    }
+    fn native_inventory<'a>(
+        &'a self,
+        caller: &'a VerifiedAgentRun,
+        provider: Option<AgentCliProvider>,
+    ) -> AssetFuture<'a, webcodex_core::agent_cli::AgentCliInventory> {
+        self.inventory(caller, provider)
     }
     fn host_catalog<'a>(
         &'a self,
@@ -98,7 +105,7 @@ fn denied(code: &str) -> ToolResult {
         json!({"error_kind":code,"state_changed":false,"dispatched":false,"dispatch_certainty":"not_started"}),
     );
     if code == "team_plan_required" {
-        result.output["next_action"] = json!("For trusted local CLI execution, use cli start in its default local mode with the authorized project and discovered native program. Explicit isolated team execution requires its intended frozen plan before starting a slot. The assigned task still exists; do not create a replacement manager or retry an uncertain prior execution through a different mode.");
+        result.output["next_action"] = json!("For trusted local CLI execution use cli start in its default local mode. Explicit isolated execution requires its intended frozen plan. The assigned task still exists; do not create a replacement manager or retry an uncertain execution through a different mode.");
     }
     result
 }
@@ -149,6 +156,27 @@ fn catalog_unavailable(reason: &str) -> ToolResult {
         _ => "agent_team_catalog_unavailable",
     };
     result.output["reason_code"] = json!(reason);
+    result
+}
+
+fn inventory_unavailable(reason: &str) -> ToolResult {
+    let mut result = denied("agent_cli_inventory_unavailable");
+    let code = match reason {
+        "agent_cli_not_installed"
+        | "local_cli_runner_upgrade_required"
+        | "agent_cli_adapter_unavailable"
+        | "agent_cli_launcher_requires_adapter"
+        | "agent_cli_metadata_context_unavailable"
+        | "agent_cli_metadata_source_unavailable"
+        | "cli_adapter_config_invalid"
+        | "cli_adapter_config_unreadable"
+        | "cli_adapter_duplicate_id"
+        | "agent_cli_query_timeout"
+        | "agent_team_catalog_runner_changed"
+        | "agent_team_catalog_runner_unavailable" => reason,
+        _ => "agent_cli_inventory_unavailable",
+    };
+    result.output["reason_code"] = json!(code);
     result
 }
 fn unresolved(code: &str, attempt: Option<&str>) -> ToolResult {
@@ -499,7 +527,8 @@ fn validate_catalog(
         || catalog.observed_at_ms > now
         || catalog.expires_at_ms <= now
         || catalog.expires_at_ms.saturating_sub(catalog.observed_at_ms) > 3_600_000
-        || catalog.providers.len() > 2
+        || catalog.providers.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS
+        || catalog.unavailable_providers.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS
         || catalog.host_profile_ids.len() > 33
         || !bounded(&catalog.host_catalog_ref, 256)
         || catalog.host_profiles_expires_at_ms <= now
@@ -508,7 +537,7 @@ fn validate_catalog(
     }
     let mut ids = std::collections::BTreeSet::new();
     for provider in &catalog.providers {
-        if !matches!(provider.provider_id.as_str(), "workbuddy" | "antigravity")
+        if !webcodex_core::cli_adapter::valid_cli_id(&provider.provider_id)
             || !ids.insert(&provider.provider_id)
             || !bounded(&provider.version, 128)
             || !digest(&provider.executable_sha256)
@@ -560,6 +589,23 @@ fn require_provider_controls(
     let controls = validate_provider_controls_binding(provider)?;
     controls.require_supported_loading()?;
     Ok(controls)
+}
+
+fn inventory_projection(inventory: webcodex_core::agent_cli::AgentCliInventory) -> Value {
+    let capabilities = inventory.capabilities.map(|capabilities| {
+        let mut public = serde_json::to_value(capabilities).expect("typed CLI capability");
+        public
+            .as_object_mut()
+            .expect("typed object")
+            .remove("executableIdentity");
+        public
+            .as_object_mut()
+            .expect("typed object")
+            .remove("adapter");
+        public
+    });
+    json!({"installations":inventory.installations,"capabilities":capabilities,"observed_at_ms":inventory.observed_at_ms,
+        "expires_at_ms":inventory.expires_at_ms,"execution_granted":false,"state_changed":false})
 }
 
 fn catalog_projection(catalog: &AgentTeamCatalog) -> Value {
@@ -710,11 +756,14 @@ pub(crate) async fn call(
                 let Some(assets) = &runtime.agent_team_assets else {
                     return denied("agent_team_catalog_source_missing");
                 };
-                return match assets.inventory(binding, provider).await {
-                    Ok(inventory) => ToolResult::ok(
-                        json!({"installations":inventory.installations,"capabilities":inventory.capabilities,"observed_at_ms":inventory.observed_at_ms,"expires_at_ms":inventory.expires_at_ms,"execution_granted":false,"state_changed":false}),
-                    ),
-                    Err(_) => denied("agent_cli_inventory_unavailable"),
+                let inventory = if isolated {
+                    assets.inventory(binding, provider).await
+                } else {
+                    assets.native_inventory(binding, provider).await
+                };
+                return match inventory {
+                    Ok(inventory) => ToolResult::ok(inventory_projection(inventory)),
+                    Err(reason) => inventory_unavailable(&reason),
                 };
             }
             if !isolated {
@@ -741,6 +790,14 @@ pub(crate) async fn call(
                 }
                 object.insert("action".into(), json!(action));
                 return crate::tool_runtime::local_cli::call(runtime, binding, native).await;
+            }
+            if request.action == "start" {
+                let request: crate::agent_team::CliStart =
+                    match serde_json::from_value(request.request) {
+                        Ok(request) => request,
+                        Err(_) => return denied("agent_team_invalid_input"),
+                    };
+                return start(runtime, db, binding, access, request, true).await;
             }
             let target = match request.action.as_str() {
                 "models" => "team_cli_catalog",
@@ -779,7 +836,7 @@ pub(crate) async fn call(
                 Ok(v) => v,
                 Err(_) => return denied("agent_team_invalid_input"),
             };
-            start(runtime, db, binding, access, request).await
+            start(runtime, db, binding, access, request, false).await
         }
         "team_agent_start" => {
             let request: crate::agent_team::AgentStart = match serde_json::from_value(arguments) {
@@ -951,6 +1008,7 @@ async fn start(
     caller: &VerifiedAgentRun,
     access: RunnerAccess,
     request: crate::agent_team::CliStart,
+    check_installed_identity: bool,
 ) -> ToolResult {
     if !bounded(&request.idempotency_key, 128)
         || !bounded(&request.fallback_thinking_profile_id, 128)
@@ -1058,7 +1116,16 @@ async fn start(
         .iter()
         .find(|p| p.provider_id == slot.provider_id)
     else {
-        return denied("agent_cli_provider_not_discovered");
+        let mut result = denied("agent_cli_provider_not_discovered");
+        if let Some(missing) = catalog
+            .unavailable_providers
+            .iter()
+            .find(|entry| entry.provider_id == slot.provider_id)
+        {
+            result.output["reason_code"] = json!(missing.reason_code);
+        }
+        result.output["next_action"] = json!("Use cli discover/models to inspect this installation and its adapter; execution still requires this Runner's registered resources. Do not create a replacement task.");
+        return result;
     };
     if !cli_selection_discovered(provider, &slot.model, slot.effort.as_deref()) {
         return denied("agent_cli_selection_not_discovered");
@@ -1067,6 +1134,25 @@ async fn start(
         Ok(controls) => controls,
         Err(code) => return denied(&code),
     };
+    if check_installed_identity {
+        let selection = match AgentCliProvider::parse(&provider.provider_id) {
+            Ok(selection) => selection,
+            Err(_) => return denied("agent_cli_invalid_provider_id"),
+        };
+        let inventory = match assets.inventory(caller, Some(selection)).await {
+            Ok(inventory) => inventory,
+            Err(_) => return denied("agent_cli_installation_unavailable"),
+        };
+        let Some(capabilities) = inventory.capabilities else {
+            return denied("agent_cli_capabilities_missing");
+        };
+        if inventory.target != catalog.target
+            || capabilities.executable_identity != format!("sha256:{}", provider.executable_sha256)
+            || capabilities.version != provider.version
+        {
+            return denied("agent_cli_installation_changed");
+        }
+    }
     // Actual resource facts come from authenticated Runner registration, not
     // from a model argument or a hand-written hash/path in this adapter.
     let resources = match runtime

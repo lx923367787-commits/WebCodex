@@ -432,7 +432,7 @@ impl crate::agent_team_execution::AgentTeamAssets for NativeInventory {
     {
         Box::pin(async { Err("isolated resources must not be consulted for a native call".into()) })
     }
-    fn inventory<'a>(
+    fn native_inventory<'a>(
         &'a self,
         _: &'a webcodex_store::VerifiedAgentRun,
         _: Option<webcodex_core::agent_cli::AgentCliProvider>,
@@ -448,7 +448,7 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
     use webcodex_core::agent_cli::{AgentCliCapabilities, AgentCliInstallation, AgentCliInventory};
     use webcodex_core::cli_adapter::*;
     for provider_error in [false, true] {
-        let (_temp, _, runtime, binding, project) = fixture(1, true).await;
+        let (_temp, db, runtime, binding, project) = fixture(1, true).await;
         let adapter = CliAdapter {
             id: "third-party".into(),
             label: "Third party".into(),
@@ -490,6 +490,7 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
                 message: String::new(),
             }],
             capabilities: Some(AgentCliCapabilities {
+                executable_identity: format!("sha256:{}", "a".repeat(64)),
                 provider_id: adapter.id.clone(),
                 label: adapter.label.clone(),
                 installed: true,
@@ -505,6 +506,18 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
         };
         let runtime =
             runtime.with_agent_team_assets(std::sync::Arc::new(NativeInventory(inventory)));
+        let task = db.read_agent_enrollment(&binding).unwrap().task_id;
+        let metadata = invoke(
+            &runtime,
+            &binding,
+            json!({"action":"models","task_id":task,"cli_id":"third-party"}),
+        )
+        .await;
+        assert!(metadata.success, "{:?}", metadata.error);
+        assert!(metadata.output["capabilities"].get("adapter").is_none());
+        assert!(metadata.output["capabilities"]
+            .get("executableIdentity")
+            .is_none());
         let started = invoke(
             &runtime,
             &binding,
@@ -513,6 +526,7 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
         )
         .await;
         assert!(started.success, "{:?}", started.error);
+        assert!(started.output["job"].get("command_preview").is_none());
         let id = started.output["call"]["call_id"].as_str().unwrap();
         let request = wait_for_patch_agent_request(&runtime, "local-runner").await;
         let RunnerOperation::Job(RunnerJobOperation::StartDetachedProcess(operation)) =

@@ -61,6 +61,22 @@ describe("AI office", () => {
     fireEvent.click(screen.getByRole("button", { name: "重新扫描本机 CLI" }));
     await screen.findByText("扫描失败");
   });
+
+  it("ignores a late capability response after rescanning and supports arbitrary registry keys", async () => {
+    const api = apiFixture();
+    const entry = (providerId: string, label: string) => ({ providerId, label, installed: true, native: true, adapterAvailable: true, status: "discovered", message: "已发现" });
+    api.discoverCli = vi.fn().mockResolvedValueOnce([entry("old-cli", "Old CLI")]).mockResolvedValueOnce([entry("constructor", "New CLI")]);
+    let finish!: (catalog: CliCatalog) => void;
+    api.refreshCli = vi.fn(() => new Promise<CliCatalog>((resolve) => { finish = resolve; }));
+    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, providers: [] } }} api={api} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "刷新 Old CLI 模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新扫描本机 CLI" }));
+    await screen.findByText("New CLI");
+    await act(async () => finish({ providerId: "old-cli", label: "Old CLI", installed: true, version: "1", models: ["stale-model"], efforts: [], source: "installed_help", status: "ready", message: "old result", checkedAt: "now", accountAvailabilityVerified: false }));
+    expect(screen.queryByText("stale-model")).not.toBeInTheDocument();
+    expect(screen.queryByText("old result")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "刷新 New CLI 模型列表" })).toBeEnabled();
+  });
   it("opens real team observations using the selected project identity", async () => {
     const api = apiFixture();
     api.team = vi.fn(async () => ({ plans: [], total_count: 0, next_offset: null }));

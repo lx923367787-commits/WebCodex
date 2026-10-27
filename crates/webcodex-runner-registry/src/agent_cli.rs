@@ -271,6 +271,13 @@ fn observed_resource(
     match operation {
         RunnerOperation::AgentCliInventory(query) => {
             query.validate()?;
+            if query.native_only
+                && !runner
+                    .runner_features
+                    .supports(crate::RunnerFeature::LocalCli)
+            {
+                return Err("local_cli_runner_upgrade_required".into());
+            }
             if store_delivery_proof.is_some() {
                 return Err("agent_cli_store_proof_not_catalog_authority".into());
             }
@@ -527,9 +534,33 @@ impl RunnerRegistry {
         provider: Option<AgentCliProvider>,
         requested_by: String,
     ) -> Result<AgentCliInventory, String> {
+        self.query_cli_inventory_mode(access, target, provider, requested_by, false)
+            .await
+    }
+
+    pub async fn query_native_cli_inventory(
+        &self,
+        access: &RunnerAccess,
+        target: &AgentExecutionTarget,
+        provider: Option<AgentCliProvider>,
+        requested_by: String,
+    ) -> Result<AgentCliInventory, String> {
+        self.query_cli_inventory_mode(access, target, provider, requested_by, true)
+            .await
+    }
+
+    async fn query_cli_inventory_mode(
+        &self,
+        access: &RunnerAccess,
+        target: &AgentExecutionTarget,
+        provider: Option<AgentCliProvider>,
+        requested_by: String,
+        native_only: bool,
+    ) -> Result<AgentCliInventory, String> {
         let deadline = Instant::now() + Duration::from_secs(AGENT_CLI_CONTROL_TIMEOUT_SECS);
         let query = AgentCliInventoryQuery {
             version: 1,
+            native_only,
             target: target.clone(),
             provider,
             deadline_at_ms: now_ms() + (AGENT_CLI_CONTROL_TIMEOUT_SECS * 1000) as i64,

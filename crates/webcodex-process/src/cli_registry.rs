@@ -73,7 +73,7 @@ pub fn discover_cli_installations(
         roots.insert("app_data", path);
     }
     let paths = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|p| std::env::split_paths(&p).take(128).collect::<Vec<_>>())
         .unwrap_or_default();
     let mut definitions = configured_cli_adapters()?;
     for addition in additions {

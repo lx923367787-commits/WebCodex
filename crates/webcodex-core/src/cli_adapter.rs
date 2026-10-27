@@ -163,6 +163,20 @@ impl CliAdapter {
                     .prefix_args
                     .iter()
                     .chain(&invocation.fixed_args)
+                    .any(|arg| {
+                        matches!(
+                            arg.to_ascii_lowercase().as_str(),
+                            "--dangerously-skip-permissions"
+                                | "--dangerously-bypass-approvals-and-sandbox"
+                                | "--yolo"
+                                | "--allow-all-tools"
+                                | "--no-sandbox"
+                        )
+                    })
+                || invocation
+                    .prefix_args
+                    .iter()
+                    .chain(&invocation.fixed_args)
                     .any(|s| {
                         s == "--"
                             || s == &invocation.model_flag

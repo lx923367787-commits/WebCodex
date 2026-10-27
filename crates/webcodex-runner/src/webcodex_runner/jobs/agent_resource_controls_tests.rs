@@ -192,6 +192,27 @@ fn codebuddy_files_profile() -> AgentExecutionResourceProfile {
     p
 }
 
+#[test]
+fn registered_cli_labels_never_select_legacy_account_mappings() {
+    let profile = codebuddy_files_profile();
+    assert_eq!(
+        legacy_credential_loading(profile.reviewed_controls.as_ref()),
+        Some(AgentCliProvider::WorkBuddy)
+    );
+    let mut generic = profile.reviewed_controls.unwrap();
+    generic.loading_method = "registered-native-cli-v1".into();
+    generic.adapter = Some(
+        webcodex_core::cli_adapter::cli_adapters(&[])
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == "workbuddy")
+            .unwrap(),
+    );
+    generic.fixed_args.retain(|arg| arg.flag != "--tools");
+    generic.require_supported_loading().unwrap();
+    assert_eq!(legacy_credential_loading(Some(&generic)), None);
+}
+
 fn codebuddy_files_start(profiles: &ValidatedResourceProfiles) -> AgentExecutionStart {
     use webcodex_core::agent_cli_controls::compose_reviewed_cli_argv;
     let mut request = start(profiles);

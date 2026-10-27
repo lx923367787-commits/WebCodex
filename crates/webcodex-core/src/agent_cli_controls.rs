@@ -418,6 +418,9 @@ impl ReviewedAgentCliControls {
                 .map(|_| ())
                 .ok_or("agent_cli_controls_adapter_required".into());
         }
+        if self.adapter.is_some() {
+            return Err("agent_cli_controls_legacy_adapter_override".into());
+        }
         if self.provider == AgentCliProvider::Antigravity {
             if self.cli_version != ANTIGRAVITY_FILES_VERSION
                 || self.executable_sha256 != ANTIGRAVITY_FILES_EXE_SHA256

@@ -177,6 +177,26 @@ async fn enrolled_cli_start_reports_missing_plan_before_catalog_or_reservation()
     assert_eq!(result.output["dispatch_certainty"], "not_started");
     assert_eq!(result.output["state_changed"], false);
     assert!(result.output["next_action"].is_string());
+    let unified = runtime
+        .isolated_model_call_async(
+            "cli",
+            json!({"action":"start","execution_mode":"isolated","request":{
+                "root_task_id":f.task,"source_task_id":f.task,"call_index":0,
+                "fallback_thinking_profile_id":"explicit-profile","idempotency_key":"cli-planless"
+            }}),
+            Some(&auth),
+        )
+        .await;
+    assert_eq!(unified.output["error_kind"], "team_plan_required");
+    assert_eq!(unified.output["state_changed"], false);
+    let injected = runtime
+        .isolated_model_call_async(
+            "cli",
+            json!({"action":"discover","request":{"task_id":f.task,"command":"arbitrary"}}),
+            Some(&auth),
+        )
+        .await;
+    assert_eq!(injected.output["error_kind"], "agent_team_invalid_input");
     assert_eq!(
         db.list_agent_team_receipts(auth.agent_run.as_ref().unwrap(), &f.task, 0, 20)
             .unwrap()

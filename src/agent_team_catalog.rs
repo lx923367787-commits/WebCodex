@@ -488,6 +488,30 @@ fn cli_unavailable(provider: AgentCliProvider, reason: &str) -> UnavailableCliPr
 }
 
 impl AgentTeamAssets for RunnerAgentTeamAssets {
+    fn native_inventory<'a>(
+        &'a self,
+        caller: &'a VerifiedAgentRun,
+        provider: Option<AgentCliProvider>,
+    ) -> AssetFuture<'a, webcodex_core::agent_cli::AgentCliInventory> {
+        Box::pin(async move {
+            let access = self.owner_access(caller)?;
+            let target = self.checked_target(caller, &access).await?;
+            let inventory = self
+                .registry
+                .query_native_cli_inventory(
+                    &access,
+                    &target,
+                    provider,
+                    format!("agent:{}:native-cli-discover", caller.agent_id()),
+                )
+                .await?;
+            if self.checked_target(caller, &access).await? != target {
+                return Err("agent_team_catalog_runner_changed".into());
+            }
+            Ok(inventory)
+        })
+    }
+
     fn inventory<'a>(
         &'a self,
         caller: &'a VerifiedAgentRun,

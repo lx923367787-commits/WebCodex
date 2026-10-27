@@ -57,6 +57,7 @@ pub(crate) fn discover_inventory(
         let raw = probe_metadata(adapter, &pinned.program, &context, &deadline)?;
         Some(webcodex_core::agent_cli::AgentCliCapabilities {
             adapter: Some(adapter.clone()),
+            executable_identity: pinned.descriptor.executable_identity.clone(),
             provider_id: raw.provider_id,
             label: raw.label,
             installed: raw.installed,

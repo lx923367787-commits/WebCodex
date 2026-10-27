@@ -509,6 +509,119 @@ async fn agent_cli_catalog_fixed_query_returns_exact_non_authorizing_metadata() 
 }
 
 #[tokio::test]
+async fn cli_inventory_does_not_require_an_execution_profile_and_remains_owner_scoped() {
+    let registry = execution::registry(false).await;
+    let target = execution::start(0).binding.target;
+    let reader = registry.clone();
+    let requested_target = target.clone();
+    let task = tokio::spawn(async move {
+        reader
+            .query_agent_cli_inventory(
+                &execution::access(),
+                &requested_target,
+                None,
+                "controller".into(),
+            )
+            .await
+    });
+    let request = next(&registry).await;
+    assert_eq!(request.kind, AGENT_CLI_INVENTORY_KIND);
+    assert!(request.command.is_empty() && request.process.is_none() && request.path.is_none());
+    let RunnerOperation::AgentCliInventory(query) = request.decode_operation().unwrap() else {
+        panic!("wrong read operation")
+    };
+    let now = now_ms();
+    respond(
+        &registry,
+        &request,
+        serde_json::to_value(AgentCliInventory {
+            version: 1,
+            target: query.target,
+            observed_at_ms: now,
+            expires_at_ms: now + AGENT_CLI_CATALOG_TTL_MS,
+            capabilities: None,
+            installations: vec![AgentCliInstallation {
+                command: "third-party-cli".into(),
+                provider_id: "third-party-cli".into(),
+                label: "Installed CLI".into(),
+                installed: true,
+                native: true,
+                adapter_available: false,
+                status: "adapter_required".into(),
+                message: "Needs an adapter".into(),
+            }],
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        task.await.unwrap().unwrap().installations[0].provider_id,
+        "third-party-cli"
+    );
+    assert!(registry.inner.lock().await.pending_by_id.is_empty());
+    let mut foreign = execution::access();
+    foreign.username = Some("another-owner".into());
+    assert!(registry
+        .query_agent_cli_inventory(&foreign, &target, None, "controller".into())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn native_cli_inventory_explicitly_excludes_isolated_profiles_and_requires_native_support() {
+    let registry = execution::registry(false).await;
+    let target = execution::start(0).binding.target;
+    assert_eq!(
+        registry
+            .query_native_cli_inventory(&execution::access(), &target, None, "controller".into())
+            .await
+            .unwrap_err(),
+        "local_cli_runner_upgrade_required"
+    );
+    {
+        let mut inner = registry.inner.lock().await;
+        let runner = inner.runners.get_mut(&target.client_id).unwrap();
+        let mut capabilities = runner.runner_features.wire_capabilities().clone();
+        capabilities.local_cli = true;
+        runner.runner_features = crate::RunnerFeatureSet::from_wire_for_test(&capabilities);
+    }
+    let reader = registry.clone();
+    let selected = target.clone();
+    let pending = tokio::spawn(async move {
+        reader
+            .query_native_cli_inventory(&execution::access(), &selected, None, "controller".into())
+            .await
+    });
+    let request = next(&registry).await;
+    let RunnerOperation::AgentCliInventory(query) = request.decode_operation().unwrap() else {
+        panic!("Expected bounded inventory read")
+    };
+    assert!(
+        query.native_only,
+        "A stale isolated profile must never replace native installation discovery"
+    );
+    let now = now_ms();
+    respond(
+        &registry,
+        &request,
+        serde_json::to_value(AgentCliInventory {
+            version: 1,
+            target: query.target,
+            observed_at_ms: now,
+            expires_at_ms: now + AGENT_CLI_CATALOG_TTL_MS,
+            capabilities: None,
+            installations: vec![],
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(pending.await.unwrap().unwrap().installations.is_empty());
+    assert!(registry.inner.lock().await.jobs_by_id.is_empty());
+}
+
+#[tokio::test]
 async fn agent_cli_catalog_mapping_is_explicit_unique_and_access_scoped() {
     let registry = execution::registry(true).await;
     let target = execution::start(0).binding.target;

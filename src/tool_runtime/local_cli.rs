@@ -142,12 +142,24 @@ fn execution_confirmed(job: &ShellJobInfo) -> bool {
 }
 
 fn receipt(call: &LocalCliCall, job: &ShellJobInfo) -> ToolResult {
-    ToolResult::ok(json!({"call":call,"job":job,"execution_mode":"runner_user",
+    let mut public_job = serde_json::to_value(job).expect("typed job");
+    if let Some(object) = public_job.as_object_mut() {
+        object.remove("command_preview");
+    }
+    if let Some(object) = public_job
+        .pointer_mut("/result/shell")
+        .and_then(Value::as_object_mut)
+    {
+        object.remove("command_preview");
+    }
+    ToolResult::ok(
+        json!({"call":call,"job":public_job,"execution_mode":"runner_user",
         "terminal":matches!(call.state.as_str(),"completed"|"failed"|"stopped"),
         "process_success":job.status=="completed" && job.exit_code==Some(0),
         "cli_success":call.result_contract.as_ref().and_then(|_| match call.state.as_str() {"completed"=>Some(true),"failed"|"stopped"=>Some(false),_=>None}),
         "task_acceptance_verified":false,
-        "next_action":"Observe this call_id until a trustworthy terminal result, then validate the requested deliverables."}))
+        "next_action":"Observe this call_id until a trustworthy terminal result, then validate the requested deliverables."}),
+    )
 }
 
 pub(crate) async fn call(
@@ -190,7 +202,7 @@ pub(crate) async fn start_selected(
     let Some(assets) = &runtime.agent_team_assets else {
         return denial("agent_team_catalog_source_missing");
     };
-    let inventory = match assets.inventory(binding, Some(provider)).await {
+    let inventory = match assets.native_inventory(binding, Some(provider)).await {
         Ok(v) => v,
         Err(_) => return denial("agent_cli_inventory_unavailable"),
     };

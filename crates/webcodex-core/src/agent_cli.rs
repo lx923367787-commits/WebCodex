@@ -27,6 +27,8 @@ pub const AGENT_CLI_DELIVERY_MAX_FILES: usize = 16;
 #[serde(deny_unknown_fields)]
 pub struct AgentCliInventoryQuery {
     pub version: u32,
+    #[serde(default)]
+    pub native_only: bool,
     pub target: AgentExecutionTarget,
     pub deadline_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +72,8 @@ pub struct AgentCliInventory {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentCliCapabilities {
+    /// Internal Server/Runner identity; omitted from the model projection.
+    pub executable_identity: String,
     pub provider_id: String,
     pub label: String,
     pub installed: bool,
@@ -102,13 +106,13 @@ impl AgentCliInventory {
                 || !ids.insert(&entry.provider_id)
                 || !matches!(
                     entry.status.as_str(),
-                    "discovered" | "adapter_required" | "launcher_requires_adapter"
+                    "discovered" | "adapter_required" | "launcher_requires_adapter" | "unavailable"
                 )
             {
                 return Err("agent_cli_inventory_invalid".into());
             }
             text(&entry.label, 128, false)?;
-            text(&entry.command, 4096, false)?;
+            text(&entry.command, 4096, !entry.installed)?;
             text(&entry.message, 2048, true)?;
         }
         if let Some(capabilities) = &self.capabilities {
@@ -118,8 +122,17 @@ impl AgentCliInventory {
                     return Err("agent_cli_capabilities_invalid".into());
                 }
             }
+            let executable_hash = capabilities
+                .executable_identity
+                .strip_prefix("sha256:")
+                .ok_or("agent_cli_capabilities_invalid")?;
+            digest(executable_hash)?;
             if query.provider.as_ref().map(AgentCliProvider::id)
                 != Some(capabilities.provider_id.as_str())
+                || (capabilities.installed
+                    && !self.installations.iter().any(|entry| {
+                        entry.installed && entry.provider_id == capabilities.provider_id
+                    }))
                 || capabilities.account_availability_verified
                 || capabilities.models.len() > 256
                 || capabilities.efforts.len() > 32

@@ -210,6 +210,7 @@ fn agent_cli_fixed_query_rejects_commands_and_paths_but_accepts_registry_ids() {
 fn cli_inventory_has_a_scoped_read_only_codec_and_expiring_typed_results() {
     let query = AgentCliInventoryQuery {
         version: 1,
+        native_only: false,
         target: target(),
         deadline_at_ms: 40_000,
         provider: None,

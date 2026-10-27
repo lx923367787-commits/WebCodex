@@ -140,8 +140,15 @@ impl JobManager {
         sink: &RunnerSink,
         query: &webcodex_core::agent_cli::AgentCliInventoryQuery,
     ) -> Result<webcodex_core::agent_cli::AgentCliInventory, String> {
-        let adapters: Vec<_> = lock_unpoison(&self.agent_execution)
-            .configuration
+        if query.native_only {
+            return crate::webcodex_runner::agent_cli::discover_inventory(sink, query, &[]);
+        }
+        let configuration = lock_unpoison(&self.agent_execution).configuration.clone();
+        let registered = configuration
+            .as_ref()
+            .map(|configuration| configuration.profiles.cli_installations())
+            .unwrap_or_default();
+        let adapters: Vec<_> = configuration
             .as_ref()
             .map(|configuration| {
                 configuration
@@ -152,8 +159,66 @@ impl JobManager {
                     .collect()
             })
             .unwrap_or_default();
-        crate::webcodex_runner::agent_cli::discover_inventory(sink, query, &adapters)
+        let registered_selection = query.provider.as_ref().is_some_and(|provider| {
+            registered
+                .iter()
+                .any(|entry| entry.provider_id == provider.id())
+        });
+        let mut discovery_query = query.clone();
+        if registered_selection {
+            discovery_query.provider = None;
+        }
+        let mut inventory = crate::webcodex_runner::agent_cli::discover_inventory(
+            sink,
+            &discovery_query,
+            &adapters,
+        )?;
+        for entry in registered {
+            if let Some(discovered) = inventory
+                .installations
+                .iter_mut()
+                .find(|item| item.provider_id == entry.provider_id)
+            {
+                *discovered = entry;
+            } else {
+                inventory.installations.push(entry);
+            }
+        }
+        if registered_selection {
+            let provider = query.provider.expect("registered selection");
+            let raw = self.agent_cli_catalog(
+                sink,
+                &AgentCliCatalogQuery {
+                    version: 1,
+                    target: query.target.clone(),
+                    provider,
+                    deadline_at_ms: query.deadline_at_ms,
+                },
+            )?;
+            let entry = inventory
+                .installations
+                .iter()
+                .find(|entry| entry.provider_id == provider.id())
+                .ok_or("agent_cli_adapter_unavailable")?;
+            inventory.capabilities = Some(webcodex_core::agent_cli::AgentCliCapabilities {
+                adapter: None,
+                provider_id: provider.id().into(),
+                label: entry.label.clone(),
+                installed: entry.installed,
+                executable_identity: raw.executable_identity,
+                version: raw.cli_version,
+                models: raw.models,
+                efforts: raw.efforts,
+                source: raw.source,
+                status: raw.status,
+                message: raw.message,
+                account_availability_verified: false,
+            });
+        }
+        inventory.validate_for(query, chrono::Utc::now().timestamp_millis())?;
+        Ok(inventory)
     }
+
     pub(crate) fn agent_cli_catalog(
         &self,
         sink: &RunnerSink,

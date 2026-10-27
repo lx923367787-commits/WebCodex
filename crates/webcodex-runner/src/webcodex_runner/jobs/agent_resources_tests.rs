@@ -222,8 +222,18 @@ fn absent_provider_preserves_the_previous_manifest_encoding() {
             .provider,
         None
     );
+    let mut registered = config.clone();
+    registered["provider"] = serde_json::json!("third-party-cli");
+    assert_eq!(
+        serde_json::from_value::<AgentExecutionResourceProfile>(registered)
+            .unwrap()
+            .provider
+            .unwrap()
+            .id(),
+        "third-party-cli"
+    );
     let mut unsupported = config;
-    unsupported["provider"] = serde_json::json!("arbitrary-cli");
+    unsupported["provider"] = serde_json::json!("../arbitrary-cli");
     assert!(serde_json::from_value::<AgentExecutionResourceProfile>(unsupported).is_err());
 }
 
