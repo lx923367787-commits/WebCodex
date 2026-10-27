@@ -401,7 +401,15 @@ fn named_workspace_team_uses_saved_policy_without_upgrading_existing_chats() {
         .unwrap();
     let principal = crate::agent_isolation::enrollment_principal_for_execution("native-owner");
     let mut settings = crate::TeamPolicyInput::default();
-    settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
+    settings.providers = ["workbuddy", "antigravity"]
+        .into_iter()
+        .map(|id| crate::TeamProviderPreference {
+            provider_id: id.into(),
+            enabled: true,
+            model: None,
+            effort: None,
+        })
+        .collect();
     settings.mode = crate::TeamPolicyMode::Custom;
     settings.subagents = crate::TeamCountRange { min: 2, max: 4 };
     settings.cli_per_agent = crate::TeamCountRange { min: 2, max: 2 };
@@ -562,7 +570,15 @@ fn named_workspace_team_uses_explicit_folder_without_retargeting_existing_chats(
     let mut project = workspace('a');
     let principal = crate::agent_isolation::enrollment_principal_for_execution("native-owner");
     let mut code_policy = crate::TeamPolicyInput::default();
-    code_policy.providers = ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
+    code_policy.providers = ["workbuddy", "antigravity"]
+        .into_iter()
+        .map(|id| crate::TeamProviderPreference {
+            provider_id: id.into(),
+            enabled: true,
+            model: None,
+            effort: None,
+        })
+        .collect();
     code_policy.mode = crate::TeamPolicyMode::Custom;
     code_policy.subagents = crate::TeamCountRange { min: 1, max: 3 };
     code_policy.cli_per_agent = crate::TeamCountRange { min: 1, max: 2 };
@@ -570,7 +586,15 @@ fn named_workspace_team_uses_explicit_folder_without_retargeting_existing_chats(
         .save_team_policy(&principal, &project.folders[0].project, 0, code_policy)
         .unwrap();
     let mut docs_policy = crate::TeamPolicyInput::default();
-    docs_policy.providers = ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
+    docs_policy.providers = ["workbuddy", "antigravity"]
+        .into_iter()
+        .map(|id| crate::TeamProviderPreference {
+            provider_id: id.into(),
+            enabled: true,
+            model: None,
+            effort: None,
+        })
+        .collect();
     docs_policy.mode = crate::TeamPolicyMode::Custom;
     docs_policy.subagents = crate::TeamCountRange { min: 1, max: 2 };
     docs_policy.cli_per_agent = crate::TeamCountRange { min: 1, max: 1 };
@@ -640,7 +664,15 @@ fn named_workspace_team_caps_total_cli_budget_without_rejecting_feasible_policy(
     project.team_project = Some(project.folders[0].project.clone());
     let principal = crate::agent_isolation::enrollment_principal_for_execution("native-owner");
     let mut settings = crate::TeamPolicyInput::default();
-    settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
+    settings.providers = ["workbuddy", "antigravity"]
+        .into_iter()
+        .map(|id| crate::TeamProviderPreference {
+            provider_id: id.into(),
+            enabled: true,
+            model: None,
+            effort: None,
+        })
+        .collect();
     settings.mode = crate::TeamPolicyMode::Custom;
     settings.subagents = crate::TeamCountRange { min: 1, max: 32 };
     settings.cli_per_agent = crate::TeamCountRange { min: 1, max: 32 };

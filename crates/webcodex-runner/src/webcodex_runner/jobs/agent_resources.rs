@@ -237,6 +237,19 @@ fn reviewed_file_worker(
     })
 }
 
+fn legacy_credential_loading(
+    controls: Option<&ReviewedAgentCliControls>,
+) -> Option<AgentCliProvider> {
+    use webcodex_core::agent_cli_controls::*;
+    let controls = controls?;
+    controls.require_supported_loading().ok()?;
+    match controls.loading_method.as_str() {
+        CODEBUDDY_FILES_LOADING | CODEBUDDY_NODE_FILES_LOADING => Some(AgentCliProvider::WorkBuddy),
+        ANTIGRAVITY_FILES_LOADING => Some(AgentCliProvider::Antigravity),
+        _ => None,
+    }
+}
+
 fn validate_codebuddy_node_package(files: &[ResourceFile]) -> Result<(), String> {
     use webcodex_core::agent_cli_controls::{
         CODEBUDDY_FILES_MCP_PATH, CODEBUDDY_FILES_SETTINGS_PATH,
@@ -537,6 +550,52 @@ pub(crate) fn validate_profiles(
 }
 
 impl ValidatedResourceProfiles {
+    pub(crate) fn cli_installations(&self) -> Vec<webcodex_core::agent_cli::AgentCliInstallation> {
+        self.0
+            .values()
+            .filter_map(|profile| {
+                let provider = profile.provider?;
+                let adapter = profile
+                    .reviewed_controls
+                    .as_ref()
+                    .and_then(|record| record.adapter.clone())
+                    .or_else(|| {
+                        webcodex_core::cli_adapter::cli_adapters(&[])
+                            .ok()?
+                            .into_iter()
+                            .find(|entry| entry.id == provider.id())
+                    });
+                let installed = profile
+                    .files
+                    .iter()
+                    .all(|file| Path::new(&file.source).is_file());
+                let adapter_available = adapter
+                    .as_ref()
+                    .is_some_and(|entry| entry.invocation.is_some());
+                Some(webcodex_core::agent_cli::AgentCliInstallation {
+                    provider_id: provider.id().into(),
+                    label: adapter
+                        .map(|entry| entry.label)
+                        .unwrap_or_else(|| provider.id().into()),
+                    installed,
+                    native: true,
+                    adapter_available,
+                    status: if installed {
+                        "discovered"
+                    } else {
+                        "unavailable"
+                    }
+                    .into(),
+                    message: if installed {
+                        "已发现本机登记的 CLI，调用前会复核资源。"
+                    } else {
+                        "已登记的 CLI 文件当前不可用，请重新配置。"
+                    }
+                    .into(),
+                })
+            })
+            .collect()
+    }
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -584,11 +643,7 @@ impl ValidatedResourceProfiles {
     ) -> Result<(bool, bool), String> {
         let profile = selected_profile(self, start)?;
         Ok((
-            reviewed_file_worker(
-                profile.provider,
-                &profile.executable_identity,
-                profile.reviewed_controls.as_ref(),
-            ),
+            legacy_credential_loading(profile.reviewed_controls.as_ref()).is_some(),
             profile.user_https_proxy,
         ))
     }
@@ -606,24 +661,47 @@ pub(crate) struct PinnedCatalogExecutable {
 
 /// Pin a discovered installation for fixed metadata commands only. This
 /// temporary profile is never registered and grants no isolated Job execution.
-pub(crate) fn pin_discovered_catalog_executable(program: &Path, provider: AgentCliProvider) -> Result<PinnedCatalogExecutable, String> {
+pub(crate) fn pin_discovered_catalog_executable(
+    program: &Path,
+    provider: AgentCliProvider,
+) -> Result<PinnedCatalogExecutable, String> {
     use std::io::Read;
-    let mut source = std::fs::File::open(program).map_err(|_| "agent_cli_metadata_source_unavailable")?;
-    let metadata = source.metadata().map_err(|_| "agent_cli_metadata_source_unavailable")?;
-    if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES { return Err("agent_cli_metadata_source_limit".into()); }
-    let mut digest = Sha256::new(); let mut buffer = [0u8; 65536]; let mut total = 0u64;
+    let mut source =
+        std::fs::File::open(program).map_err(|_| "agent_cli_metadata_source_unavailable")?;
+    let metadata = source
+        .metadata()
+        .map_err(|_| "agent_cli_metadata_source_unavailable")?;
+    if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES {
+        return Err("agent_cli_metadata_source_limit".into());
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut total = 0u64;
     loop {
-        let count = source.read(&mut buffer).map_err(|_| "agent_cli_metadata_source_unavailable")?;
-        if count == 0 { break; }
+        let count = source
+            .read(&mut buffer)
+            .map_err(|_| "agent_cli_metadata_source_unavailable")?;
+        if count == 0 {
+            break;
+        }
         total += count as u64;
-        if total > MAX_RESOURCE_BYTES { return Err("agent_cli_metadata_source_limit".into()); }
+        if total > MAX_RESOURCE_BYTES {
+            return Err("agent_cli_metadata_source_limit".into());
+        }
         digest.update(&buffer[..count]);
     }
-    let profiles = validate_profiles(&AgentExecutionResourcesConfig { profiles:vec![AgentExecutionResourceProfile {
-        id:format!("metadata-{}",provider.id()), provider:Some(provider), reviewed_controls:None,
-        user_https_proxy:false, codebuddy_config_directory:None, executable:program.to_path_buf(),
-        executable_sha256:format!("{:x}",digest.finalize()), files:vec![],
-    }] })?;
+    let profiles = validate_profiles(&AgentExecutionResourcesConfig {
+        profiles: vec![AgentExecutionResourceProfile {
+            id: format!("metadata-{}", provider.id()),
+            provider: Some(provider),
+            reviewed_controls: None,
+            user_https_proxy: false,
+            codebuddy_config_directory: None,
+            executable: program.to_path_buf(),
+            executable_sha256: format!("{:x}", digest.finalize()),
+            files: vec![],
+        }],
+    })?;
     pin_catalog_executable(&profiles, provider)
 }
 
@@ -801,7 +879,9 @@ pub(crate) struct PreparedAgentResources {
 }
 
 impl PreparedAgentResources {
-    pub(crate) fn result_contract(&self) -> Option<&webcodex_core::cli_adapter::CliResultContract> { self.result_contract.as_ref() }
+    pub(crate) fn result_contract(&self) -> Option<&webcodex_core::cli_adapter::CliResultContract> {
+        self.result_contract.as_ref()
+    }
     pub(crate) fn proxy_requested(&self) -> bool {
         self.proxy_requested
     }
@@ -2381,9 +2461,9 @@ mod windows {
         if !operator_probe {
             validate_execution_args(profile, start)?;
         }
-        let antigravity_files =
-            file_worker && profile.provider == Some(AgentCliProvider::Antigravity);
-        if file_worker && profile.provider == Some(AgentCliProvider::WorkBuddy) {
+        let credential_loading = legacy_credential_loading(profile.reviewed_controls.as_ref());
+        let antigravity_files = credential_loading == Some(AgentCliProvider::Antigravity);
+        if operator_probe || credential_loading == Some(AgentCliProvider::WorkBuddy) {
             let user_home = std::env::var_os("USERPROFILE")
                 .map(PathBuf::from)
                 .ok_or("codebuddy_native_auth_source_unavailable")?;
@@ -2469,9 +2549,18 @@ mod windows {
             None
         };
         Ok(PreparedAgentResources {
-            result_contract: profile.reviewed_controls.as_ref().and_then(|record| {
-                record.adapter.clone().or_else(|| webcodex_core::cli_adapter::cli_adapters(&[]).ok()?.into_iter().find(|adapter| adapter.id == record.provider.id()))
-            }).and_then(|adapter| adapter.invocation?.result),
+            result_contract: profile
+                .reviewed_controls
+                .as_ref()
+                .and_then(|record| {
+                    record.adapter.clone().or_else(|| {
+                        webcodex_core::cli_adapter::cli_adapters(&[])
+                            .ok()?
+                            .into_iter()
+                            .find(|adapter| adapter.id == record.provider.id())
+                    })
+                })
+                .and_then(|adapter| adapter.invocation?.result),
             workspace_snapshot,
             program: root.join(PROGRAM),
             cwd: root.join("workspace"),
@@ -2492,7 +2581,3 @@ mod windows {
 #[cfg(test)]
 #[path = "agent_resources_tests.rs"]
 mod tests;
-
-#[cfg(all(test, windows))]
-#[path = "agent_codebuddy_operator_probe.rs"]
-mod codebuddy_operator_probe;

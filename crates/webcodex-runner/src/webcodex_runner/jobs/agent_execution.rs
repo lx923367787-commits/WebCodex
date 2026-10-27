@@ -135,12 +135,86 @@ fn execution_identity_collides(
 }
 
 impl JobManager {
-    pub(crate) fn agent_cli_inventory(&self, sink: &RunnerSink, query: &webcodex_core::agent_cli::AgentCliInventoryQuery) -> Result<webcodex_core::agent_cli::AgentCliInventory, String> {
-        let adapters: Vec<_> = lock_unpoison(&self.agent_execution).configuration.as_ref()
-            .map(|configuration| configuration.profiles.descriptors().into_iter()
-                .filter_map(|resource| resource.reviewed_controls?.adapter).collect()).unwrap_or_default();
-        crate::webcodex_runner::agent_cli::discover_inventory(sink, query, &adapters)
+    pub(crate) fn agent_cli_inventory(
+        &self,
+        sink: &RunnerSink,
+        query: &webcodex_core::agent_cli::AgentCliInventoryQuery,
+    ) -> Result<webcodex_core::agent_cli::AgentCliInventory, String> {
+        let configuration = lock_unpoison(&self.agent_execution).configuration.clone();
+        let registered = configuration
+            .as_ref()
+            .map(|configuration| configuration.profiles.cli_installations())
+            .unwrap_or_default();
+        let adapters: Vec<_> = configuration
+            .as_ref()
+            .map(|configuration| {
+                configuration
+                    .profiles
+                    .descriptors()
+                    .into_iter()
+                    .filter_map(|resource| resource.reviewed_controls?.adapter)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let registered_selection = query.provider.as_ref().is_some_and(|provider| {
+            registered
+                .iter()
+                .any(|entry| entry.provider_id == provider.id())
+        });
+        let mut discovery_query = query.clone();
+        if registered_selection {
+            discovery_query.provider = None;
+        }
+        let mut inventory = crate::webcodex_runner::agent_cli::discover_inventory(
+            sink,
+            &discovery_query,
+            &adapters,
+        )?;
+        for entry in registered {
+            if let Some(discovered) = inventory
+                .installations
+                .iter_mut()
+                .find(|item| item.provider_id == entry.provider_id)
+            {
+                *discovered = entry;
+            } else {
+                inventory.installations.push(entry);
+            }
+        }
+        if registered_selection {
+            let provider = query.provider.expect("registered selection");
+            let raw = self.agent_cli_catalog(
+                sink,
+                &AgentCliCatalogQuery {
+                    version: 1,
+                    target: query.target.clone(),
+                    provider,
+                    deadline_at_ms: query.deadline_at_ms,
+                },
+            )?;
+            let entry = inventory
+                .installations
+                .iter()
+                .find(|entry| entry.provider_id == provider.id())
+                .ok_or("agent_cli_adapter_unavailable")?;
+            inventory.capabilities = Some(webcodex_core::agent_cli::AgentCliCapabilities {
+                provider_id: provider.id().into(),
+                label: entry.label.clone(),
+                installed: entry.installed,
+                executable_identity: raw.executable_identity,
+                version: raw.cli_version,
+                models: raw.models,
+                efforts: raw.efforts,
+                source: raw.source,
+                status: raw.status,
+                message: raw.message,
+                account_availability_verified: false,
+            });
+        }
+        inventory.validate_for(query, chrono::Utc::now().timestamp_millis())?;
+        Ok(inventory)
     }
+
     pub(crate) fn agent_cli_catalog(
         &self,
         sink: &RunnerSink,
@@ -1192,7 +1266,9 @@ impl JobManager {
                 Ok(())
             })?;
         let proxy_requested = prepared.proxy_requested();
-        let result_verifier = std::cell::RefCell::new(webcodex_core::cli_result::CliResultVerifier::new(prepared.result_contract().cloned()));
+        let result_verifier = std::cell::RefCell::new(
+            webcodex_core::cli_result::CliResultVerifier::new(prepared.result_contract().cloned()),
+        );
         let (auth_copy_expected, _) = configuration.profiles.cleanup_requirements(start)?;
         let cleanup_required = auth_copy_expected || proxy_requested;
         let (child, stdin, stdout, stderr, stop_requested) = {
@@ -1340,7 +1416,9 @@ impl JobManager {
                     break;
                 };
                 let text = String::from_utf8_lossy(&bytes).into_owned();
-                if stdout { result_verifier.borrow_mut().observe_stdout(&bytes); }
+                if stdout {
+                    result_verifier.borrow_mut().observe_stdout(&bytes);
+                }
                 self.update_and_send(
                     id,
                     RunnerJobDelta {
@@ -1446,9 +1524,15 @@ impl JobManager {
         };
         let uncertain =
             observation_failed || helper_error || !helpers_finished || cleanup_error.is_some();
-        let cli_result_error = if !uncertain && !timed_out && !stop_requested.load(Ordering::SeqCst) && exit_code == Some(0) {
+        let cli_result_error = if !uncertain
+            && !timed_out
+            && !stop_requested.load(Ordering::SeqCst)
+            && exit_code == Some(0)
+        {
             result_verifier.borrow().finish().err().map(str::to_owned)
-        } else { None };
+        } else {
+            None
+        };
         self.update_and_send(
             id,
             RunnerJobDelta {

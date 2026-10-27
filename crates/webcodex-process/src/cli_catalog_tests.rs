@@ -38,7 +38,7 @@ fn codebuddy_node_metadata_keeps_the_dedicated_config_and_no_host_node_options()
 }
 
 #[test]
-fn only_the_two_supported_providers_can_select_an_executable() {
+fn legacy_metadata_recipe_parser_does_not_accept_program_paths() {
     assert_eq!(Provider::parse("workbuddy"), Ok(Provider::WorkBuddy));
     assert_eq!(Provider::parse("antigravity"), Ok(Provider::Antigravity));
     for invalid in [

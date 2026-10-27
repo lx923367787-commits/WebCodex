@@ -72,8 +72,8 @@ function membersFor(projectId: string): OfficeMember[] {
     { ...base, id: "frontend", role: "subagent", label: demoNickname("frontend"), state: "working", active_requests: 1, task: "布置大家的办公室，让小伙伴们动起来", parent_id: "manager", progress: 75, model: "GPT 子 Agent" },
     { ...base, id: "backend", role: "subagent", label: demoNickname("backend"), state: "working", active_requests: 1, task: "记好团队的小约定，整理每个人的任务卡", parent_id: "manager", progress: 55, model: "GPT 子 Agent" },
     { ...base, id: "review", role: "subagent", label: demoNickname("review"), state: "waiting", task: "等伙伴交作业，再一起检查有没有小遗漏", parent_id: "manager", model: "GPT 子 Agent" },
-    { ...base, id: "cli-workbuddy", role: "cli", label: demoNickname("cli-workbuddy"), state: "working", active_requests: 1, task: "示例：帮伙伴检查今天的成果（未真实运行）", parent_id: "frontend", provider_id: "workbuddy", model: "示例模型", progress: 45 },
-    { ...base, id: "cli-antigravity", role: "cli", label: demoNickname("cli-antigravity"), state: "idle", task: "示例：准备好了，等一份新任务（未真实运行）", parent_id: "backend", provider_id: "antigravity", model: "按发现结果选择" },
+    { ...base, id: "cli-example-one", role: "cli", label: demoNickname("cli-example-one"), state: "working", active_requests: 1, task: "示例：帮伙伴检查今天的成果（未真实运行）", parent_id: "frontend", model: "示例模型", progress: 45 },
+    { ...base, id: "cli-example-two", role: "cli", label: demoNickname("cli-example-two"), state: "idle", task: "示例：准备好了，等一份新任务（未真实运行）", parent_id: "backend", model: "按发现结果选择" },
   ];
 }
 

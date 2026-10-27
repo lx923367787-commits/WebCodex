@@ -36,7 +36,9 @@ impl AgentCliInventoryQuery {
     pub fn validate(&self) -> Result<(), String> {
         version(self.version)?;
         self.target.validate()?;
-        if self.deadline_at_ms <= 0 { return Err("agent_cli_invalid_deadline".into()); }
+        if self.deadline_at_ms <= 0 {
+            return Err("agent_cli_invalid_deadline".into());
+        }
         Ok(())
     }
 }
@@ -67,43 +69,89 @@ pub struct AgentCliInventory {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentCliCapabilities {
-    pub provider_id: String, pub label: String, pub installed: bool, pub version: String,
-    pub models: Vec<String>, pub efforts: Vec<String>, pub source: String,
-    pub status: String, pub message: String, pub account_availability_verified: bool,
+    /// Internal Server/Runner identity; omitted from the model projection.
+    pub executable_identity: String,
+    pub provider_id: String,
+    pub label: String,
+    pub installed: bool,
+    pub version: String,
+    pub models: Vec<String>,
+    pub efforts: Vec<String>,
+    pub source: String,
+    pub status: String,
+    pub message: String,
+    pub account_availability_verified: bool,
 }
 impl AgentCliInventory {
     pub fn validate_for(&self, query: &AgentCliInventoryQuery, now: i64) -> Result<(), String> {
         query.validate()?;
         version(self.version)?;
-        if self.target != query.target || self.observed_at_ms <= 0 || self.observed_at_ms > now
-            || self.expires_at_ms <= now || self.expires_at_ms - self.observed_at_ms != AGENT_CLI_CATALOG_TTL_MS
-            || self.installations.len() > crate::cli_adapter::MAX_CLI_ADAPTERS {
+        if self.target != query.target
+            || self.observed_at_ms <= 0
+            || self.observed_at_ms > now
+            || self.expires_at_ms <= now
+            || self.expires_at_ms - self.observed_at_ms != AGENT_CLI_CATALOG_TTL_MS
+            || self.installations.len() > crate::cli_adapter::MAX_CLI_ADAPTERS
+        {
             return Err("agent_cli_inventory_invalid".into());
         }
         let mut ids = BTreeSet::new();
         for entry in &self.installations {
-            if !crate::cli_adapter::valid_cli_id(&entry.provider_id) || !ids.insert(&entry.provider_id)
-                || !matches!(entry.status.as_str(), "discovered"|"adapter_required"|"launcher_requires_adapter") {
+            if !crate::cli_adapter::valid_cli_id(&entry.provider_id)
+                || !ids.insert(&entry.provider_id)
+                || !matches!(
+                    entry.status.as_str(),
+                    "discovered" | "adapter_required" | "launcher_requires_adapter" | "unavailable"
+                )
+            {
                 return Err("agent_cli_inventory_invalid".into());
             }
-            text(&entry.label,128,false)?;
-            text(&entry.message,2048,true)?;
+            text(&entry.label, 128, false)?;
+            text(&entry.message, 2048, true)?;
         }
         if let Some(capabilities) = &self.capabilities {
-            if query.provider.as_ref().map(AgentCliProvider::id) != Some(capabilities.provider_id.as_str())
-                || capabilities.account_availability_verified || capabilities.models.len() > 256 || capabilities.efforts.len() > 32
-                || !matches!(capabilities.source.as_str(), "installed_help"|"live_catalog"|"unavailable")
-                || !matches!(capabilities.status.as_str(), "ready"|"error"|"unavailable")
-                || (capabilities.status == "ready" && (!capabilities.installed || capabilities.models.is_empty())) {
+            let executable_hash = capabilities
+                .executable_identity
+                .strip_prefix("sha256:")
+                .ok_or("agent_cli_capabilities_invalid")?;
+            digest(executable_hash)?;
+            if query.provider.as_ref().map(AgentCliProvider::id)
+                != Some(capabilities.provider_id.as_str())
+                || (capabilities.installed
+                    && !self.installations.iter().any(|entry| {
+                        entry.installed && entry.provider_id == capabilities.provider_id
+                    }))
+                || capabilities.account_availability_verified
+                || capabilities.models.len() > 256
+                || capabilities.efforts.len() > 32
+                || !matches!(
+                    capabilities.source.as_str(),
+                    "installed_help" | "live_catalog" | "unavailable"
+                )
+                || !matches!(
+                    capabilities.status.as_str(),
+                    "ready" | "error" | "unavailable"
+                )
+                || (capabilities.status == "ready"
+                    && (!capabilities.installed || capabilities.models.is_empty()))
+            {
                 return Err("agent_cli_capabilities_invalid".into());
             }
-            text(&capabilities.label,128,false)?; text(&capabilities.version,128,capabilities.status != "ready")?;
-            text(&capabilities.message,2048,true)?;
-            for (options, max) in [(&capabilities.models,128),(&capabilities.efforts,64)] {
-                let mut seen=BTreeSet::new();
-                for option in options { text(option,max,false)?; if !seen.insert(option) { return Err("agent_cli_capabilities_invalid".into()); } }
+            text(&capabilities.label, 128, false)?;
+            text(&capabilities.version, 128, capabilities.status != "ready")?;
+            text(&capabilities.message, 2048, true)?;
+            for (options, max) in [(&capabilities.models, 128), (&capabilities.efforts, 64)] {
+                let mut seen = BTreeSet::new();
+                for option in options {
+                    text(option, max, false)?;
+                    if !seen.insert(option) {
+                        return Err("agent_cli_capabilities_invalid".into());
+                    }
+                }
             }
-        } else if query.provider.is_some() { return Err("agent_cli_capabilities_missing".into()); }
+        } else if query.provider.is_some() {
+            return Err("agent_cli_capabilities_missing".into());
+        }
         Ok(())
     }
 }
@@ -111,7 +159,10 @@ impl AgentCliInventory {
 /// Bounded opaque registry ID. Kept Copy so exact resource fences retain value
 /// semantics without baking a list of products into the wire protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AgentCliProvider { bytes: [u8; 64], len: u8 }
+pub struct AgentCliProvider {
+    bytes: [u8; 64],
+    len: u8,
+}
 impl AgentCliProvider {
     #[allow(non_upper_case_globals)]
     pub const WorkBuddy: Self = Self::constant("workbuddy");
@@ -120,17 +171,29 @@ impl AgentCliProvider {
     const fn constant(id: &str) -> Self {
         let mut bytes = [0; 64];
         let mut index = 0;
-        while index < id.len() { bytes[index] = id.as_bytes()[index]; index += 1; }
-        Self { bytes, len: id.len() as u8 }
+        while index < id.len() {
+            bytes[index] = id.as_bytes()[index];
+            index += 1;
+        }
+        Self {
+            bytes,
+            len: id.len() as u8,
+        }
     }
     pub fn parse(id: &str) -> Result<Self, String> {
-        if !crate::cli_adapter::valid_cli_id(id) { return Err("agent_cli_invalid_provider_id".into()); }
+        if !crate::cli_adapter::valid_cli_id(id) {
+            return Err("agent_cli_invalid_provider_id".into());
+        }
         Ok(Self::constant(id))
     }
-    pub fn id(&self) -> &str { std::str::from_utf8(&self.bytes[..self.len as usize]).expect("validated ASCII ID") }
+    pub fn id(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len as usize]).expect("validated ASCII ID")
+    }
 }
 impl Serialize for AgentCliProvider {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { serializer.serialize_str(self.id()) }
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.id())
+    }
 }
 impl<'de> Deserialize<'de> for AgentCliProvider {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -262,13 +325,23 @@ impl AgentCliCatalog {
         if self.status == "ready" && (self.models.is_empty() || self.source == "unavailable") {
             return Err("agent_cli_catalog_not_ready".into());
         }
-        let selected_adapter = resource.reviewed_controls.as_ref().and_then(|record| record.adapter.clone())
-            .or_else(|| crate::cli_adapter::cli_adapters(&[]).ok()?.into_iter().find(|adapter| adapter.id == self.provider.id()));
+        let selected_adapter = resource
+            .reviewed_controls
+            .as_ref()
+            .and_then(|record| record.adapter.clone())
+            .or_else(|| {
+                crate::cli_adapter::cli_adapters(&[])
+                    .ok()?
+                    .into_iter()
+                    .find(|adapter| adapter.id == self.provider.id())
+            });
         let expected_source = match selected_adapter.as_ref().map(|adapter| adapter.metadata) {
             Some(crate::cli_adapter::CliMetadataRecipe::AntigravityModels) => "live_catalog",
             _ => "installed_help",
         };
-        if self.source != "unavailable" && self.source != expected_source { return Err("agent_cli_catalog_source_mismatch".into()); }
+        if self.source != "unavailable" && self.source != expected_source {
+            return Err("agent_cli_catalog_source_mismatch".into());
+        }
         if serde_json::to_vec(self)
             .map_err(|_| "agent_cli_encoding_failed")?
             .len()

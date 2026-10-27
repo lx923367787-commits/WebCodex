@@ -4679,6 +4679,7 @@ dependencies = [
  "tokio",
  "toml_edit 0.25.13+spec-1.1.0",
  "url",
+ "webcodex-core",
  "webcodex-process",
  "webcodex-runner-config",
  "windows-sys 0.61.2",
@@ -4691,9 +4692,11 @@ version = "0.4.1"
 dependencies = [
  "libc",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "url",
+ "webcodex-core",
  "windows-sys 0.61.2",
 ]
 

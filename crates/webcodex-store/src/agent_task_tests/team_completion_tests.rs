@@ -24,7 +24,15 @@ impl Fixture {
         let assignee = agent(&db, &owner, "team-worker");
         let task = create_assigned_task(&db, &owner, &assignee, "team-root");
         let mut settings = TeamPolicyInput::default();
-        settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
+        settings.providers = ["workbuddy", "antigravity"]
+            .into_iter()
+            .map(|id| crate::TeamProviderPreference {
+                provider_id: id.into(),
+                enabled: true,
+                model: None,
+                effort: None,
+            })
+            .collect();
         settings.mode = mode;
         settings.cli_per_agent.min = 1;
         settings.cli_per_agent.max = 1;
@@ -319,7 +327,15 @@ fn team_completion_hooks_root_requires_observed_child_dispatch_while_child_check
     let early_child = create_assigned_task(&db, &owner, &early_worker, "early-child");
     let dispatch_child = create_assigned_task(&db, &owner, &dispatch_worker, "dispatch-child");
     let mut settings = TeamPolicyInput::default();
-    settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
+    settings.providers = ["workbuddy", "antigravity"]
+        .into_iter()
+        .map(|id| crate::TeamProviderPreference {
+            provider_id: id.into(),
+            enabled: true,
+            model: None,
+            effort: None,
+        })
+        .collect();
     settings.mode = TeamPolicyMode::Custom;
     settings.subagents.min = 1;
     settings.subagents.max = 2;

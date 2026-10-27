@@ -236,12 +236,16 @@ pub(crate) fn fixed_cli_process(
 }
 
 pub(crate) fn cli_process_with_adapter(
-    selected: Option<&webcodex_core::cli_adapter::CliAdapter>, provider: &str,
-    model: &str, effort: Option<&str>, instruction: &str,
+    selected: Option<&webcodex_core::cli_adapter::CliAdapter>,
+    provider: &str,
+    model: &str,
+    effort: Option<&str>,
+    instruction: &str,
 ) -> Result<(String, Vec<String>, String), ToolResult> {
     let adapters = webcodex_core::cli_adapter::cli_adapters(&[])
         .map_err(|code| error(&code, "CLI adapter registry is unavailable"))?;
-    let adapter = selected.or_else(|| adapters.iter().find(|adapter| adapter.id == provider))
+    let adapter = selected
+        .or_else(|| adapters.iter().find(|adapter| adapter.id == provider))
         .filter(|adapter| adapter.id == provider)
         .ok_or_else(|| {
             error(

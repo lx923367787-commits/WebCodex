@@ -397,9 +397,14 @@ pub async fn probe_installed_cli(
     Ok(catalog)
 }
 
-pub async fn probe_cli_adapter(adapter: &webcodex_core::cli_adapter::CliAdapter, executable: &Path, context: &TrustedMetadataContext) -> Result<CliCatalog, String> {
+pub async fn probe_cli_adapter(
+    adapter: &webcodex_core::cli_adapter::CliAdapter,
+    executable: &Path,
+    context: &TrustedMetadataContext,
+) -> Result<CliCatalog, String> {
     adapter.validate()?;
-    let mut catalog = probe_installed_cli(Provider::for_adapter(adapter), executable, context).await?;
+    let mut catalog =
+        probe_installed_cli(Provider::for_adapter(adapter), executable, context).await?;
     catalog.provider_id = adapter.id.clone();
     catalog.label = adapter.label.clone();
     Ok(catalog)

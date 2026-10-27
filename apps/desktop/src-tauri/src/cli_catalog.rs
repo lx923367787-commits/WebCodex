@@ -13,14 +13,23 @@ pub fn discover_ai_office_clis() -> Result<Vec<CliInstallation>, String> {
 #[tauri::command]
 pub async fn refresh_ai_office_cli(provider_id: String) -> Result<CliCatalog, String> {
     let adapters = webcodex_process::cli_registry::configured_cli_adapters()?;
-    let adapter = adapters.iter().find(|adapter| adapter.id == provider_id).ok_or("CLI adapter is not registered")?;
+    let adapter = adapters
+        .iter()
+        .find(|adapter| adapter.id == provider_id)
+        .ok_or("CLI adapter is not registered")?;
     let provider = Provider::for_adapter(adapter);
-    let Some(installation) = discover_cli_installations(&[])?.into_iter().find(|entry| entry.provider_id == provider_id) else {
+    let Some(installation) = discover_cli_installations(&[])?
+        .into_iter()
+        .find(|entry| entry.provider_id == provider_id)
+    else {
         let mut catalog = CliCatalog::unavailable(provider);
-        catalog.provider_id = adapter.id.clone(); catalog.label = adapter.label.clone();
+        catalog.provider_id = adapter.id.clone();
+        catalog.label = adapter.label.clone();
         return Ok(catalog);
     };
-    if !installation.native { return Err(installation.message.into()); }
+    if !installation.native {
+        return Err(installation.message.into());
+    }
     let executable = installation.executable;
     let explicit_proxy = [
         "HTTP_PROXY",

@@ -509,6 +509,65 @@ async fn agent_cli_catalog_fixed_query_returns_exact_non_authorizing_metadata() 
 }
 
 #[tokio::test]
+async fn cli_inventory_does_not_require_an_execution_profile_and_remains_owner_scoped() {
+    let registry = execution::registry(false).await;
+    let target = execution::start(0).binding.target;
+    let reader = registry.clone();
+    let requested_target = target.clone();
+    let task = tokio::spawn(async move {
+        reader
+            .query_agent_cli_inventory(
+                &execution::access(),
+                &requested_target,
+                None,
+                "controller".into(),
+            )
+            .await
+    });
+    let request = next(&registry).await;
+    assert_eq!(request.kind, AGENT_CLI_INVENTORY_KIND);
+    assert!(request.command.is_empty() && request.process.is_none() && request.path.is_none());
+    let RunnerOperation::AgentCliInventory(query) = request.decode_operation().unwrap() else {
+        panic!("wrong read operation")
+    };
+    let now = now_ms();
+    respond(
+        &registry,
+        &request,
+        serde_json::to_value(AgentCliInventory {
+            version: 1,
+            target: query.target,
+            observed_at_ms: now,
+            expires_at_ms: now + AGENT_CLI_CATALOG_TTL_MS,
+            capabilities: None,
+            installations: vec![AgentCliInstallation {
+                provider_id: "third-party-cli".into(),
+                label: "Installed CLI".into(),
+                installed: true,
+                native: true,
+                adapter_available: false,
+                status: "adapter_required".into(),
+                message: "Needs an adapter".into(),
+            }],
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        task.await.unwrap().unwrap().installations[0].provider_id,
+        "third-party-cli"
+    );
+    assert!(registry.inner.lock().await.pending_by_id.is_empty());
+    let mut foreign = execution::access();
+    foreign.username = Some("another-owner".into());
+    assert!(registry
+        .query_agent_cli_inventory(&foreign, &target, None, "controller".into())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn agent_cli_catalog_mapping_is_explicit_unique_and_access_scoped() {
     let registry = execution::registry(true).await;
     let target = execution::start(0).binding.target;

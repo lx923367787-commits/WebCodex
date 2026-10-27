@@ -32,6 +32,7 @@ tauri-plugin-single-instance = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 url = "2"
 webcodex-process = { path = "../../../crates/webcodex-process", features = ["cli-catalog"] }
+webcodex-core = { path = "../../../crates/webcodex-core" }
 webcodex-runner-config = { path = "../../../crates/webcodex-runner-config" }
 
 [target.'cfg(unix)'.dependencies]

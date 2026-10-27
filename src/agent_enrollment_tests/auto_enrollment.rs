@@ -149,6 +149,15 @@ async fn named_workspace_explicit_team_policy_reaches_new_native_chat() {
     )
     .unwrap();
     let mut settings = webcodex_store::TeamPolicyInput::default();
+    settings.providers = ["workbuddy", "antigravity"]
+        .into_iter()
+        .map(|id| webcodex_store::TeamProviderPreference {
+            provider_id: id.into(),
+            enabled: true,
+            model: None,
+            effort: None,
+        })
+        .collect();
     settings.mode = webcodex_store::TeamPolicyMode::Custom;
     settings.subagents = webcodex_store::TeamCountRange { min: 1, max: 3 };
     settings.cli_per_agent = webcodex_store::TeamCountRange { min: 1, max: 2 };

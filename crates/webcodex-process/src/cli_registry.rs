@@ -23,20 +23,36 @@ pub struct CliInstallation {
 /// Operator-owned adapter configuration, never a path supplied by a remote
 /// tool call. No credentials or account files belong in these definitions.
 pub fn configured_cli_adapters() -> Result<Vec<CliAdapter>, String> {
-    let path = std::env::var_os("WEBCODEX_CLI_ADAPTERS_FILE").map(PathBuf::from)
-        .or_else(|| std::env::var_os(if cfg!(windows) {"LOCALAPPDATA"} else {"XDG_CONFIG_HOME"})
-            .map(|root| PathBuf::from(root).join("webcodex/cli-adapters.json")));
-    let Some(path) = path else { return cli_adapters(&[]); };
-    if !path.is_absolute() { return Err("cli_adapter_config_absolute_path_required".into()); }
+    let path = std::env::var_os("WEBCODEX_CLI_ADAPTERS_FILE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os(if cfg!(windows) {
+                "LOCALAPPDATA"
+            } else {
+                "XDG_CONFIG_HOME"
+            })
+            .map(|root| PathBuf::from(root).join("webcodex/cli-adapters.json"))
+        });
+    let Some(path) = path else {
+        return cli_adapters(&[]);
+    };
+    if !path.is_absolute() {
+        return Err("cli_adapter_config_absolute_path_required".into());
+    }
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return cli_adapters(&[]),
         Err(_) => return Err("cli_adapter_config_unreadable".into()),
     };
-    if !metadata.is_file() || metadata.len() > 256 * 1024 { return Err("cli_adapter_config_limit".into()); }
+    if !metadata.is_file() || metadata.len() > 256 * 1024 {
+        return Err("cli_adapter_config_limit".into());
+    }
     let bytes = std::fs::read(&path).map_err(|_| "cli_adapter_config_unreadable")?;
-    if bytes.len() > 256 * 1024 { return Err("cli_adapter_config_limit".into()); }
-    let definitions: Vec<CliAdapter> = serde_json::from_slice(&bytes).map_err(|_| "cli_adapter_config_invalid")?;
+    if bytes.len() > 256 * 1024 {
+        return Err("cli_adapter_config_limit".into());
+    }
+    let definitions: Vec<CliAdapter> =
+        serde_json::from_slice(&bytes).map_err(|_| "cli_adapter_config_invalid")?;
     cli_adapters(&definitions)
 }
 
@@ -55,15 +71,20 @@ pub fn discover_cli_installations(
         roots.insert("app_data", path);
     }
     let paths = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|p| std::env::split_paths(&p).take(128).collect::<Vec<_>>())
         .unwrap_or_default();
     let mut definitions = configured_cli_adapters()?;
     for addition in additions {
         addition.validate()?;
-        if let Some(existing) = definitions.iter_mut().find(|entry| entry.id == addition.id) { *existing = addition.clone(); }
-        else { definitions.push(addition.clone()); }
+        if let Some(existing) = definitions.iter_mut().find(|entry| entry.id == addition.id) {
+            *existing = addition.clone();
+        } else {
+            definitions.push(addition.clone());
+        }
     }
-    if definitions.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS { return Err("cli_adapter_limit".into()); }
+    if definitions.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS {
+        return Err("cli_adapter_limit".into());
+    }
     discover_in(&definitions, &paths, &roots)
 }
 

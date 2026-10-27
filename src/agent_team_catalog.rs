@@ -232,20 +232,54 @@ impl RunnerAgentTeamAssets {
         .map_err(|_| "agent_team_catalog_timeout")??;
         // D owns each query's absolute deadline and cleanup. Do not wrap these
         // futures in a shorter timeout or drop one because the other failed.
-        let resources = timeout_at(deadline, self.registry.list_agent_execution_resources(&scope.access, &scope.target))
-            .await.map_err(|_| "agent_team_catalog_timeout")??;
-        let providers: BTreeSet<_> = resources.iter().filter_map(|resource| resource.provider).collect();
+        let resources = timeout_at(
+            deadline,
+            self.registry
+                .list_agent_execution_resources(&scope.access, &scope.target),
+        )
+        .await
+        .map_err(|_| "agent_team_catalog_timeout")??;
+        let providers: BTreeSet<_> = resources
+            .iter()
+            .filter_map(|resource| resource.provider)
+            .collect();
         let results = futures_util::future::join_all(providers.iter().map(|provider| async {
-            (*provider, self.registry.query_agent_cli_catalog(&scope.access, &scope.target, *provider, format!("agent:{}:catalog", caller.agent_id())).await)
-        })).await;
-        timeout_at(deadline, self.validate_scope(caller, scope)).await.map_err(|_| "agent_team_catalog_timeout")??;
+            (
+                *provider,
+                self.registry
+                    .query_agent_cli_catalog(
+                        &scope.access,
+                        &scope.target,
+                        *provider,
+                        format!("agent:{}:catalog", caller.agent_id()),
+                    )
+                    .await,
+            )
+        }))
+        .await;
+        timeout_at(deadline, self.validate_scope(caller, scope))
+            .await
+            .map_err(|_| "agent_team_catalog_timeout")??;
         let mut catalogs = Vec::with_capacity(providers.len());
         let mut unavailable = Vec::new();
         if providers.is_empty() {
-            let inventory = self.registry.query_agent_cli_inventory(&scope.access, &scope.target, None, format!("agent:{}:cli-discover", caller.agent_id())).await?;
-            timeout_at(deadline, self.validate_scope(caller, scope)).await.map_err(|_| "agent_team_catalog_timeout")??;
+            let inventory = self
+                .registry
+                .query_agent_cli_inventory(
+                    &scope.access,
+                    &scope.target,
+                    None,
+                    format!("agent:{}:cli-discover", caller.agent_id()),
+                )
+                .await?;
+            timeout_at(deadline, self.validate_scope(caller, scope))
+                .await
+                .map_err(|_| "agent_team_catalog_timeout")??;
             for installation in inventory.installations {
-                unavailable.push(cli_unavailable(AgentCliProvider::parse(&installation.provider_id)?, "agent_cli_provider_resource_unavailable"));
+                unavailable.push(cli_unavailable(
+                    AgentCliProvider::parse(&installation.provider_id)?,
+                    "agent_cli_provider_resource_unavailable",
+                ));
             }
         }
         for (expected_provider, result) in results {
@@ -454,12 +488,26 @@ fn cli_unavailable(provider: AgentCliProvider, reason: &str) -> UnavailableCliPr
 }
 
 impl AgentTeamAssets for RunnerAgentTeamAssets {
-    fn inventory<'a>(&'a self, caller: &'a VerifiedAgentRun, provider: Option<AgentCliProvider>) -> AssetFuture<'a, webcodex_core::agent_cli::AgentCliInventory> {
+    fn inventory<'a>(
+        &'a self,
+        caller: &'a VerifiedAgentRun,
+        provider: Option<AgentCliProvider>,
+    ) -> AssetFuture<'a, webcodex_core::agent_cli::AgentCliInventory> {
         Box::pin(async move {
             let access = self.owner_access(caller)?;
             let target = self.checked_target(caller, &access).await?;
-            let inventory = self.registry.query_agent_cli_inventory(&access, &target, provider, format!("agent:{}:cli-discover", caller.agent_id())).await?;
-            if self.checked_target(caller, &access).await? != target { return Err("agent_team_catalog_runner_changed".into()); }
+            let inventory = self
+                .registry
+                .query_agent_cli_inventory(
+                    &access,
+                    &target,
+                    provider,
+                    format!("agent:{}:cli-discover", caller.agent_id()),
+                )
+                .await?;
+            if self.checked_target(caller, &access).await? != target {
+                return Err("agent_team_catalog_runner_changed".into());
+            }
             Ok(inventory)
         })
     }

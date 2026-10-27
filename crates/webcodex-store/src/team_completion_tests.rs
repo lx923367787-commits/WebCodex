@@ -55,7 +55,15 @@ fn setup(db: &Database, principal: &CommunicationPrincipal) -> (String, String) 
         mode: TeamPolicyMode::Custom,
         subagents: TeamCountRange { min: 1, max: 2 },
         cli_per_agent: TeamCountRange { min: 1, max: 2 },
-        providers: ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect(),
+        providers: ["workbuddy", "antigravity"]
+            .into_iter()
+            .map(|id| crate::TeamProviderPreference {
+                provider_id: id.into(),
+                enabled: true,
+                model: None,
+                effort: None,
+            })
+            .collect(),
     };
     let policy = db.save_team_policy(principal, PROJECT, 0, policy).unwrap();
     db.register_team_plan(
@@ -280,9 +288,18 @@ fn team_completion_is_owner_and_project_scoped_and_auto_has_no_minimum() {
     let principal = owner('a');
     let root = task(&db, &principal, "auto-root");
     let policy = TeamPolicyInput {
+        mode: TeamPolicyMode::Auto,
         subagents: TeamCountRange { min: 3, max: 4 },
         cli_per_agent: TeamCountRange { min: 2, max: 3 },
-        providers: ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect(),
+        providers: ["workbuddy", "antigravity"]
+            .into_iter()
+            .map(|id| crate::TeamProviderPreference {
+                provider_id: id.into(),
+                enabled: true,
+                model: None,
+                effort: None,
+            })
+            .collect(),
     };
     db.save_team_policy(&principal, PROJECT, 0, policy).unwrap();
     db.register_team_plan(

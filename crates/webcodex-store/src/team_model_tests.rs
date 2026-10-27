@@ -338,7 +338,15 @@ fn assigned_team_receipts_are_scoped_paginated_and_never_replace_completion() {
                 mode: TeamPolicyMode::Custom,
                 subagents: TeamCountRange { min: 1, max: 1 },
                 cli_per_agent: TeamCountRange { min: 1, max: 2 },
-                providers: ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect(),
+                providers: ["workbuddy", "antigravity"]
+                    .into_iter()
+                    .map(|id| crate::TeamProviderPreference {
+                        provider_id: id.into(),
+                        enabled: true,
+                        model: None,
+                        effort: None,
+                    })
+                    .collect(),
             },
         )
         .unwrap();
@@ -683,7 +691,15 @@ fn operator_cli_round_resolves_saved_efforts_and_replays_original_policy_revisio
         )
         .unwrap();
     let mut settings = TeamPolicyInput::default();
-    settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
+    settings.providers = ["workbuddy", "antigravity"]
+        .into_iter()
+        .map(|id| TeamProviderPreference {
+            provider_id: id.into(),
+            enabled: true,
+            model: None,
+            effort: None,
+        })
+        .collect();
     settings.mode = TeamPolicyMode::Custom;
     settings.cli_per_agent = TeamCountRange { min: 2, max: 2 };
     settings.providers[0].model = Some("observed-model".into());

@@ -80,7 +80,10 @@ pub struct CliResultContract {
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum CliResultFormat { Json, JsonLines }
+pub enum CliResultFormat {
+    Json,
+    JsonLines,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -122,10 +125,19 @@ impl CliAdapter {
         }
         if let Some(invocation) = &self.invocation {
             if let Some(result) = &invocation.result {
-                if !valid_cli_id(&result.failure_flag) || result.terminal_field.is_some() != result.terminal_value.is_some()
-                    || result.terminal_field.as_ref().is_some_and(|s| !valid_cli_id(s))
-                    || result.terminal_value.as_ref().is_some_and(|s| !bounded(s, 128))
-                    || (result.format == CliResultFormat::JsonLines && result.terminal_field.is_none()) {
+                if !valid_cli_id(&result.failure_flag)
+                    || result.terminal_field.is_some() != result.terminal_value.is_some()
+                    || result
+                        .terminal_field
+                        .as_ref()
+                        .is_some_and(|s| !valid_cli_id(s))
+                    || result
+                        .terminal_value
+                        .as_ref()
+                        .is_some_and(|s| !bounded(s, 128))
+                    || (result.format == CliResultFormat::JsonLines
+                        && result.terminal_field.is_none())
+                {
                     return Err("cli_adapter_invalid_result_contract".into());
                 }
             }
@@ -147,8 +159,29 @@ impl CliAdapter {
                     .iter()
                     .chain(&invocation.fixed_args)
                     .any(|s| !bounded(s, 256))
-                || invocation.prefix_args.iter().chain(&invocation.fixed_args)
-                    .any(|s| s == "--" || s == &invocation.model_flag || invocation.effort_flag.as_ref() == Some(s))
+                || invocation
+                    .prefix_args
+                    .iter()
+                    .chain(&invocation.fixed_args)
+                    .any(|arg| {
+                        matches!(
+                            arg.to_ascii_lowercase().as_str(),
+                            "--dangerously-skip-permissions"
+                                | "--dangerously-bypass-approvals-and-sandbox"
+                                | "--yolo"
+                                | "--allow-all-tools"
+                                | "--no-sandbox"
+                        )
+                    })
+                || invocation
+                    .prefix_args
+                    .iter()
+                    .chain(&invocation.fixed_args)
+                    .any(|s| {
+                        s == "--"
+                            || s == &invocation.model_flag
+                            || invocation.effort_flag.as_ref() == Some(s)
+                    })
             {
                 return Err("cli_adapter_invalid_invocation".into());
             }
@@ -172,7 +205,10 @@ impl CliAdapter {
             || model.len() > 256
             || model.chars().any(char::is_control)
             || effort.is_some_and(|e| {
-                e.trim().is_empty() || e.starts_with(['-', '@']) || e.len() > 64 || e.chars().any(char::is_control)
+                e.trim().is_empty()
+                    || e.starts_with(['-', '@'])
+                    || e.len() > 64
+                    || e.chars().any(char::is_control)
             })
             || instruction.is_empty()
             || instruction.len() > 512 * 1024
@@ -211,10 +247,14 @@ pub fn cli_adapters(additions: &[CliAdapter]) -> Result<Vec<CliAdapter>, String>
         .map_err(|_| "cli_builtin_registry_invalid")?;
     let mut local_ids = BTreeSet::new();
     for addition in additions {
-        if !local_ids.insert(&addition.id) { return Err("cli_adapter_duplicate_id".into()); }
+        if !local_ids.insert(&addition.id) {
+            return Err("cli_adapter_duplicate_id".into());
+        }
         if let Some(existing) = adapters.iter_mut().find(|entry| entry.id == addition.id) {
             *existing = addition.clone();
-        } else { adapters.push(addition.clone()); }
+        } else {
+            adapters.push(addition.clone());
+        }
     }
     if adapters.len() > MAX_CLI_ADAPTERS {
         return Err("cli_adapter_limit".into());
@@ -246,8 +286,8 @@ mod tests {
                 effort_flag: None,
                 effort_required: false,
                 fixed_args: vec![],
-                    input: CliInputFormat::Text,
-                    result: None,
+                input: CliInputFormat::Text,
+                result: None,
             }),
         };
         let entries = cli_adapters(&[custom.clone()]).unwrap();

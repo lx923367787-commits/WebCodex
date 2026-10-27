@@ -189,7 +189,13 @@ fn agent_cli_fixed_query_rejects_commands_and_paths_but_accepts_registry_ids() {
     assert!(serde_json::from_value::<AgentCliCatalogQuery>(value).is_err());
     let mut value = serde_json::to_value(query()).unwrap();
     value["provider"] = json!("arbitrary-program");
-    assert_eq!(serde_json::from_value::<AgentCliCatalogQuery>(value).unwrap().provider.id(), "arbitrary-program");
+    assert_eq!(
+        serde_json::from_value::<AgentCliCatalogQuery>(value)
+            .unwrap()
+            .provider
+            .id(),
+        "arbitrary-program"
+    );
     for invalid in ["../program", "cmd.exe /c command", "", "a;b"] {
         let mut value = serde_json::to_value(query()).unwrap();
         value["provider"] = json!(invalid);
@@ -202,19 +208,49 @@ fn agent_cli_fixed_query_rejects_commands_and_paths_but_accepts_registry_ids() {
 
 #[test]
 fn cli_inventory_has_a_scoped_read_only_codec_and_expiring_typed_results() {
-    let query = AgentCliInventoryQuery { version:1, target:target(), deadline_at_ms:40_000, provider:None };
-    let wire = RunnerRequest::from_operation(metadata(), RunnerOperation::AgentCliInventory(query.clone())).unwrap();
-    assert!(matches!(wire.decode_operation().unwrap(), RunnerOperation::AgentCliInventory(_)));
-    let mut injected = wire.clone(); injected.command = "arbitrary execution".into();
+    let query = AgentCliInventoryQuery {
+        version: 1,
+        target: target(),
+        deadline_at_ms: 40_000,
+        provider: None,
+    };
+    let wire = RunnerRequest::from_operation(
+        metadata(),
+        RunnerOperation::AgentCliInventory(query.clone()),
+    )
+    .unwrap();
+    assert!(matches!(
+        wire.decode_operation().unwrap(),
+        RunnerOperation::AgentCliInventory(_)
+    ));
+    let mut injected = wire.clone();
+    injected.command = "arbitrary execution".into();
     assert!(injected.decode_operation().is_err());
-    let mut retargeted=wire; retargeted.client_id="another-runner".into();
+    let mut retargeted = wire;
+    retargeted.client_id = "another-runner".into();
     assert!(retargeted.decode_operation().is_err());
-    let mut inventory = AgentCliInventory { version:1, target:target(), observed_at_ms:1_000, expires_at_ms:61_000,
-        capabilities:None, installations:vec![AgentCliInstallation { provider_id:"third-party-cli".into(), label:"Third Party CLI".into(), installed:true, native:true, adapter_available:false, status:"adapter_required".into(), message:"Needs a local adapter".into() }] };
-    inventory.validate_for(&query,2_000).unwrap();
-    assert!(inventory.validate_for(&query,61_000).is_err());
-    inventory.installations.push(inventory.installations[0].clone());
-    assert!(inventory.validate_for(&query,2_000).is_err());
+    let mut inventory = AgentCliInventory {
+        version: 1,
+        target: target(),
+        observed_at_ms: 1_000,
+        expires_at_ms: 61_000,
+        capabilities: None,
+        installations: vec![AgentCliInstallation {
+            provider_id: "third-party-cli".into(),
+            label: "Third Party CLI".into(),
+            installed: true,
+            native: true,
+            adapter_available: false,
+            status: "adapter_required".into(),
+            message: "Needs a local adapter".into(),
+        }],
+    };
+    inventory.validate_for(&query, 2_000).unwrap();
+    assert!(inventory.validate_for(&query, 61_000).is_err());
+    inventory
+        .installations
+        .push(inventory.installations[0].clone());
+    assert!(inventory.validate_for(&query, 2_000).is_err());
 }
 #[test]
 fn agent_cli_control_codec_cannot_carry_generic_execution_or_retarget() {

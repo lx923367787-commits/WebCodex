@@ -412,7 +412,14 @@ impl ReviewedAgentCliControls {
     pub fn require_supported_loading(&self) -> Result<(), String> {
         self.validate_shape()?;
         if self.loading_method == "registered-native-cli-v1" {
-            return self.adapter.as_ref().map(|_| ()).ok_or("agent_cli_controls_adapter_required".into());
+            return self
+                .adapter
+                .as_ref()
+                .map(|_| ())
+                .ok_or("agent_cli_controls_adapter_required".into());
+        }
+        if self.adapter.is_some() {
+            return Err("agent_cli_controls_legacy_adapter_override".into());
         }
         if self.provider == AgentCliProvider::Antigravity {
             if self.cli_version != ANTIGRAVITY_FILES_VERSION
@@ -446,34 +453,70 @@ impl ReviewedAgentCliControls {
     }
 }
 
-fn selected_adapter(record: &ReviewedAgentCliControls) -> Result<crate::cli_adapter::CliAdapter, String> {
-    if let Some(adapter) = &record.adapter { return Ok(adapter.clone()); }
-    crate::cli_adapter::cli_adapters(&[])?.into_iter().find(|adapter| adapter.id == record.provider.id())
+fn selected_adapter(
+    record: &ReviewedAgentCliControls,
+) -> Result<crate::cli_adapter::CliAdapter, String> {
+    if let Some(adapter) = &record.adapter {
+        return Ok(adapter.clone());
+    }
+    crate::cli_adapter::cli_adapters(&[])?
+        .into_iter()
+        .find(|adapter| adapter.id == record.provider.id())
         .ok_or("agent_cli_controls_adapter_required".into())
 }
 fn base_len(record: &ReviewedAgentCliControls, args: &[String]) -> Result<usize, String> {
     let adapter = selected_adapter(record)?;
-    let invocation = adapter.invocation.as_ref().ok_or("agent_cli_controls_adapter_required")?;
+    let invocation = adapter
+        .invocation
+        .as_ref()
+        .ok_or("agent_cli_controls_adapter_required")?;
     let effort_index = invocation.prefix_args.len() + 2;
-    let explicit_effort = invocation.effort_flag.as_ref().is_some_and(|flag| args.get(effort_index) == Some(flag));
-    Ok(invocation.prefix_args.len() + 2 + if explicit_effort {2} else {0} + invocation.fixed_args.len())
+    let explicit_effort = invocation
+        .effort_flag
+        .as_ref()
+        .is_some_and(|flag| args.get(effort_index) == Some(flag));
+    Ok(invocation.prefix_args.len()
+        + 2
+        + if explicit_effort { 2 } else { 0 }
+        + invocation.fixed_args.len())
 }
 fn validate_base(record: &ReviewedAgentCliControls, args: &[String]) -> Result<(), String> {
     let adapter = selected_adapter(record)?;
-    let invocation = adapter.invocation.as_ref().ok_or("agent_cli_controls_adapter_required")?;
+    let invocation = adapter
+        .invocation
+        .as_ref()
+        .ok_or("agent_cli_controls_adapter_required")?;
     let index = invocation.prefix_args.len();
     if args.len() != base_len(record, args)? || args.get(index) != Some(&invocation.model_flag) {
         return Err("agent_cli_controls_invalid_business_argv".into());
     }
-    let model = args.get(index + 1).ok_or("agent_cli_controls_invalid_business_argv")?;
-    let explicit_effort = invocation.effort_flag.as_ref().is_some_and(|flag| args.get(index + 2) == Some(flag));
-    let effort = if explicit_effort {Some(args.get(index + 3).ok_or("agent_cli_controls_invalid_business_argv")?.as_str())} else {None};
+    let model = args
+        .get(index + 1)
+        .ok_or("agent_cli_controls_invalid_business_argv")?;
+    let explicit_effort = invocation
+        .effort_flag
+        .as_ref()
+        .is_some_and(|flag| args.get(index + 2) == Some(flag));
+    let effort = if explicit_effort {
+        Some(
+            args.get(index + 3)
+                .ok_or("agent_cli_controls_invalid_business_argv")?
+                .as_str(),
+        )
+    } else {
+        None
+    };
     for value in std::iter::once(model.as_str()).chain(effort) {
-        if value.starts_with(['-', '@']) { return Err("agent_cli_controls_invalid_business_value".into()); }
+        if value.starts_with(['-', '@']) {
+            return Err("agent_cli_controls_invalid_business_value".into());
+        }
     }
-    let (expected, _) = adapter.invocation(model, effort, "validate")
+    let (expected, _) = adapter
+        .invocation(model, effort, "validate")
         .map_err(|_| "agent_cli_controls_invalid_business_argv")?;
-    if expected != args { return Err("agent_cli_controls_invalid_business_argv".into()); }
+    if expected != args {
+        return Err("agent_cli_controls_invalid_business_argv".into());
+    }
     Ok(())
 }
 

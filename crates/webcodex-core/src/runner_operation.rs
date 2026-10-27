@@ -804,8 +804,11 @@ fn encode_operation(
         }
         RunnerOperation::AgentCliInventory(query) => {
             query.validate()?;
-            if wire.client_id != query.target.client_id { return Err("agent_cli_target_mismatch".into()); }
-            wire.content = Some(serde_json::to_string(&query).map_err(|_| "agent_cli_encoding_failed")?);
+            if wire.client_id != query.target.client_id {
+                return Err("agent_cli_target_mismatch".into());
+            }
+            wire.content =
+                Some(serde_json::to_string(&query).map_err(|_| "agent_cli_encoding_failed")?);
             wire.timeout_secs = crate::agent_cli::AGENT_CLI_CONTROL_TIMEOUT_SECS;
         }
         RunnerOperation::AgentCliDelivery(query) => {
@@ -1335,10 +1338,19 @@ fn decode_operation(wire: &RunnerRequest) -> Result<RunnerOperation, String> {
         crate::agent_cli::AGENT_CLI_INVENTORY_KIND => {
             ensure_special_payloads_absent(wire)?;
             ensure_empty_generic_execution_fields(wire, true)?;
-            let content = bounded_content(wire, crate::agent_cli::AGENT_CLI_CONTROL_REQUEST_MAX_BYTES, "agent_cli_inventory")?;
-            let query: crate::agent_cli::AgentCliInventoryQuery = serde_json::from_str(content).map_err(|_| "agent_cli_invalid_payload")?;
+            let content = bounded_content(
+                wire,
+                crate::agent_cli::AGENT_CLI_CONTROL_REQUEST_MAX_BYTES,
+                "agent_cli_inventory",
+            )?;
+            let query: crate::agent_cli::AgentCliInventoryQuery =
+                serde_json::from_str(content).map_err(|_| "agent_cli_invalid_payload")?;
             query.validate()?;
-            if query.target.client_id != wire.client_id || wire.timeout_secs != crate::agent_cli::AGENT_CLI_CONTROL_TIMEOUT_SECS { return Err("agent_cli_target_or_budget_mismatch".into()); }
+            if query.target.client_id != wire.client_id
+                || wire.timeout_secs != crate::agent_cli::AGENT_CLI_CONTROL_TIMEOUT_SECS
+            {
+                return Err("agent_cli_target_or_budget_mismatch".into());
+            }
             Ok(RunnerOperation::AgentCliInventory(query))
         }
         crate::agent_cli::AGENT_CLI_DELIVERY_KIND => {

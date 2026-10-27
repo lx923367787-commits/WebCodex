@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const executable = path.join(root, "src-tauri", "target", "debug", process.platform === "win32" ? "ai-office-preview.exe" : "ai-office-preview");
-const dataDir = path.join(root, ".ai-office-preview");
+const executable = process.env.AI_OFFICE_PREVIEW_BACKEND ?? path.join(root, "src-tauri", "target", "debug", process.platform === "win32" ? "ai-office-preview.exe" : "ai-office-preview");
+const dataDir = process.env.AI_OFFICE_PREVIEW_DATA_DIR ?? path.join(root, ".ai-office-preview");
+if (!path.isAbsolute(executable) || !path.isAbsolute(dataDir)) throw new Error("Preview paths must be absolute");
 const port = Number(process.env.AI_OFFICE_PREVIEW_PORT ?? 4179);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Invalid AI_OFFICE_PREVIEW_PORT");
 const origin = `http://127.0.0.1:${port}`;
@@ -96,7 +97,7 @@ const server = await createServer({
           body = Buffer.concat([body, chunk]);
         }
         const value = JSON.parse(body.toString("utf8"));
-        if (!["policies", "save_policy", "evaluate_plan", "refresh_cli"].includes(value?.op)) return reply(400, { success: false, error: "不支持的演示操作。" });
+        if (!["policies", "save_policy", "evaluate_plan", "discover_cli", "refresh_cli"].includes(value?.op)) return reply(400, { success: false, error: "不支持的演示操作。" });
         // Serialize the complete read/CAS/write request across short-lived workers.
         const work = queue.then(() => rpc(body));
         queue = work.catch(() => {});

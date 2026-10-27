@@ -235,9 +235,9 @@ fn enqueue_pending_request_impl(
         | RunnerOperation::Job(
             webcodex_core::runner_operation::RunnerJobOperation::StartIsolatedProcess(_),
         ) => QueueAdmission::AgentExecution,
-        RunnerOperation::AgentCliCatalog(_) | RunnerOperation::AgentCliDelivery(_) | RunnerOperation::AgentCliInventory(_) => {
-            QueueAdmission::AgentCli
-        }
+        RunnerOperation::AgentCliCatalog(_)
+        | RunnerOperation::AgentCliDelivery(_)
+        | RunnerOperation::AgentCliInventory(_) => QueueAdmission::AgentCli,
         _ => QueueAdmission::Generic,
     };
     if required != admission {

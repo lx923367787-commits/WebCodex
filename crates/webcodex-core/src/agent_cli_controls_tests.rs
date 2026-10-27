@@ -10,16 +10,28 @@ fn registered_native_adapter_uses_its_own_bound_protocol_without_a_product_enum(
     let mut value = record(provider);
     value.loading_method = "registered-native-cli-v1".into();
     value.adapter = Some(adapter.clone());
-    let (base, _) = adapter.invocation("observed-model", Some("high"), "task").unwrap();
+    let (base, _) = adapter
+        .invocation("observed-model", Some("high"), "task")
+        .unwrap();
     let args = compose_reviewed_cli_argv(&value, &base).unwrap();
     validate_reviewed_cli_argv(&value, &args).unwrap();
     let original_hash = value.review_sha256().unwrap();
-    value.adapter.as_mut().unwrap().invocation.as_mut().unwrap().model_flag = "--changed-model".into();
+    value
+        .adapter
+        .as_mut()
+        .unwrap()
+        .invocation
+        .as_mut()
+        .unwrap()
+        .model_flag = "--changed-model".into();
     assert_ne!(original_hash, value.review_sha256().unwrap());
     assert!(validate_reviewed_cli_argv(&value, &args).is_err());
     value.adapter.as_mut().unwrap().id = "another-cli".into();
     assert!(value.require_supported_loading().is_err());
-    assert_eq!(serde_json::to_string(&provider).unwrap(), "\"third-party-cli\"");
+    assert_eq!(
+        serde_json::to_string(&provider).unwrap(),
+        "\"third-party-cli\""
+    );
     assert!(AgentCliProvider::parse("cmd.exe /c arbitrary").is_err());
 }
 

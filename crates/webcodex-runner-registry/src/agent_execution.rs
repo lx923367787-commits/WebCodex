@@ -310,7 +310,9 @@ impl RunnerRegistry {
             .ok_or_else(|| "agent_execution_resource_unavailable".into())
     }
     pub async fn list_agent_execution_resources(
-        &self, access: &RunnerAccess, target: &AgentExecutionTarget,
+        &self,
+        access: &RunnerAccess,
+        target: &AgentExecutionTarget,
     ) -> Result<Vec<AgentExecutionResourceDescriptor>, String> {
         let inner = self.inner.lock().await;
         let runner = current_target(&inner, access, target)?;
