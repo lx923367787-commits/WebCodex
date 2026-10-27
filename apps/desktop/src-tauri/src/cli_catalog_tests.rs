@@ -24,6 +24,14 @@ fn disabled_system_proxy_is_ignored_but_credentialed_proxy_is_explicitly_unsuppo
         url: "http://127.0.0.1:20081".into(),
         enabled: true,
     };
+    for provider in [Provider::Codex, Provider::Claude] {
+        assert_eq!(
+            selected_system_proxy(provider, false, Some(enabled.clone()))
+                .unwrap()
+                .as_deref(),
+            Some("http://127.0.0.1:20081")
+        );
+    }
     assert_eq!(
         selected_system_proxy(Provider::Antigravity, false, Some(enabled.clone()))
             .unwrap()

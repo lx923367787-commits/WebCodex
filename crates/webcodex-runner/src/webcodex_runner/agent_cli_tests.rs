@@ -31,6 +31,7 @@ fn helper() -> CliCatalog {
         version: "1.2.3".into(),
         models: vec!["synthetic-model".into()],
         efforts: vec!["high".into()],
+        model_efforts: Default::default(),
         source: "installed_help",
         status: "ready",
         message: "Synthetic fixed metadata only".into(),

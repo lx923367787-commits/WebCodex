@@ -51,6 +51,8 @@ pub enum CliMetadataRecipe {
     Help,
     CodebuddyHelp,
     AntigravityModels,
+    CodexAppServer,
+    ClaudeInitialize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,6 +62,9 @@ pub struct CliInvocation {
     pub prefix_args: Vec<String>,
     pub model_flag: String,
     pub effort_flag: Option<String>,
+    /// Optional native config key; the selected value is JSON/TOML quoted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_config_key: Option<String>,
     #[serde(default)]
     pub effort_required: bool,
     #[serde(default)]
@@ -75,6 +80,9 @@ pub struct CliResultContract {
     pub format: CliResultFormat,
     /// A top-level boolean reported by the CLI protocol, not the model text.
     pub failure_flag: String,
+    /// Protocols with a success event instead of a boolean failure flag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failure_events: Vec<String>,
     pub terminal_field: Option<String>,
     pub terminal_value: Option<String>,
 }
@@ -125,7 +133,11 @@ impl CliAdapter {
         }
         if let Some(invocation) = &self.invocation {
             if let Some(result) = &invocation.result {
-                if !valid_cli_id(&result.failure_flag)
+                if (!valid_cli_id(&result.failure_flag)
+                    && !(result.failure_flag.is_empty() && !result.failure_events.is_empty()))
+                    || result.failure_events.len() > 8
+                    || result.failure_events.iter().any(|s| !valid_cli_id(s))
+                    || (!result.failure_events.is_empty() && result.terminal_field.is_none())
                     || result.terminal_field.is_some() != result.terminal_value.is_some()
                     || result
                         .terminal_field
@@ -153,6 +165,10 @@ impl CliAdapter {
                 || invocation.effort_flag.as_ref() == Some(&invocation.model_flag)
                 || (invocation.effort_required && invocation.effort_flag.is_none())
                 || invocation.effort_flag.as_ref().is_some_and(|s| !flag(s))
+                || invocation
+                    .effort_config_key
+                    .as_ref()
+                    .is_some_and(|s| !valid_cli_id(s) || invocation.effort_flag.is_none())
                 || invocation.prefix_args.len() + invocation.fixed_args.len() > 32
                 || invocation
                     .prefix_args
@@ -165,7 +181,11 @@ impl CliAdapter {
                     .chain(&invocation.fixed_args)
                     .any(|arg| {
                         matches!(
-                            arg.to_ascii_lowercase().as_str(),
+                            arg.split('=')
+                                .next()
+                                .unwrap_or(arg)
+                                .to_ascii_lowercase()
+                                .as_str(),
                             "--dangerously-skip-permissions"
                                 | "--dangerously-bypass-approvals-and-sandbox"
                                 | "--yolo"
@@ -179,8 +199,11 @@ impl CliAdapter {
                     .chain(&invocation.fixed_args)
                     .any(|s| {
                         s == "--"
-                            || s == &invocation.model_flag
-                            || invocation.effort_flag.as_ref() == Some(s)
+                            || s.split('=').next() == Some(invocation.model_flag.as_str())
+                            || invocation
+                                .effort_flag
+                                .as_ref()
+                                .is_some_and(|flag| s.split('=').next() == Some(flag.as_str()))
                     })
             {
                 return Err("cli_adapter_invalid_invocation".into());
@@ -223,7 +246,11 @@ impl CliAdapter {
                 .effort_flag
                 .as_ref()
                 .ok_or("cli_adapter_effort_unsupported")?;
-            args.extend([flag.clone(), effort.into()]);
+            let value = match &invocation.effort_config_key {
+                Some(key) => format!("{key}={}", serde_json::to_string(effort).expect("string")),
+                None => effort.into(),
+            };
+            args.extend([flag.clone(), value]);
         } else if invocation.effort_required {
             return Err("cli_adapter_effort_required".into());
         }
@@ -284,6 +311,7 @@ mod tests {
                 prefix_args: vec!["run".into()],
                 model_flag: "--model".into(),
                 effort_flag: None,
+                effort_config_key: None,
                 effort_required: false,
                 fixed_args: vec![],
                 input: CliInputFormat::Text,

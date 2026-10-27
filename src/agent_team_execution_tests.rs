@@ -94,11 +94,7 @@ fn controls(id: &str) -> ReviewedAgentCliControls {
     ReviewedAgentCliControls {
         version: 1,
         record_id: format!("synthetic-review-{id}"),
-        provider: match id {
-            "workbuddy" => AgentCliProvider::WorkBuddy,
-            "antigravity" => AgentCliProvider::Antigravity,
-            _ => panic!("fixture provider must be explicit"),
-        },
+        provider: AgentCliProvider::parse(id).expect("fixture provider must be explicit"),
         cli_version: "test-version".into(),
         executable_sha256: "a".repeat(64),
         resource_set_id: "private-resource-set".into(),
@@ -127,11 +123,35 @@ fn provider(id: &str) -> ObservedCliProvider {
         executable_sha256: controls.executable_sha256.clone(),
         models: vec!["explicit-model".into()],
         efforts: vec!["high".into()],
+        model_efforts: Default::default(),
         source: "live_catalog".into(),
         resource_set_id: controls.resource_set_id.clone(),
         resource_manifest_hash: controls.execution_manifest_sha256().unwrap(),
         controls: Some(controls),
     }
+}
+
+#[test]
+fn model_specific_cli_efforts_are_checked_before_dispatch() {
+    let mut observed = provider("codex");
+    observed.models = vec!["model-a".into(), "model-b".into()];
+    observed.efforts = vec!["low".into(), "high".into()];
+    observed.model_efforts = [
+        ("model-a".into(), vec!["low".into()]),
+        ("model-b".into(), vec![]),
+    ]
+    .into();
+    assert!(cli_selection_discovered(&observed, "model-a", Some("low")));
+    assert!(!cli_selection_discovered(
+        &observed,
+        "model-a",
+        Some("high")
+    ));
+    assert!(!cli_selection_discovered(&observed, "model-a", None));
+    assert!(cli_selection_discovered(&observed, "model-b", None));
+    assert!(!cli_selection_discovered(&observed, "model-b", Some("low")));
+    observed.model_efforts.remove("model-a");
+    assert!(!cli_selection_discovered(&observed, "model-a", Some("low")));
 }
 
 #[test]

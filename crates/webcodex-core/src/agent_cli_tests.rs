@@ -109,6 +109,7 @@ fn catalog() -> AgentCliCatalog {
         cli_version: "1.2.3".into(),
         models: vec!["model-1".into()],
         efforts: vec!["high".into()],
+        model_efforts: Default::default(),
         source: "installed_help".into(),
         status: "ready".into(),
         message: "metadata only".into(),

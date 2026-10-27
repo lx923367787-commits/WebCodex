@@ -1,6 +1,164 @@
 use super::*;
 
 #[test]
+#[ignore = "operator acceptance: launches installed Codex/Claude metadata hosts"]
+fn installed_structured_cli_catalogs() {
+    let adapters = crate::cli_registry::configured_cli_adapters().unwrap();
+    let installations = crate::cli_registry::discover_cli_installations(&adapters).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for id in ["codex", "claude"] {
+        let adapter = adapters.iter().find(|a| a.id == id).unwrap();
+        let installed = installations
+            .iter()
+            .find(|i| i.provider_id == id && i.native)
+            .expect("native installation");
+        let context = TrustedMetadataContext::for_current_user(
+            Provider::for_adapter(adapter),
+            &installed.executable,
+            None,
+        )
+        .unwrap();
+        let catalog = runtime
+            .block_on(probe_cli_adapter(adapter, &installed.executable, &context))
+            .unwrap();
+        println!("{}", serde_json::to_string(&catalog).unwrap());
+        assert_eq!(catalog.status, "ready", "{}", catalog.message);
+        assert_eq!(catalog.models.len(), catalog.model_efforts.len());
+    }
+}
+
+#[test]
+#[ignore = "operator acceptance: one real inference using explicitly selected installed CLI/model/effort"]
+fn installed_cli_invocation_smoke() {
+    use std::io::Write;
+    let id = std::env::var("WEBCODEX_ACCEPTANCE_CLI").expect("explicit CLI");
+    let model = std::env::var("WEBCODEX_ACCEPTANCE_MODEL").expect("explicit discovered model");
+    let effort = std::env::var("WEBCODEX_ACCEPTANCE_EFFORT").ok();
+    assert!(matches!(id.as_str(), "codex" | "claude"));
+    let mut adapter = webcodex_core::cli_adapter::cli_adapters(&[])
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == id)
+        .unwrap();
+    let installations =
+        crate::cli_registry::discover_cli_installations(&[adapter.clone()]).unwrap();
+    let installed = installations
+        .iter()
+        .find(|i| i.provider_id == id && i.native)
+        .expect("native installation");
+    let context = TrustedMetadataContext::for_current_user(
+        Provider::for_adapter(&adapter),
+        &installed.executable,
+        None,
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let catalog = runtime
+        .block_on(probe_cli_adapter(&adapter, &installed.executable, &context))
+        .unwrap();
+    assert_eq!(catalog.status, "ready", "{}", catalog.message);
+    let levels = catalog
+        .model_efforts
+        .get(&model)
+        .expect("model must be observed");
+    assert!(effort
+        .as_ref()
+        .map_or(levels.is_empty(), |e| levels.contains(e)));
+    // This probes the native protocol/account, not a frozen team slot or LPAC
+    // approval. Tighten the normal adapter to read-only for this fixed marker.
+    let invocation = adapter.invocation.as_mut().unwrap();
+    if id == "codex" {
+        *invocation
+            .fixed_args
+            .iter_mut()
+            .find(|s| s.as_str() == "workspace-write")
+            .unwrap() = "read-only".into();
+    } else {
+        *invocation
+            .fixed_args
+            .iter_mut()
+            .find(|s| s.as_str() == "Read,Glob,Grep,Edit,Write")
+            .unwrap() = "Read".into();
+    }
+    let marker = "WEBCODEX_CLI_ADAPTER_OK";
+    let (args, input) = adapter.invocation(&model, effort.as_deref(), &format!("Reply with exactly {marker}. Do not use tools, inspect files, or perform any other action.")).unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("webcodex-cli-smoke-")
+        .tempdir()
+        .unwrap();
+    let mut command = Command::new(&installed.executable);
+    command
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    context.apply(&mut command, directory.path());
+    let mut child = ManagedChild::spawn_with_options(&mut command, spawn_options()).unwrap();
+    child
+        .child_mut()
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let stdout = child.child_mut().stdout.take().unwrap();
+    let stderr = child.child_mut().stderr.take().unwrap();
+    let out = std::thread::spawn(move || read_bounded(stdout));
+    let err = std::thread::spawn(move || read_bounded(stderr));
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    };
+    child.terminate_tree().unwrap();
+    let cleanup = std::time::Instant::now() + CLEANUP_TIMEOUT;
+    while !child.try_tree_exit().unwrap_or(false) && std::time::Instant::now() < cleanup {
+        let _ = child.try_wait();
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    assert!(
+        child.try_tree_exit().unwrap_or(false),
+        "owned tree exit must be proven"
+    );
+    let bytes = out.join().unwrap().unwrap();
+    let diagnostic = err.join().unwrap().unwrap();
+    let mut verifier =
+        webcodex_core::cli_result::CliResultVerifier::new(adapter.invocation.unwrap().result);
+    verifier.observe_stdout(&bytes);
+    let verified = verifier.finish();
+    let text = String::from_utf8_lossy(&bytes);
+    let marker_seen = text.contains(marker);
+    // Only bounded protocol/account categories; never raw CLI output.
+    let auth_required = [text.as_ref(), String::from_utf8_lossy(&diagnostic).as_ref()]
+        .iter()
+        .any(|s| {
+            s.contains("not logged in")
+                || s.contains("Not logged in")
+                || s.contains("401")
+                || s.contains("authentication")
+        });
+    println!(
+        "{}",
+        serde_json::json!({"cli":id,"version":catalog.version,"model":model,"effort":effort,"exit_code":status.and_then(|s|s.code()),"tree_exited":true,"protocol_result":verified,"marker_seen":marker_seen,"authentication_diagnostic":auth_required})
+    );
+    assert!(
+        status.is_some_and(|s| s.success()) && verified.is_ok() && marker_seen,
+        "native CLI invocation did not complete successfully"
+    );
+}
+
+#[test]
 fn codebuddy_node_metadata_keeps_the_dedicated_config_and_no_host_node_options() {
     let directory = tempfile::tempdir().unwrap();
     let node = directory.path().join("node.exe");
@@ -278,11 +436,18 @@ fn no_proxy_is_only_a_bounded_host_list() {
 }
 
 #[test]
-fn system_proxy_preserves_explicit_proxy_and_only_applies_to_antigravity() {
+fn system_proxy_preserves_explicit_proxy_for_networked_native_protocols() {
     let environment = test_environment();
     let proxy = "http://127.0.0.1:20081";
     let agy = context_from(Provider::Antigravity, &environment, Some(proxy)).unwrap();
     assert!(agy.system_proxy_used);
+    for provider in [Provider::Codex, Provider::Claude] {
+        assert!(
+            context_from(provider, &environment, Some(proxy))
+                .unwrap()
+                .system_proxy_used
+        );
+    }
     assert_eq!(
         agy.environment.get(std::ffi::OsStr::new("HTTPS_PROXY")),
         Some(&OsString::from(proxy))

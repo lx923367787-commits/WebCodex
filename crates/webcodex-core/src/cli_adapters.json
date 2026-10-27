@@ -74,8 +74,35 @@
         "path": "npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe"
       }
     ],
-    "metadata": "help",
-    "invocation": null
+    "metadata": "codex_app_server",
+    "invocation": {
+      "prefix_args": [
+        "exec"
+      ],
+      "model_flag": "--model",
+      "effort_flag": "--config",
+      "effort_config_key": "model_reasoning_effort",
+      "effort_required": true,
+      "fixed_args": [
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check"
+      ],
+      "input": "text",
+      "result": {
+        "format": "json_lines",
+        "failure_flag": "",
+        "failure_events": [
+          "turn.failed",
+          "error"
+        ],
+        "terminal_field": "type",
+        "terminal_value": "turn.completed"
+      }
+    }
   },
   {
     "id": "claude",
@@ -94,10 +121,41 @@
       {
         "root": "home",
         "path": ".local/bin/claude"
+      },
+      {
+        "root": "app_data",
+        "path": "npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
       }
     ],
-    "metadata": "help",
-    "invocation": null
+    "metadata": "claude_initialize",
+    "invocation": {
+      "model_flag": "--model",
+      "effort_flag": "--effort",
+      "fixed_args": [
+        "--print",
+        "--input-format",
+        "text",
+        "--output-format",
+        "json",
+        "--no-session-persistence",
+        "--safe-mode",
+        "--restricted",
+        "--strict-mcp-config",
+        "--permission-mode",
+        "acceptEdits",
+        "--permission-prompts",
+        "none",
+        "--tools",
+        "Read,Glob,Grep,Edit,Write"
+      ],
+      "input": "text",
+      "result": {
+        "format": "json",
+        "failure_flag": "is_error",
+        "terminal_field": "type",
+        "terminal_value": "result"
+      }
+    }
   },
   {
     "id": "gemini",

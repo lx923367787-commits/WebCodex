@@ -368,6 +368,7 @@ fn catalog(query: &AgentCliCatalogQuery) -> AgentCliCatalog {
         cli_version: "1.2.3".into(),
         models: vec!["model-a".into()],
         efforts: vec!["low".into()],
+        model_efforts: Default::default(),
         source: "installed_help".into(),
         status: "ready".into(),
         message: "Installed metadata only".into(),

@@ -29,6 +29,7 @@ pub struct CliCatalog {
     pub version: String,
     pub models: Vec<String>,
     pub efforts: Vec<String>,
+    pub model_efforts: BTreeMap<String, Vec<String>>,
     pub source: &'static str,
     pub status: &'static str,
     pub message: String,
@@ -42,6 +43,8 @@ pub enum Provider {
     WorkBuddy,
     Antigravity,
     Generic,
+    Codex,
+    Claude,
 }
 impl Provider {
     pub fn parse(id: &str) -> Result<Self, String> {
@@ -56,6 +59,8 @@ impl Provider {
             Self::WorkBuddy => "workbuddy",
             Self::Antigravity => "antigravity",
             Self::Generic => "generic",
+            Self::Codex => "codex",
+            Self::Claude => "claude",
         }
     }
     pub fn executable(self) -> &'static str {
@@ -65,6 +70,10 @@ impl Provider {
             (Self::Antigravity, true) => "agy.exe",
             (Self::Antigravity, false) => "agy",
             (Self::Generic, _) => "cli",
+            (Self::Codex, true) => "codex.exe",
+            (Self::Codex, false) => "codex",
+            (Self::Claude, true) => "claude.exe",
+            (Self::Claude, false) => "claude",
         }
     }
     pub fn installation_directory(self) -> &'static str {
@@ -72,6 +81,8 @@ impl Provider {
             Self::WorkBuddy => "codebuddy",
             Self::Antigravity => "agy",
             Self::Generic => "cli",
+            Self::Codex => "codex",
+            Self::Claude => "claude",
         }
     }
     pub fn label(self) -> &'static str {
@@ -79,6 +90,8 @@ impl Provider {
             Self::WorkBuddy => "WorkBuddy / CodeBuddy CLI",
             Self::Antigravity => "Antigravity CLI",
             Self::Generic => "CLI",
+            Self::Codex => "Codex CLI",
+            Self::Claude => "Claude Code",
         }
     }
     pub fn for_adapter(adapter: &webcodex_core::cli_adapter::CliAdapter) -> Self {
@@ -87,6 +100,8 @@ impl Provider {
             CliMetadataRecipe::CodebuddyHelp => Self::WorkBuddy,
             CliMetadataRecipe::AntigravityModels => Self::Antigravity,
             CliMetadataRecipe::Help => Self::Generic,
+            CliMetadataRecipe::CodexAppServer => Self::Codex,
+            CliMetadataRecipe::ClaudeInitialize => Self::Claude,
         }
     }
 }
@@ -99,6 +114,7 @@ impl CliCatalog {
             version: String::new(),
             models: Vec::new(),
             efforts: Vec::new(),
+            model_efforts: BTreeMap::new(),
             source: "unavailable",
             status: "unavailable",
             message: "未找到已安装的 CLI。安装后重新刷新。".into(),
@@ -110,7 +126,8 @@ impl CliCatalog {
 
 /// A non-serializable snapshot created only by the trusted metadata controller.
 /// Standard user-directory references let the CLI use its own official login
-/// mechanism. No credential file is read/copied and no generic env setter exists.
+/// mechanism. Claude's gateway settings are projected through a fixed allowlist;
+/// hooks/plugins/commands and unrelated credentials are never inherited.
 pub struct TrustedMetadataContext {
     provider: Provider,
     executable: PathBuf,
@@ -166,12 +183,16 @@ impl TrustedMetadataContext {
         trusted_executable: &Path,
         credential_free_system_proxy: Option<&str>,
     ) -> Result<Self, String> {
-        Self::from_environment(
+        let mut context = Self::from_environment(
             provider,
             trusted_executable,
             credential_free_system_proxy,
             |name| std::env::var_os(name),
-        )
+        )?;
+        if provider == Provider::Claude {
+            cli_auth::load_claude_settings(&mut context.environment)?;
+        }
+        Ok(context)
     }
 
     fn from_environment(
@@ -219,6 +240,17 @@ impl TrustedMetadataContext {
                 environment.insert(name.into(), value);
             }
         }
+        let native_keys: &[&str] = match provider {
+            Provider::Codex => &["CODEX_HOME", "CODEX_API_KEY"],
+            Provider::Claude => cli_auth::CLAUDE_KEYS,
+            _ => &[],
+        };
+        for name in native_keys {
+            if let Some(value) = lookup(name) {
+                cli_auth::validate_value(name, &value)?;
+                environment.insert((*name).into(), value);
+            }
+        }
         let mut paths = vec![executable
             .parent()
             .expect("checked executable parent")
@@ -253,8 +285,11 @@ impl TrustedMetadataContext {
                 environment.insert(name.into(), value);
             }
         }
-        let system_proxy_used =
-            provider == Provider::Antigravity && !explicit_proxy && system_proxy.is_some();
+        let system_proxy_used = matches!(
+            provider,
+            Provider::Antigravity | Provider::Codex | Provider::Claude
+        ) && !explicit_proxy
+            && system_proxy.is_some();
         if system_proxy_used {
             let proxy = system_proxy.expect("checked system proxy");
             validate_proxy(proxy)?;
@@ -382,6 +417,16 @@ pub async fn probe_installed_cli(
                 catalog.source = "installed_help";
                 if catalog.models.is_empty() { return Err("已发现 CLI，但帮助未提供可解析的模型目录；需要对应的能力适配器。"); }
                 catalog.message = "来自本机 CLI 帮助；未验证账号或隔离执行能力。".into();
+            }
+            Provider::Codex | Provider::Claude => {
+                let protocol = if provider == Provider::Codex { cli_rpc::Protocol::Codex } else { cli_rpc::Protocol::Claude };
+                let output = run_protocol(trusted_executable, protocol.args(), context, directory.path(), deadline, Some(protocol)).await?;
+                let choices = cli_rpc::parse_models(&output.stdout)?;
+                catalog.models = choices.keys().cloned().collect();
+                catalog.efforts = choices.values().flatten().cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+                catalog.model_efforts = choices;
+                catalog.source = "live_catalog";
+                catalog.message = "来自本机 CLI 结构化模型目录；档位按模型区分，目录可能包含缓存，尚未验证账号调用权限。".into();
             }
         }
         Ok(())
@@ -602,6 +647,17 @@ async fn run_query(
     directory: &Path,
     deadline: Instant,
 ) -> Result<QueryOutput, &'static str> {
+    run_protocol(executable, args, context, directory, deadline, None).await
+}
+
+async fn run_protocol(
+    executable: &Path,
+    args: &[&str],
+    context: &TrustedMetadataContext,
+    directory: &Path,
+    deadline: Instant,
+    protocol: Option<cli_rpc::Protocol>,
+) -> Result<QueryOutput, &'static str> {
     if Instant::now() >= deadline {
         return Err("CLI 查询超时，请检查网络与登录状态。");
     }
@@ -611,7 +667,11 @@ async fn run_query(
     }
     command
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if protocol.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // The context is private, bounded and does not inherit the host environment.
@@ -628,10 +688,23 @@ async fn run_query(
         .stderr
         .take()
         .ok_or("无法捕获 CLI 诊断。")?;
-    let mut stdout = tokio::task::spawn_blocking(move || read_bounded(stdout));
+    let stdin = child.child_mut().stdin.take();
+    let mut stdout = tokio::task::spawn_blocking(move || match protocol {
+        Some(protocol) => cli_rpc::exchange(protocol, stdout, stdin.ok_or("CLI 查询输入不可用。")?),
+        None => read_bounded(stdout),
+    });
     let mut stderr = tokio::task::spawn_blocking(move || read_bounded(stderr));
     let result = async {
         let status = loop {
+            if protocol.is_some() && stdout.is_finished() {
+                let out = read_result(&mut stdout, deadline).await?;
+                // RPC hosts keep running after a response. The common cleanup
+                // below terminates and proves exit of the entire owned tree.
+                return Ok(QueryOutput {
+                    stdout: String::from_utf8_lossy(&out).into_owned(),
+                    stderr: String::new(),
+                });
+            }
             if let Some(status) = child.try_wait().map_err(|_| "无法读取 CLI 查询状态。")?
             {
                 break status;
@@ -675,6 +748,12 @@ async fn run_query(
     }
     result
 }
+
+#[path = "cli_catalog_rpc.rs"]
+mod cli_rpc;
+
+#[path = "cli_catalog_auth.rs"]
+mod cli_auth;
 
 #[cfg(test)]
 #[path = "cli_catalog_tests.rs"]

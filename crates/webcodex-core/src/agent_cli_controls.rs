@@ -273,6 +273,9 @@ const RESERVED_FLAGS: &[&str] = &[
     "--resume",
     "--continue",
     "--dangerously-skip-permissions",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--no-sandbox",
     "--yolo",
     "--allow-all-tools",
     "--allowedtools",
@@ -335,7 +338,18 @@ impl ReviewedAgentCliControls {
                 return Err("agent_cli_controls_invalid_flag".into());
             }
             let flag_key = arg.flag.to_ascii_lowercase();
-            if RESERVED_FLAGS.contains(&flag_key.as_str()) || !flags.insert(flag_key) {
+            let overrides_selection = self
+                .adapter
+                .as_ref()
+                .and_then(|adapter| adapter.invocation.as_ref())
+                .is_some_and(|invocation| {
+                    arg.flag == invocation.model_flag
+                        || invocation.effort_flag.as_ref() == Some(&arg.flag)
+                });
+            if RESERVED_FLAGS.contains(&flag_key.as_str())
+                || overrides_selection
+                || !flags.insert(flag_key)
+            {
                 return Err("agent_cli_controls_argument_override".into());
             }
             if let Some(value) = &arg.value {
@@ -498,21 +512,28 @@ fn validate_base(record: &ReviewedAgentCliControls, args: &[String]) -> Result<(
         .as_ref()
         .is_some_and(|flag| args.get(index + 2) == Some(flag));
     let effort = if explicit_effort {
-        Some(
-            args.get(index + 3)
-                .ok_or("agent_cli_controls_invalid_business_argv")?
-                .as_str(),
-        )
+        let raw = args
+            .get(index + 3)
+            .ok_or("agent_cli_controls_invalid_business_argv")?;
+        Some(if let Some(key) = &invocation.effort_config_key {
+            let encoded = raw
+                .strip_prefix(&format!("{key}="))
+                .ok_or("agent_cli_controls_invalid_business_argv")?;
+            serde_json::from_str::<String>(encoded)
+                .map_err(|_| "agent_cli_controls_invalid_business_argv")?
+        } else {
+            raw.clone()
+        })
     } else {
         None
     };
-    for value in std::iter::once(model.as_str()).chain(effort) {
+    for value in std::iter::once(model.as_str()).chain(effort.as_deref()) {
         if value.starts_with(['-', '@']) {
             return Err("agent_cli_controls_invalid_business_value".into());
         }
     }
     let (expected, _) = adapter
-        .invocation(model, effort, "validate")
+        .invocation(model, effort.as_deref(), "validate")
         .map_err(|_| "agent_cli_controls_invalid_business_argv")?;
     if expected != args {
         return Err("agent_cli_controls_invalid_business_argv".into());
