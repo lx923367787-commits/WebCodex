@@ -346,12 +346,12 @@ pub async fn probe_installed_cli(
     }
     let mut catalog = CliCatalog::unavailable(provider);
     catalog.installed = true;
-    let Ok(_slot) = QUERY_SLOTS.try_acquire() else {
+    let deadline = Instant::now() + QUERY_TIMEOUT;
+    let Ok(Ok(_slot)) = tokio::time::timeout_at(deadline, QUERY_SLOTS.acquire()).await else {
         catalog.status = "error";
-        catalog.message = "已有模型查询正在运行，请稍后刷新。".into();
+        catalog.message = "等待 CLI 查询容量超时，请稍后刷新。".into();
         return Ok(catalog);
     };
-    let deadline = Instant::now() + QUERY_TIMEOUT;
     let directory = tempfile::Builder::new()
         .prefix("webcodex-cli-catalog-")
         .tempdir()

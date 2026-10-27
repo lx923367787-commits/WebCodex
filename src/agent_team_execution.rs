@@ -32,6 +32,13 @@ pub(crate) type AssetFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Strin
 /// Provider controls must have been exercised on this exact installed binary.
 pub(crate) trait AgentTeamAssets: Send + Sync {
     fn catalog<'a>(&'a self, caller: &'a VerifiedAgentRun) -> AssetFuture<'a, AgentTeamCatalog>;
+    fn selected_catalog<'a>(
+        &'a self,
+        caller: &'a VerifiedAgentRun,
+        _provider: AgentCliProvider,
+    ) -> AssetFuture<'a, AgentTeamCatalog> {
+        self.catalog(caller)
+    }
     fn inventory<'a>(
         &'a self,
         _caller: &'a VerifiedAgentRun,
@@ -1035,7 +1042,11 @@ async fn start(
     let Some(assets) = &runtime.agent_team_assets else {
         return denied("agent_team_catalog_source_missing");
     };
-    let catalog = match assets.catalog(caller).await {
+    let selected_provider = match AgentCliProvider::parse(&slot.provider_id) {
+        Ok(provider) => provider,
+        Err(_) => return denied("agent_cli_invalid_provider_id"),
+    };
+    let catalog = match assets.selected_catalog(caller, selected_provider).await {
         Ok(value) => value,
         Err(_) => return denied("agent_team_catalog_unavailable"),
     };

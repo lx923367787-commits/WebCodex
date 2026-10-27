@@ -216,6 +216,7 @@ impl RunnerAgentTeamAssets {
         &self,
         caller: &VerifiedAgentRun,
         scope: &CatalogScope,
+        selected: Option<AgentCliProvider>,
     ) -> Result<(Vec<ReadyCliCatalog>, Vec<UnavailableCliProvider>), String> {
         let started = Instant::now();
         let deadline = started
@@ -242,6 +243,7 @@ impl RunnerAgentTeamAssets {
         let providers: BTreeSet<_> = resources
             .iter()
             .filter_map(|resource| resource.provider)
+            .filter(|provider| selected.is_none_or(|selected| selected == *provider))
             .collect();
         let results = futures_util::future::join_all(providers.iter().map(|provider| async {
             (
@@ -263,6 +265,13 @@ impl RunnerAgentTeamAssets {
         let mut catalogs = Vec::with_capacity(providers.len());
         let mut unavailable = Vec::new();
         if providers.is_empty() {
+            if let Some(provider) = selected {
+                unavailable.push(cli_unavailable(
+                    provider,
+                    "agent_cli_provider_resource_unavailable",
+                ));
+                return Ok((catalogs, unavailable));
+            }
             let inventory = self
                 .registry
                 .query_agent_cli_inventory(
@@ -342,6 +351,7 @@ impl RunnerAgentTeamAssets {
         &self,
         caller: &VerifiedAgentRun,
         include_cli: bool,
+        selected: Option<AgentCliProvider>,
     ) -> Result<AgentTeamCatalog, String> {
         // One deadline covers all three fixed reads; progress cannot extend it.
         let deadline = Instant::now() + CATALOG_DEADLINE;
@@ -439,7 +449,7 @@ impl RunnerAgentTeamAssets {
         // Ordinary GPT starts need only the Host's cached profile directory.
         // Do not construct or dispatch a CLI metadata query on that path.
         let (cli_catalogs, unavailable_providers) = if include_cli {
-            self.read_cli_catalogs(caller, &scope).await?
+            self.read_cli_catalogs(caller, &scope, selected).await?
         } else {
             (Vec::new(), Vec::new())
         };
@@ -488,6 +498,14 @@ fn cli_unavailable(provider: AgentCliProvider, reason: &str) -> UnavailableCliPr
 }
 
 impl AgentTeamAssets for RunnerAgentTeamAssets {
+    fn selected_catalog<'a>(
+        &'a self,
+        caller: &'a VerifiedAgentRun,
+        provider: AgentCliProvider,
+    ) -> AssetFuture<'a, AgentTeamCatalog> {
+        Box::pin(self.read_catalog(caller, true, Some(provider)))
+    }
+
     fn inventory<'a>(
         &'a self,
         caller: &'a VerifiedAgentRun,
@@ -515,14 +533,14 @@ impl AgentTeamAssets for RunnerAgentTeamAssets {
         &'a self,
         caller: &'a VerifiedAgentRun,
     ) -> Pin<Box<dyn Future<Output = Result<AgentTeamCatalog, String>> + Send + 'a>> {
-        Box::pin(self.read_catalog(caller, true))
+        Box::pin(self.read_catalog(caller, true, None))
     }
 
     fn host_catalog<'a>(
         &'a self,
         caller: &'a VerifiedAgentRun,
     ) -> Pin<Box<dyn Future<Output = Result<AgentTeamCatalog, String>> + Send + 'a>> {
-        Box::pin(self.read_catalog(caller, false))
+        Box::pin(self.read_catalog(caller, false, None))
     }
 }
 
