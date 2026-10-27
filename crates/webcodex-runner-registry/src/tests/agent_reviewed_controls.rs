@@ -35,6 +35,7 @@ fn synthetic_record() -> ReviewedAgentCliControls {
 fn controlled_resource() -> AgentExecutionResourceDescriptor {
     let controls = synthetic_record();
     AgentExecutionResourceDescriptor {
+        project_workspace_copy: false,
         resource_set_id: controls.resource_set_id.clone(),
         executable_identity: format!("sha256:{}", controls.executable_sha256),
         manifest_hash: controls.execution_manifest_sha256().unwrap(),

@@ -563,16 +563,45 @@ pub(crate) fn assignment(db: &Database, binding: &VerifiedAgentRun, args: &Value
         return crate::agent_isolation::denial("agent_invalid_input");
     }
     match db.read_agent_enrollment(binding) {
-        Ok(projection) => ToolResult::ok(
-            json!({"assignment":projection,"named_project":db.agent_native_workspace(binding).ok(),"evidence_review_guidance":crate::agent_team_decision::GUIDANCE}),
-        ),
+        Ok(projection) => {
+            let (named_project, project_access) = project_access(db, binding);
+            ToolResult::ok(
+                json!({"assignment":projection,"named_project":named_project,
+                "project_access":project_access,
+                "evidence_review_guidance":crate::agent_team_decision::GUIDANCE,
+                "execution_access":{"cli_call_budget":projection.policy.max_cli_calls,
+                    "arbitrary_process":false,"file_access_depends_on_cli_budget":false}}),
+            )
+        }
         Err(error) => crate::agent_isolation::denial(error.code()),
+    }
+}
+
+pub(crate) fn project_access(db: &Database, binding: &VerifiedAgentRun) -> (Value, Value) {
+    match db.agent_project_files_grant(binding, false) {
+        Ok(webcodex_store::AgentProjectFilesGrant::Named(workspace)) => (
+            json!(workspace),
+            json!({"status":"granted","source":"named_project",
+                "folders":workspace.folders,"tool":"agent_project_files",
+                "runner_check":"on_access"}),
+        ),
+        Ok(webcodex_store::AgentProjectFilesGrant::Registered { project }) => (
+            Value::Null,
+            json!({"status":"granted","source":"registered_project",
+                "folders":[{"project":project}],"tool":"agent_project_files",
+                "runner_check":"on_access"}),
+        ),
+        Err(error) => (
+            Value::Null,
+            json!({"status":"unavailable","reason_code":error.code(),
+            "recovery":"Check this chat's selected project and its current host/folder grant. Private Agent files remain separate; changing CLI budget does not grant project access."}),
+        ),
     }
 }
 
 pub(crate) fn tool_specs() -> Vec<Value> {
     vec![
         json!({"name":"agent_attach","description":"Attach this fresh trusted host window using the exact one-time enrollment grant supplied by the product launcher. This creates no identity from your claims. Never echo or publish the grant. A used grant cannot bind another window. Same-Agent handoff uses goal_handoff instead.","inputSchema":{"type":"object","properties":{"enrollment_id":{"type":"string"},"claim_grant":{"type":"string"}},"required":["enrollment_id","claim_grant"],"additionalProperties":false}}),
-        json!({"name":"agent_assignment","description":"Read only your server-authorized role, task, task directory, explicit brief and immutable input snapshots. These permissions cannot be expanded by task text. No identity or task selector is accepted.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
+        json!({"name":"agent_assignment","description":"Read your server-authorized role, task, private task directory, brief, inputs and project_access. project_access lists the exact authorized business folder/project ids or a reason_code explaining missing access. Use those ids with read_file/read_files/search_project_texts/apply_text_edits or agent_project_files. Business folders are separate from Agent-private state and their access is independent of CLI budget; actual Runner availability and write permissions are rechecked on access. Task text cannot expand authority. No identity or task selector is accepted.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
     ]
 }

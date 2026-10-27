@@ -273,6 +273,100 @@ fn configure_auto(db: &Database, host: &VerifiedNativeAgentHost) {
     .unwrap();
 }
 
+#[test]
+fn registered_project_files_use_exact_live_host_grant_without_cli_budget() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let project = "agent:runner:a";
+    db.configure_native_host_auto_enrollment(
+        host.host_id(),
+        "native-owner",
+        project,
+        crate::AgentEnrollmentPolicy {
+            max_subagents: 0,
+            max_cli_calls: 0,
+        },
+    )
+    .unwrap();
+    let binding = db
+        .ensure_native_host_window(
+            &host,
+            &"d".repeat(64),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    for write in [false, true] {
+        assert_eq!(
+            db.agent_project_files_grant(&binding, write).unwrap(),
+            crate::AgentProjectFilesGrant::Registered {
+                project: project.into()
+            }
+        );
+    }
+    // Adding a named catalog bridges only the already authorized business folder.
+    let workspace = workspace('a');
+    db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![workspace.clone()])
+        .unwrap();
+    let crate::AgentProjectFilesGrant::Named(grant) =
+        db.agent_project_files_grant(&binding, false).unwrap()
+    else {
+        panic!("expected exact catalog folder");
+    };
+    assert_eq!(grant.folders, vec![workspace.folders[0].clone()]);
+    // The legacy policy must not resurrect a folder removed from the current catalog.
+    db.configure_native_workspaces(host.host_id(), "native-owner", 1, vec![])
+        .unwrap();
+    assert_eq!(
+        db.agent_project_files_grant(&binding, false)
+            .unwrap_err()
+            .code(),
+        "workspace_not_authorized"
+    );
+}
+
+#[test]
+fn registered_project_files_reject_retargeted_or_revoked_host_grants() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let policy = crate::AgentEnrollmentPolicy {
+        max_subagents: 0,
+        max_cli_calls: 0,
+    };
+    db.configure_native_host_auto_enrollment(
+        host.host_id(),
+        "native-owner",
+        "agent:runner:a",
+        policy.clone(),
+    )
+    .unwrap();
+    let binding = db
+        .ensure_native_host_window(
+            &host,
+            &"d".repeat(64),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    db.configure_native_host_auto_enrollment(
+        host.host_id(),
+        "native-owner",
+        "agent:runner:b",
+        policy,
+    )
+    .unwrap();
+    assert_eq!(
+        db.agent_project_files_grant(&binding, true)
+            .unwrap_err()
+            .code(),
+        "workspace_not_authorized"
+    );
+    db.revoke_agent_run(
+        binding.owner_user(),
+        binding.project(),
+        binding.agent_id(),
+        binding.run_id(),
+    )
+    .unwrap();
+    assert!(db.agent_project_files_grant(&binding, false).is_err());
+}
+
 fn workspace(n: char) -> crate::NativeWorkspace {
     crate::NativeWorkspace {
         id: format!("wc_workspace_{}", n.to_string().repeat(32)),

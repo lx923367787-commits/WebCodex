@@ -26,6 +26,7 @@ pub(crate) fn ensure(
             | "agent_meeting"
             | "agent_project_files"
     ) || crate::agent_team::supports(tool)
+        || crate::tool_runtime::named_project_files::supports(tool)
     {
         // Each adapter rechecks its own authority: private Goal write fences,
         // meeting membership, or the enrolled named-project grant. This list

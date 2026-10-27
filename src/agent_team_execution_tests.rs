@@ -792,12 +792,13 @@ fn agent_team_execution_worker_observation_exposes_cas_without_private_completio
 
 #[test]
 fn agent_team_execution_input_material_changes_launch_hash_and_is_not_argv() {
+    use webcodex_core::runner_protocol::compute_launch_intent_hash;
     let mut inputs = vec![webcodex_store::AgentEnrollmentSnapshot {
         name: "source.js".into(),
         content: "const x=1;\n".into(),
         sha256: "a".repeat(64),
     }];
-    let prompt = cli_worker_input_prompt("Review material", &inputs).unwrap();
+    let prompt = cli_worker_input_prompt("Review material", &inputs, None).unwrap();
     assert!(prompt.contains("workspace starts empty"));
     let (_, args, stdin) =
         crate::tool_runtime::fixed_cli_process("antigravity", "gemini-fixed", None, &prompt)
@@ -813,7 +814,7 @@ fn agent_team_execution_input_material_changes_launch_hash_and_is_not_argv() {
         "antigravity",
         "gemini-fixed",
         None,
-        &cli_worker_input_prompt("Review material", &inputs).unwrap(),
+        &cli_worker_input_prompt("Review material", &inputs, None).unwrap(),
     )
     .unwrap();
     assert_ne!(

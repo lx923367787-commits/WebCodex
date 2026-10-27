@@ -198,6 +198,7 @@ impl Fixture {
         bound.launch_intent_hash = compute_launch_intent_hash(&process, None, 120).unwrap();
         bound.resource_manifest_hash = "a".repeat(64);
         let start = AgentExecutionStart {
+            workspace_source: None,
             binding: bound.clone(),
             resource_set_id: format!("resources-{index}"),
             process,

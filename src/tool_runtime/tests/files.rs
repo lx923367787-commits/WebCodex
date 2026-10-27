@@ -9,8 +9,14 @@ use serde_json::{json, Value};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-#[tokio::test]
-async fn named_workspaces_files_pin_each_granted_root_and_enforce_revocation() {
+async fn named_files_fixture() -> (
+    tempfile::TempDir,
+    std::sync::Arc<crate::Database>,
+    ToolRuntime,
+    webcodex_store::VerifiedAgentRun,
+    webcodex_store::NativeWorkspace,
+    webcodex_store::VerifiedNativeAgentHost,
+) {
     let temp = tempfile::tempdir().unwrap();
     let db = std::sync::Arc::new(crate::Database::open(&temp.path().join("state.db")).unwrap());
     let user = crate::test_support::seed_user(&db, "workspace-owner");
@@ -53,7 +59,7 @@ async fn named_workspaces_files_pin_each_granted_root_and_enforce_revocation() {
     let host = db
         .authenticate_native_agent_host(&issued.into_secret())
         .unwrap();
-    let mut workspace = webcodex_store::NativeWorkspace {
+    let workspace = webcodex_store::NativeWorkspace {
         id: format!("wc_workspace_{}", "a".repeat(32)),
         name: "Multi folder".into(),
         enabled: true,
@@ -69,6 +75,13 @@ async fn named_workspaces_files_pin_each_granted_root_and_enforce_revocation() {
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
+    (temp, db, runtime, binding, workspace, host)
+}
+
+#[tokio::test]
+async fn named_workspaces_files_pin_each_granted_root_and_enforce_revocation() {
+    let (_temp, db, runtime, binding, mut workspace, host) = named_files_fixture().await;
+    let folders = workspace.folders.clone();
     for (index, client) in ["code", "docs"].into_iter().enumerate() {
         let mut task = tokio::spawn({
             let runtime = runtime.clone();
@@ -124,8 +137,13 @@ async fn named_workspaces_files_pin_each_granted_root_and_enforce_revocation() {
         );
     }
     workspace.folders.pop();
-    db.configure_native_workspaces(host.host_id(), &user.id, 1, vec![workspace.clone()])
-        .unwrap();
+    db.configure_native_workspaces(
+        host.host_id(),
+        binding.owner_user(),
+        1,
+        vec![workspace.clone()],
+    )
+    .unwrap();
     let denied = super::super::named_project_files::call(
         &runtime,
         &binding,
@@ -137,7 +155,7 @@ async fn named_workspaces_files_pin_each_granted_root_and_enforce_revocation() {
         "workspace_folder_not_authorized"
     );
     workspace.folders[0].path.push_str("-changed");
-    db.configure_native_workspaces(host.host_id(), &user.id, 2, vec![workspace])
+    db.configure_native_workspaces(host.host_id(), binding.owner_user(), 2, vec![workspace])
         .unwrap();
     let denied = super::super::named_project_files::call(
         &runtime,
@@ -146,6 +164,265 @@ async fn named_workspaces_files_pin_each_granted_root_and_enforce_revocation() {
     )
     .await;
     assert_eq!(denied.output["error_kind"], "workspace_folder_changed");
+}
+
+#[tokio::test]
+async fn isolated_project_files_batch_read_and_guarded_edit_use_pinned_runner() {
+    let (_temp, _db, runtime, binding, workspace, _host) = named_files_fixture().await;
+    let mut auth = crate::auth::AuthContext::new(crate::auth::AuthKind::ModelAgent);
+    auth.agent_run = Some(binding);
+    let folder = &workspace.folders[0];
+    let mut task = tokio::spawn({
+        let runtime = runtime.clone();
+        let auth = auth.clone();
+        let project = folder.project.clone();
+        async move {
+            runtime.isolated_model_call_async("read_files",
+            json!({"project":project,"items":[{"path":"hello.txt"},{"path":"second.txt"}],"with_line_numbers":true}),
+            Some(&auth)).await
+        }
+    });
+    for text in ["first", "second"] {
+        let req = tokio::select! {
+            req = wait_for_patch_agent_request(&runtime, "code") => req,
+            result = &mut task => panic!("batch ended before dispatch: {result:?}"),
+        };
+        assert_eq!(req.kind, "file_read");
+        assert_eq!(req.cwd.as_deref(), Some(folder.path.as_str()));
+        assert!(req.command.is_empty());
+        complete_agent_ranged_file_read_request(&runtime, "code", &req, text).await;
+    }
+    let result = task.await.unwrap();
+    assert!(result.success, "{result:?}");
+    assert_eq!(result.output["returned_count"], 2);
+    let mut task = tokio::spawn({
+        let runtime = runtime.clone();
+        let auth = auth.clone();
+        let project = folder.project.clone();
+        async move {
+            runtime
+                .isolated_model_call_async(
+                    "apply_text_edits",
+                    json!({"project":project,
+            "changes":[{"kind":"edit","path":"hello.txt","expected_sha256":"a".repeat(64),
+                "edits":[{"kind":"replace_exact","old_text":"code","new_text":"updated"}]}]}),
+                    Some(&auth),
+                )
+                .await
+        }
+    });
+    let req = tokio::select! {
+        req = wait_for_patch_agent_request(&runtime, "code") => req,
+        result = &mut task => panic!("edit ended before dispatch: {result:?}"),
+    };
+    assert_eq!(req.kind, "file_apply_text_edits");
+    assert_eq!(req.cwd.as_deref(), Some(folder.path.as_str()));
+    let payload: Value = serde_json::from_str(req.content.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["changes"][0]["expected_sha256"], "a".repeat(64));
+    complete_patch_agent_request(
+        &runtime,
+        "code",
+        &req.request_id,
+        0,
+        r#"{"dry_run":false,"applied_count":1,"changed":true,"would_change":true}"#,
+        "",
+    )
+    .await;
+    assert!(task.await.unwrap().success);
+    let denied = runtime
+        .isolated_model_call_async(
+            "read_files",
+            json!({"project":"agent:other:main",
+        "items":[{"path":"hello.txt"}]}),
+            Some(&auth),
+        )
+        .await;
+    assert_eq!(
+        denied.output["error_kind"],
+        "workspace_folder_not_authorized"
+    );
+}
+
+#[tokio::test]
+async fn isolated_project_files_search_excludes_private_runtime_and_rejects_scope_substitution() {
+    let (_temp, db, runtime, binding, workspace, host) = named_files_fixture().await;
+    let mut auth = crate::auth::AuthContext::new(crate::auth::AuthKind::ModelAgent);
+    auth.agent_run = Some(binding.clone());
+    let project = workspace.folders[0].project.clone();
+    let mut task = tokio::spawn({
+        let runtime = runtime.clone();
+        let auth = auth.clone();
+        let project = project.clone();
+        async move {
+            runtime
+                .isolated_model_call_async(
+                    "search_project_texts",
+                    json!({
+            "project":project,"queries":[{"pattern":"needle","pattern_mode":"literal"}]}),
+                    Some(&auth),
+                )
+                .await
+        }
+    });
+    let req = tokio::select! {
+        req = wait_for_patch_agent_request(&runtime, "code") => req,
+        result = &mut task => panic!("search ended before dispatch: {result:?}"),
+    };
+    assert_eq!(req.cwd.as_deref(), Some(workspace.folders[0].path.as_str()));
+    assert!(req.command.contains("agent-runtime"));
+    complete_patch_agent_request(&runtime, "code", &req.request_id, 0,
+        "{\"webcodex_search\":{\"backend\":\"rg\",\"feature_unavailable\":false}}\nsrc/main.rs:1:needle\nagent-runtime/other/private/memory.txt:1:private-needle\nrunner-agent-resources/other/home/history:1:private-needle\n", "").await;
+    let result = task.await.unwrap();
+    assert!(result.success, "{result:?}");
+    assert!(result.output.to_string().contains("src/main.rs"));
+    assert!(!result.output.to_string().contains("private-needle"));
+    // No hidden session selector or alternate folder can change this grant.
+    for extra in [
+        json!({"session_id":"wc_sess_other"}),
+        json!({"folder":"agent:other:main"}),
+    ] {
+        let mut arguments = json!({"project":project,"items":[{"path":"hello.txt"}]});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let denied = runtime
+            .isolated_model_call_async("read_files", arguments, Some(&auth))
+            .await;
+        assert_eq!(denied.output["error_kind"], "workspace_invalid_input");
+    }
+    db.configure_native_workspaces(host.host_id(), binding.owner_user(), 1, vec![])
+        .unwrap();
+    let assignment = crate::agent_enrollment::assignment(&db, &binding, &json!({}));
+    assert_eq!(assignment.output["project_access"]["status"], "unavailable");
+    assert_eq!(
+        assignment.output["project_access"]["reason_code"],
+        "workspace_not_authorized"
+    );
+}
+
+#[tokio::test]
+async fn isolated_project_files_cli_source_uses_registered_host_grant_and_live_runner() {
+    let (_temp, db, runtime, binding, workspace, _host) = named_files_fixture().await;
+    let folder = &workspace.folders[0];
+    let token = db
+        .register_native_agent_host(&format!("tunnel_{}", "b".repeat(32)), &"c".repeat(64))
+        .unwrap()
+        .into_secret();
+    let host = db.authenticate_native_agent_host(&token).unwrap();
+    db.configure_native_host_auto_enrollment(
+        host.host_id(),
+        binding.owner_user(),
+        &folder.project,
+        webcodex_store::AgentEnrollmentPolicy {
+            max_subagents: 0,
+            max_cli_calls: 0,
+        },
+    )
+    .unwrap();
+    let caller = db
+        .ensure_native_host_window(
+            &host,
+            &"f".repeat(64),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    let owner = db.get_user_by_id(caller.owner_user()).unwrap().unwrap();
+    let access = webcodex_runner_registry::RunnerAccess {
+        global_visibility: false,
+        owner_bypass: false,
+        username: Some(owner.username),
+        group: None,
+    };
+    let target = webcodex_core::runner_protocol::AgentExecutionTarget {
+        client_id: "code".into(),
+        runner_instance_id: "inst".into(),
+    };
+    let source =
+        crate::agent_team_execution::cli_workspace_source(&runtime, &db, &caller, &access, &target)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(source.project, folder.project);
+    assert_eq!(source.root, folder.path);
+    let assignment = crate::agent_enrollment::assignment(&db, &caller, &json!({}));
+    assert_eq!(
+        assignment.output["project_access"]["source"],
+        "registered_project"
+    );
+    assert_eq!(assignment.output["execution_access"]["cli_call_budget"], 0);
+    let mut auth = crate::auth::AuthContext::new(crate::auth::AuthKind::ModelAgent);
+    auth.agent_run = Some(caller.clone());
+    let mut read = tokio::spawn({
+        let runtime = runtime.clone();
+        let auth = auth.clone();
+        let project = folder.project.clone();
+        async move {
+            runtime
+                .isolated_model_call_async(
+                    "read_files",
+                    json!({"project":project,
+            "items":[{"path":"hello.txt"}]}),
+                    Some(&auth),
+                )
+                .await
+        }
+    });
+    let req = tokio::select! {
+        req = wait_for_patch_agent_request(&runtime, "code") => req,
+        result = &mut read => panic!("registered project read ended before Runner dispatch: {result:?}"),
+    };
+    assert_eq!(req.cwd.as_deref(), Some(folder.path.as_str()));
+    complete_agent_ranged_file_read_request(&runtime, "code", &req, "shared business file").await;
+    assert!(read.await.unwrap().success);
+    for path in [
+        "agent-runtime/other/private/memory.txt",
+        "runner-agent-resources/other/home/history",
+    ] {
+        let result = runtime
+            .isolated_model_call_async(
+                "read_file",
+                json!({"project":folder.project,"path":path}),
+                Some(&auth),
+            )
+            .await;
+        assert!(
+            !result.success,
+            "other Agent private path must remain denied"
+        );
+    }
+    let wrong_runner = webcodex_core::runner_protocol::AgentExecutionTarget {
+        client_id: "docs".into(),
+        runner_instance_id: "inst".into(),
+    };
+    assert_eq!(
+        crate::agent_team_execution::cli_workspace_source(
+            &runtime,
+            &db,
+            &caller,
+            &access,
+            &wrong_runner
+        )
+        .await
+        .unwrap_err(),
+        "workspace_folder_changed"
+    );
+    db.configure_native_host_auto_enrollment(
+        host.host_id(),
+        caller.owner_user(),
+        &workspace.folders[1].project,
+        webcodex_store::AgentEnrollmentPolicy {
+            max_subagents: 0,
+            max_cli_calls: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::agent_team_execution::cli_workspace_source(&runtime, &db, &caller, &access, &target)
+            .await
+            .unwrap_err(),
+        "workspace_not_authorized"
+    );
 }
 
 #[cfg(windows)]

@@ -49,6 +49,7 @@ fn connection_status(
     db: &crate::Database,
     binding: &webcodex_store::VerifiedAgentRun,
 ) -> ToolResult {
+    let (_, project_access) = crate::agent_enrollment::project_access(db, binding);
     let assignment = db.read_agent_enrollment(binding).ok().map(|assignment| {
         json!({
             "task_id":assignment.task_id,"task_directory":assignment.task_directory,
@@ -59,7 +60,7 @@ fn connection_status(
         "connected":true,"scope":"current_window","runtime_exposure":"isolated_agent",
         "agent_state":"active","agent":{"agent_id":binding.agent_id(),
             "run_id":binding.run_id(),"generation":binding.generation(),"project":binding.project()},
-        "assignment":assignment,"shared_runtime_access":false,
+        "assignment":assignment,"project_access":project_access,"shared_runtime_access":false,
         "next_action":"Read agent_assignment for this chat's task. Use tool_manifest to discover the current isolated tools."
     }))
 }

@@ -121,7 +121,8 @@ pub(crate) fn require_public_task_quiescent_on_connection(
 ) -> Result<(), CommunicationStoreError> {
     crate::agent_execution_close::require_agent_task_execution_quiescent_on_connection(
         conn, owner_user, project, task,
-    ).map_err(|error| {
+    )
+    .map_err(|error| {
         if error.code() == "agent_execution_stop_proof_required" {
             denied("public_task_execution_stop_proof_required")
         } else {
@@ -129,8 +130,13 @@ pub(crate) fn require_public_task_quiescent_on_connection(
         }
     })?;
     crate::agent_host_dispatch::require_agent_host_dispatch_quiescent_on_connection(
-        conn, owner_user, project, task, completing_actor,
-    ).map_err(assignment)?;
+        conn,
+        owner_user,
+        project,
+        task,
+        completing_actor,
+    )
+    .map_err(assignment)?;
     let principal = crate::agent_isolation::enrollment_principal_for_execution(owner_user);
     // A stopped CLI process still owes an independent WorkerTask disposition.
     // Exclude only the task being completed, so its own review can close it.
@@ -148,9 +154,15 @@ pub(crate) fn require_public_task_quiescent_on_connection(
               OR execution.agent_id<>json_extract(a.record_json,'$.execution_binding.executor.run.agent_id')))",
         params![principal.kind,principal.digest,project,task], |r| r.get(0),
     ).map_err(store_error)?;
-    if pending_worker { return Err(denied("public_task_worker_delivery_pending")); }
+    if pending_worker {
+        return Err(denied("public_task_worker_delivery_pending"));
+    }
     let children:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_team_plans p JOIN json_each(p.record_json,'$.plan.subagents') m JOIN wc_agent_tasks t ON t.task_id=json_extract(m.value,'$.task_id') WHERE p.root_task_id=?4 AND p.owner_principal_kind=?1 AND p.owner_principal_digest=?2 AND p.project_id=?3 AND t.state='active')",params![principal.kind,principal.digest,project,task],|r|r.get(0)).map_err(store_error)?;
-    if children { Err(denied("public_task_execution_tree_active")) } else { Ok(()) }
+    if children {
+        Err(denied("public_task_execution_tree_active"))
+    } else {
+        Ok(())
+    }
 }
 
 fn audit(
@@ -180,14 +192,24 @@ pub(crate) fn complete_cli_worker_task_on_connection(
     }
     let result = validate_optional_terminal_text(terminal_result, "terminal_result")?;
     let reason = validate_optional_terminal_text(terminal_reason, "terminal_reason")?;
-    if result.as_deref().into_iter().chain(reason.as_deref())
-        .any(webcodex_core::sensitive_text::secret_like_value) {
+    if result
+        .as_deref()
+        .into_iter()
+        .chain(reason.as_deref())
+        .any(webcodex_core::sensitive_text::secret_like_value)
+    {
         return Err(denied("public_task_sensitive_terminal_text"));
     }
     let key = key_hash(completion_key)?;
-    let original: String = conn.query_row("SELECT record_json FROM wc_team_cli_attempts WHERE attempt_id=?1", [&binding.requester.cli_attempt_id], |r| r.get(0)).map_err(store_error)?;
-    let original: crate::TeamCliAttemptRecord = serde_json::from_str(&original)
-        .map_err(|_| denied("agent_task_storage_invariant"))?;
+    let original: String = conn
+        .query_row(
+            "SELECT record_json FROM wc_team_cli_attempts WHERE attempt_id=?1",
+            [&binding.requester.cli_attempt_id],
+            |r| r.get(0),
+        )
+        .map_err(store_error)?;
+    let original: crate::TeamCliAttemptRecord =
+        serde_json::from_str(&original).map_err(|_| denied("agent_task_storage_invariant"))?;
     if original.execution_binding.as_ref() != Some(binding) {
         return Err(denied("public_task_execution_conflict"));
     }
@@ -198,41 +220,64 @@ pub(crate) fn complete_cli_worker_task_on_connection(
         "SELECT a.owner_user FROM wc_isolated_agents a JOIN wc_agent_enrollments e ON e.agent_id=a.agent_id WHERE a.agent_id=?1 AND a.project=?2 AND e.enrollment_id=?3 AND e.task_id=?4 AND e.purpose='cli_worker'",
         params![executor.run.agent_id,binding.project,executor.enrollment_id,task_id], |r|r.get(0),
     ).optional().map_err(store_error)?;
-    let owner = owner.ok_or_else(||denied("public_task_execution_conflict"))?;
+    let owner = owner.ok_or_else(|| denied("public_task_execution_conflict"))?;
     let principal = crate::agent_isolation::enrollment_principal_for_execution(&owner);
     let now = now_unix_ms();
-    let task = load_owned_task(conn,&principal,task_id,now)?;
-    let execution = public_execution_on_connection(conn,task_id)?.ok_or_else(||denied("public_task_execution_missing"))?;
-    if task.referenced_project_id.as_deref()!=Some(binding.project.as_str())
-        || execution.agent_id!=executor.run.agent_id {
+    let task = load_owned_task(conn, &principal, task_id, now)?;
+    let execution = public_execution_on_connection(conn, task_id)?
+        .ok_or_else(|| denied("public_task_execution_missing"))?;
+    if task.referenced_project_id.as_deref() != Some(binding.project.as_str())
+        || execution.agent_id != executor.run.agent_id
+    {
         return Err(denied("public_task_execution_conflict"));
     }
-    let hash=task_request_hash(&json!({"task_id":task_id,"execution_id":execution.execution_id,"expected_revision":expected_revision,"outcome":outcome,"result":result,"reason":reason}));
+    let hash = task_request_hash(
+        &json!({"task_id":task_id,"execution_id":execution.execution_id,"expected_revision":expected_revision,"outcome":outcome,"result":result,"reason":reason}),
+    );
     if execution.state.terminal() {
         let saved:(Option<String>,Option<String>)=conn.query_row("SELECT completion_key_hash,completion_request_hash FROM wc_agent_public_executions WHERE task_id=?1",[task_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(store_error)?;
-        if saved.0.as_deref()!=Some(key.as_str()) || saved.1.as_deref()!=Some(hash.as_str()) {
+        if saved.0.as_deref() != Some(key.as_str()) || saved.1.as_deref() != Some(hash.as_str()) {
             return Err(denied("public_task_idempotency_conflict"));
         }
-        return Ok(AgentPublicTaskMutation {task:task.summary(now),execution,replayed:true,state_changed:false});
+        return Ok(AgentPublicTaskMutation {
+            task: task.summary(now),
+            execution,
+            replayed: true,
+            state_changed: false,
+        });
     }
-    if task.stored_state!=AgentTaskState::Active || execution.revision!=expected_revision {
+    if task.stored_state != AgentTaskState::Active || execution.revision != expected_revision {
         return Err(denied("public_task_revision_conflict"));
     }
     let conflicting: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_agent_enrollment_assignments WHERE owner_user=?1 AND project=?2 AND task_id=?3 AND state='active' AND agent_id<>?4)",params![owner,binding.project,task_id,executor.run.agent_id],|r|r.get(0)).map_err(store_error)?;
-    if conflicting { return Err(denied("public_task_execution_conflict")); }
-    if !crate::agent_execution_close::agent_execution_binding_stop_proven_on_connection(conn,&binding).map_err(assignment)? {
+    if conflicting {
+        return Err(denied("public_task_execution_conflict"));
+    }
+    if !crate::agent_execution_close::agent_execution_binding_stop_proven_on_connection(
+        conn, &binding,
+    )
+    .map_err(assignment)?
+    {
         return Err(denied("public_task_execution_stop_proof_required"));
     }
-    require_public_task_quiescent_on_connection(conn,&owner,&binding.project,task_id,None)?;
-    let record_json: String = conn.query_row("SELECT record_json FROM wc_team_cli_attempts WHERE attempt_id=?1",[&binding.requester.cli_attempt_id],|r|r.get(0)).map_err(store_error)?;
-    let attempt: crate::TeamCliAttemptRecord = serde_json::from_str(&record_json)
-        .map_err(|_| denied("agent_task_storage_invariant"))?;
-    if attempt.dispatch_state!=crate::TeamCliDispatchState::Terminal {
+    require_public_task_quiescent_on_connection(conn, &owner, &binding.project, task_id, None)?;
+    let record_json: String = conn
+        .query_row(
+            "SELECT record_json FROM wc_team_cli_attempts WHERE attempt_id=?1",
+            [&binding.requester.cli_attempt_id],
+            |r| r.get(0),
+        )
+        .map_err(store_error)?;
+    let attempt: crate::TeamCliAttemptRecord =
+        serde_json::from_str(&record_json).map_err(|_| denied("agent_task_storage_invariant"))?;
+    if attempt.dispatch_state != crate::TeamCliDispatchState::Terminal {
         return Err(denied("public_task_execution_observation_required"));
     }
-    if outcome==AgentTaskState::Succeeded
-        && (attempt.execution_state!=Some(webcodex_core::runner_protocol::ShellCommandExecutionState::Completed)
-            || attempt.error_code.is_some()) {
+    if outcome == AgentTaskState::Succeeded
+        && (attempt.execution_state
+            != Some(webcodex_core::runner_protocol::ShellCommandExecutionState::Completed)
+            || attempt.error_code.is_some())
+    {
         return Err(denied("public_task_success_not_proven"));
     }
     // CliWorker is not a plan member and has zero delegation budget. Do not
@@ -240,9 +285,15 @@ pub(crate) fn complete_cli_worker_task_on_connection(
     conn.execute("UPDATE wc_agent_public_executions SET state=?2,revision=revision+1,terminal_at_unix_ms=?3,completed_run_id=?4,completed_generation=?5,terminal_result=?6,terminal_reason=?7,completion_key_hash=?8,completion_request_hash=?9 WHERE task_id=?1",params![task_id,outcome.as_str(),now,executor.run.agent_run_id,executor.run.generation,result,reason,key,hash]).map_err(store_error)?;
     conn.execute("UPDATE wc_agent_tasks SET state=?2,terminal_attempt_id=?3,terminal_at_unix_ms=?4,updated_at_unix_ms=MAX(updated_at_unix_ms,?4) WHERE task_id=?1",params![task_id,outcome.as_str(),execution.execution_id,now]).map_err(store_error)?;
     conn.execute("INSERT INTO wc_agent_isolation_audit(event_id,agent_id,run_id,action,code,created_at_unix_ms) VALUES(?1,?2,?3,'complete_cli_worker_task','ok',?4)",params![uuid::Uuid::new_v4().to_string(),executor.run.agent_id,executor.run.agent_run_id,now]).map_err(store_error)?;
-    let task=load_owned_task(conn,&principal,task_id,now)?.summary(now);
-    let execution=public_execution_on_connection(conn,task_id)?.ok_or_else(||denied("public_task_execution_missing"))?;
-    Ok(AgentPublicTaskMutation{task,execution,replayed:false,state_changed:true})
+    let task = load_owned_task(conn, &principal, task_id, now)?.summary(now);
+    let execution = public_execution_on_connection(conn, task_id)?
+        .ok_or_else(|| denied("public_task_execution_missing"))?;
+    Ok(AgentPublicTaskMutation {
+        task,
+        execution,
+        replayed: false,
+        state_changed: true,
+    })
 }
 
 impl Database {
@@ -258,19 +309,27 @@ impl Database {
             "SELECT a.owner_user FROM wc_isolated_agents a JOIN wc_agent_enrollments e ON e.agent_id=a.agent_id WHERE a.agent_id=?1 AND a.project=?2 AND e.enrollment_id=?3 AND e.task_id=?4 AND e.purpose='cli_worker'",
             params![executor.run.agent_id,binding.project,executor.enrollment_id,executor.task_id], |r|r.get(0),
         ).optional().map_err(store_error)?;
-        let owner = owner.ok_or_else(||denied("public_task_execution_conflict"))?;
+        let owner = owner.ok_or_else(|| denied("public_task_execution_conflict"))?;
         let principal = crate::agent_isolation::enrollment_principal_for_execution(&owner);
         let task = load_owned_task(&tx, &principal, &executor.task_id, now_unix_ms())?;
         if task.referenced_project_id.as_deref() != Some(binding.project.as_str()) {
             return Err(denied("public_task_not_found"));
         }
-        let Some(execution) = public_execution_on_connection(&tx,&executor.task_id)? else { return Ok(None); };
+        let Some(execution) = public_execution_on_connection(&tx, &executor.task_id)? else {
+            return Ok(None);
+        };
         if execution.agent_id != executor.run.agent_id {
             return Err(denied("public_task_execution_conflict"));
         }
-        let completion_expected_revision = execution.revision - i64::from(execution.state.terminal());
-        if completion_expected_revision < 1 { return Err(denied("agent_task_storage_invariant")); }
-        Ok(Some(AgentCliWorkerTaskSnapshot { execution, completion_expected_revision }))
+        let completion_expected_revision =
+            execution.revision - i64::from(execution.state.terminal());
+        if completion_expected_revision < 1 {
+            return Err(denied("agent_task_storage_invariant"));
+        }
+        Ok(Some(AgentCliWorkerTaskSnapshot {
+            execution,
+            completion_expected_revision,
+        }))
     }
 
     pub fn start_agent_public_task(
@@ -459,7 +518,11 @@ impl Database {
                 task_id,
             )?;
         }
-        crate::team_decision::freeze_completion(&tx, task_id, outcome == AgentTaskState::Succeeded)?;
+        crate::team_decision::freeze_completion(
+            &tx,
+            task_id,
+            outcome == AgentTaskState::Succeeded,
+        )?;
         tx.execute("UPDATE wc_agent_public_executions SET state=?2,revision=revision+1,terminal_at_unix_ms=?3,completed_run_id=?4,completed_generation=?5,terminal_result=?6,terminal_reason=?7,completion_key_hash=?8,completion_request_hash=?9 WHERE task_id=?1",params![task_id,outcome.as_str(),now,binding.run_id(),binding.generation(),result,reason,key,hash]).map_err(store_error)?;
         // The canonical Task's terminal marker is intentionally not a legacy
         // attempt: latest_attempt_id remains NULL, so no legacy lookup occurs.
@@ -497,10 +560,18 @@ impl Database {
             return Err(denied("invalid_public_task_completion"));
         }
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(store_error)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(store_error)?;
         let binding = crate::team_task::validate_agent_cli_observation_on_connection(&tx, permit)?;
         let result = complete_cli_worker_task_on_connection(
-            &tx, &binding, expected_revision, outcome, terminal_result, terminal_reason, completion_key,
+            &tx,
+            &binding,
+            expected_revision,
+            outcome,
+            terminal_result,
+            terminal_reason,
+            completion_key,
         )?;
         tx.commit().map_err(store_error)?;
         Ok(result)

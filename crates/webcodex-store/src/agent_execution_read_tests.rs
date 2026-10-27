@@ -304,6 +304,7 @@ fn cli_read_exact_retry_recovers_original_target_without_reserving_or_exposing_l
             &f.manager,
             p,
             AgentExecutionStart {
+                workspace_source: None,
                 binding: full.clone(),
                 resource_set_id: "resources".into(),
                 process,
@@ -441,6 +442,7 @@ fn cli_read_recoverable_preparation_checks_actual_store_authority_and_returns_sa
         &f.manager,
         p,
         AgentExecutionStart {
+            workspace_source: None,
             binding: full,
             resource_set_id: "resources".into(),
             process,

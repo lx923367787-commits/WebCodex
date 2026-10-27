@@ -2429,6 +2429,27 @@ impl ToolRuntime {
         changes: Vec<ApplyFileChangeInput>,
         dry_run: Option<bool>,
     ) -> ToolResult {
+        self.apply_text_edits_in_project(project, None, changes, dry_run)
+            .await
+    }
+
+    pub(crate) async fn apply_resolved_text_edits(
+        &self,
+        project: &ProjectConfig,
+        changes: Vec<ApplyFileChangeInput>,
+        dry_run: Option<bool>,
+    ) -> ToolResult {
+        self.apply_text_edits_in_project(String::new(), Some(project), changes, dry_run)
+            .await
+    }
+
+    async fn apply_text_edits_in_project(
+        &self,
+        project: String,
+        pinned: Option<&ProjectConfig>,
+        changes: Vec<ApplyFileChangeInput>,
+        dry_run: Option<bool>,
+    ) -> ToolResult {
         if changes.is_empty() {
             return apply_text_edits_preflight_rejection(
                 "changes must contain at least one file change",
@@ -2567,9 +2588,12 @@ impl ToolRuntime {
             }
         };
 
-        let proj = match self.execution().resolve_project(&project).await {
-            Ok(p) => p,
-            Err(e) => return ToolResult::err(e),
+        let proj = match pinned {
+            Some(project) => project.clone(),
+            None => match self.execution().resolve_project(&project).await {
+                Ok(p) => p,
+                Err(e) => return ToolResult::err(e),
+            },
         };
         let client_id = proj.client_id.clone();
 

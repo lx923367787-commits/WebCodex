@@ -552,6 +552,7 @@ impl ValidatedResourceProfiles {
         self.0
             .iter()
             .map(|(id, profile)| AgentExecutionResourceDescriptor {
+                project_workspace_copy: cfg!(windows),
                 resource_set_id: id.clone(),
                 manifest_hash: profile.manifest.clone(),
                 executable_identity: profile.executable_identity.clone(),
@@ -763,6 +764,8 @@ pub(crate) struct PreparedAgentResources {
     pub(crate) program: PathBuf,
     pub(crate) cwd: PathBuf,
     pub(crate) environment: BTreeMap<String, String>,
+    pub(crate) workspace_snapshot:
+        Option<webcodex_core::runner_protocol::AgentExecutionWorkspaceSnapshot>,
     args: Vec<String>,
     proxy_requested: bool,
     #[cfg(windows)]
@@ -1247,6 +1250,7 @@ mod windows {
             entrypoint,
             codebuddy_config_directory,
             descriptor: AgentExecutionResourceDescriptor {
+                project_workspace_copy: cfg!(windows),
                 resource_set_id: id.into(),
                 manifest_hash: profile.manifest.clone(),
                 executable_identity: profile.executable_identity.clone(),
@@ -1705,6 +1709,139 @@ mod windows {
         inspect(&pinned, false)?;
         verify_acl(&pinned, descriptor)?;
         Ok(pinned)
+    }
+
+    /// Copy authorized business files into the Job's writable tree. Source ACLs
+    /// are never changed, and source handles are released before launching the CLI.
+    fn copy_project_workspace(
+        source_root: &Path,
+        root: &Path,
+        directory_acl: &Descriptor,
+        file_acl: &Descriptor,
+        readonly_acl: &Descriptor,
+        pins: &mut Vec<File>,
+        timeout_secs: u64,
+    ) -> Result<webcodex_core::runner_protocol::AgentExecutionWorkspaceSnapshot, String> {
+        use webcodex_core::runner_protocol::AgentExecutionWorkspaceSnapshot;
+        const MAX_FILES: usize = 20_000;
+        const MAX_BYTES: u64 = 256 * 1024 * 1024;
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.min(60));
+        let mut source_pins = Vec::new();
+        pin_directories(source_root, &mut source_pins)?;
+        let mut pending = vec![PathBuf::new()];
+        let mut manifest = BTreeMap::<String, (String, u64)>::new();
+        let mut total = 0u64;
+        let mut entries_seen = 0usize;
+        while let Some(relative_dir) = pending.pop() {
+            if std::time::Instant::now() >= deadline || relative_dir.components().count() > 32 {
+                return Err("agent_workspace_capture_limit".into());
+            }
+            let directory = source_root.join(&relative_dir);
+            source_pins.push(open(
+                &directory,
+                true,
+                FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+            )?);
+            let entries =
+                std::fs::read_dir(&directory).map_err(|_| "agent_workspace_read_failed")?;
+            for entry in entries {
+                entries_seen += 1;
+                if entries_seen > MAX_FILES * 2 || std::time::Instant::now() >= deadline {
+                    return Err("agent_workspace_capture_limit".into());
+                }
+                let entry = entry.map_err(|_| "agent_workspace_read_failed")?;
+                let relative = relative_dir.join(entry.file_name());
+                let name = relative
+                    .to_str()
+                    .ok_or("agent_workspace_path_encoding")?
+                    .replace('\\', "/");
+                // Private runtime, credentials and generated output never become
+                // source inputs. Dependencies may be copied within the hard budget.
+                if webcodex_core::sensitive_paths::is_secret_path(&name)
+                    || name.split('/').any(|p| {
+                        matches!(
+                            p.to_ascii_lowercase().as_str(),
+                            ".local"
+                                | ".codex"
+                                | ".claude"
+                                | "target"
+                                | "dist"
+                                | "build"
+                                | "__pycache__"
+                                | ".cache"
+                        )
+                    })
+                    || name == "publish"
+                    || name.starts_with("publish/")
+                {
+                    continue;
+                }
+                let kind = entry
+                    .file_type()
+                    .map_err(|_| "agent_workspace_metadata_failed")?;
+                let destination = root.join("workspace").join(&relative);
+                if kind.is_dir() {
+                    // Opening every ancestor rejects junction/reparse substitution.
+                    source_pins.push(open(
+                        &entry.path(),
+                        true,
+                        FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    )?);
+                    create_directory(&destination, directory_acl, pins)?;
+                    pending.push(relative);
+                } else if kind.is_file() {
+                    if manifest.len() >= MAX_FILES {
+                        return Err("agent_workspace_capture_limit".into());
+                    }
+                    let mut file = open(&entry.path(), false, GENERIC_READ, FILE_SHARE_READ)?;
+                    let size = inspect(&file, false)?;
+                    total = total
+                        .checked_add(size)
+                        .ok_or("agent_workspace_capture_limit")?;
+                    if total > MAX_BYTES {
+                        return Err("agent_workspace_capture_limit".into());
+                    }
+                    let mut hasher = Sha256::new();
+                    let mut buffer = [0u8; 64 * 1024];
+                    loop {
+                        if std::time::Instant::now() >= deadline {
+                            return Err("agent_workspace_capture_limit".into());
+                        }
+                        let n = file
+                            .read(&mut buffer)
+                            .map_err(|_| "agent_workspace_read_failed")?;
+                        if n == 0 {
+                            break;
+                        }
+                        hasher.update(&buffer[..n]);
+                    }
+                    let hash = format!("{:x}", hasher.finalize());
+                    file.seek(SeekFrom::Start(0))
+                        .map_err(|_| "agent_workspace_read_failed")?;
+                    // Drop the destination pin so the CLI can edit its own copy.
+                    drop(copy_file(&mut file, &destination, &hash, file_acl)?);
+                    manifest.insert(name, (hash, size));
+                } else {
+                    return Err("agent_workspace_link_or_special_file_denied".into());
+                }
+            }
+        }
+        let bytes = serde_json::to_vec(&manifest).map_err(|_| "agent_workspace_manifest_failed")?;
+        let manifest_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        pins.push(copy_file(
+            &mut bytes.as_slice(),
+            &root.join("input/project-manifest.json"),
+            &manifest_sha256,
+            readonly_acl,
+        )?);
+        Ok(AgentExecutionWorkspaceSnapshot {
+            manifest_sha256,
+            file_count: manifest.len(),
+            total_bytes: total,
+        })
     }
 
     // Copy the one authorized native-auth file as opaque bytes. Never parse,
@@ -2281,7 +2418,33 @@ mod windows {
             copy_antigravity_auth(&root, &owner, &package, &mut pins)?;
             install_antigravity_controls(&root, &owner, &package, &mut pins)?;
         }
+        let workspace_snapshot = if let Some(source) = &start.workspace_source {
+            let writable_file = Descriptor::new(
+                &owner,
+                &package,
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+                false,
+                true,
+            )?;
+            let snapshot = copy_project_workspace(
+                Path::new(&source.root),
+                &root,
+                &rw_dir,
+                &writable_file,
+                &input_file,
+                &mut pins,
+                start.timeout_secs,
+            )?;
+            environment.insert(
+                "WEBCODEX_PROJECT_MANIFEST".into(),
+                absolute_path(&root.join("input/project-manifest.json"))?,
+            );
+            Some(snapshot)
+        } else {
+            None
+        };
         Ok(PreparedAgentResources {
+            workspace_snapshot,
             program: root.join(PROGRAM),
             cwd: root.join("workspace"),
             environment,

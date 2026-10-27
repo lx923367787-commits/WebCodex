@@ -79,6 +79,7 @@ fn base(provider: AgentCliProvider) -> Vec<String> {
 
 fn descriptor(record: &ReviewedAgentCliControls) -> AgentExecutionResourceDescriptor {
     AgentExecutionResourceDescriptor {
+        project_workspace_copy: false,
         resource_set_id: record.resource_set_id.clone(),
         manifest_hash: record.execution_manifest_sha256().unwrap(),
         executable_identity: format!("sha256:{}", record.executable_sha256),

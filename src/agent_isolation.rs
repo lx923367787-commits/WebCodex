@@ -369,7 +369,9 @@ impl ToolRuntime {
         arguments: Value,
         auth: Option<&AuthContext>,
     ) -> ToolResult {
-        if !crate::agent_team::supports_execution(name) && name != "agent_project_files" {
+        if !crate::agent_team::supports_execution(name)
+            && !crate::tool_runtime::named_project_files::supports(name)
+        {
             return self.isolated_model_call(name, arguments, auth);
         }
         let Some(db) = self.isolation_database() else {
@@ -387,8 +389,11 @@ impl ToolRuntime {
             Ok(binding) => {
                 // The execution adapter must obtain its current business/observe
                 // permit from the store. No user credential is manufactured here.
-                if name == "agent_project_files" {
-                    crate::tool_runtime::named_project_files::call(self, binding, arguments).await
+                if crate::tool_runtime::named_project_files::supports(name) {
+                    crate::tool_runtime::named_project_files::call_tool(
+                        self, binding, name, arguments,
+                    )
+                    .await
                 } else {
                     crate::agent_team_execution::call(self, binding, name, arguments).await
                 }
@@ -435,6 +440,7 @@ pub(crate) fn tool_specs() -> Value {
     let tools = payload["tools"].as_array_mut().unwrap();
     tools.extend(crate::agent_enrollment::tool_specs());
     tools.push(crate::tool_runtime::named_project_files::spec());
+    tools.extend(crate::tool_runtime::named_project_files::tool_specs());
     for spec in crate::tool_runtime::registered_tool_specs()
         .into_iter()
         .filter(|spec| crate::agent_goal_adapter::supports(&spec.name))

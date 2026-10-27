@@ -219,6 +219,7 @@ impl Fixture {
             "resource_manifest_hash":self.profiles.manifest("synthetic-profile").unwrap()
         })).unwrap();
         let start = AgentExecutionStart {
+            workspace_source: None,
             binding,
             resource_set_id: "synthetic-profile".into(),
             process,
@@ -574,6 +575,146 @@ fn agent_execution_real_resource_boundary_and_cancelled_stdin_join() {
         .unwrap();
     receipt.validate_for(&close).unwrap();
     fixture.assert_tree_receipt(&start, &receipt.receipts[0]);
+}
+
+#[test]
+#[ignore = "real Windows LPAC project-copy execution; fresh validation root/helper only"]
+fn agent_execution_real_project_workspace_reads_edits_and_validates_without_host_access() {
+    use webcodex_core::runner_protocol::{
+        compute_workspace_launch_intent_hash, AgentExecutionWorkspaceSource,
+    };
+    let fixture = Fixture::new();
+    let project = fixture._temporary.path().join("authorized-project");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/main.txt"), "source-v1").unwrap();
+    fs::write(project.join(".env"), "synthetic-secret").unwrap();
+    let canonical = crate::webcodex_runner::shell::canonicalize_existing(&project).unwrap();
+    let registry = fixture._temporary.path().join("project-registry");
+    fs::create_dir(&registry).unwrap();
+    fs::write(
+        registry.join("repo.toml"),
+        format!(
+            "id = \"repo\"\npath = {}\nallow_patch = true\n",
+            serde_json::to_string(canonical.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut start = fixture.start(
+        0,
+        vec![
+            "lpac-project-workspace".into(),
+            project.join("src/main.txt").to_str().unwrap().into(),
+            fixture.outside.to_str().unwrap().into(),
+        ],
+        None,
+    );
+    start.workspace_source = Some(AgentExecutionWorkspaceSource {
+        project: "agent:native-runner:repo".into(),
+        root: canonical.to_str().unwrap().into(),
+    });
+    start.binding.launch_intent_hash = compute_workspace_launch_intent_hash(
+        &start.process,
+        start.stdin.as_deref(),
+        start.timeout_secs,
+        start.workspace_source.as_ref(),
+    )
+    .unwrap();
+    let mut pending = fixture.pending(&start);
+    pending.project_registry_dir = registry.clone();
+    pending.policy.allowed_roots = vec![project.clone()];
+    fixture.manager.enqueue(fixture.sink.clone(), pending);
+    let workspace = fixture.workspace(&start);
+    // This scenario deliberately joins a short-lived validation child. The
+    // tree-hold fixture's active == observed readiness rule does not apply.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let snapshot = lock_unpoison(&fixture.manager.jobs)
+            .get(job_id(&start.binding).unwrap())
+            .unwrap()
+            .snapshot
+            .clone();
+        assert!(
+            !super::super::lifecycle::runner_job_is_terminal(&snapshot.status),
+            "project workspace execution failed: {snapshot:?}"
+        );
+        if workspace.join("project-ready").is_file() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "project workspace readiness: {snapshot:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(fs::read_to_string(workspace.join("project-ready"))
+        .unwrap()
+        .contains("child-validation-passed"));
+    assert!(!workspace.join(".env").exists());
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.txt")).unwrap(),
+        "source-v1"
+    );
+    let metadata = fixture
+        .configuration
+        .store
+        .read_agent_execution_metadata()
+        .unwrap();
+    assert_eq!(
+        metadata.jobs[0]
+            .workspace_snapshot
+            .as_ref()
+            .unwrap()
+            .file_count,
+        1
+    );
+    let close = fixture.close(&[start.clone()]);
+    let receipt = fixture
+        .manager
+        .close_agent_execution(&fixture.sink, &close)
+        .unwrap();
+    receipt.validate_for(&close).unwrap();
+    assert!(matches!(
+        receipt.receipts[0].outcome,
+        AgentExecutionStopOutcome::TreeExited {
+            leader_exit_code: Some(_),
+            leader_handle_signaled: true,
+            membership_complete: true,
+            member_handles_signaled: true,
+            worker_finished: true,
+        }
+    ));
+    {
+        // Current close semantics release copy handles after durable stop proof.
+        let runtime = lock_unpoison(&fixture.manager.agent_execution);
+        let custody = runtime.live.get(job_id(&start.binding).unwrap()).unwrap();
+        assert!(custody.worker_joined && custody.helpers_finished);
+        assert!(custody.resources.is_none());
+        let mut child = lock_unpoison(custody.child.as_ref().unwrap());
+        let JobChild::Isolated(native) = &mut *child else {
+            panic!("ambient process");
+        };
+        assert_eq!(native.active_processes().unwrap(), 0);
+        assert!(native
+            .observe_completed_tree(Instant::now() + Duration::from_secs(1))
+            .unwrap()
+            .is_some());
+    }
+    // A stale registered root never launches even when the project id is unchanged.
+    let mut other = start.clone();
+    other.workspace_source.as_mut().unwrap().root =
+        fixture._temporary.path().to_str().unwrap().into();
+    assert_eq!(
+        validate_workspace_source(
+            &other,
+            &RunnerPolicy {
+                allowed_roots: vec![project],
+                ..Default::default()
+            },
+            &registry
+        )
+        .unwrap_err(),
+        "agent_workspace_project_changed"
+    );
 }
 
 #[test]

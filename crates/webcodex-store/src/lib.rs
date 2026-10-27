@@ -14,7 +14,9 @@ mod native_workspaces;
 pub use native_agent_host::{
     NativeAgentHostGrant, VerifiedNativeAgentHost, NATIVE_AGENT_HOST_TOKEN_PREFIX,
 };
-pub use native_workspaces::{NativeWorkspace, NativeWorkspaceCatalog, NativeWorkspaceFolder};
+pub use native_workspaces::{
+    AgentProjectFilesGrant, NativeWorkspace, NativeWorkspaceCatalog, NativeWorkspaceFolder,
+};
 pub(crate) mod agent_cli_delivery;
 pub(crate) mod agent_execution_close;
 pub use agent_cli_delivery::{

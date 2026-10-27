@@ -200,6 +200,13 @@ pub(crate) fn try_control(
 }
 
 pub(crate) fn tool_scope(name: &str, args: &Value) -> &'static str {
+    if crate::tool_runtime::named_project_files::supports(name) {
+        return if crate::tool_runtime::named_project_files::is_write(name, args) {
+            "project:write"
+        } else {
+            "project:read"
+        };
+    }
     match name {
         "agent_identity" | "agent_assignment" | "agent_projects" | "agent_select_project" => {
             "runtime:read"
@@ -214,7 +221,9 @@ pub(crate) fn tool_scope(name: &str, args: &Value) -> &'static str {
             "project:read"
         }
         "goal_read" | "goal_bootstrap" => "project:read",
-        "team_decision" if args.get("action").and_then(Value::as_str) == Some("read") => "project:read",
+        "team_decision" if args.get("action").and_then(Value::as_str) == Some("read") => {
+            "project:read"
+        }
         "team_policy_get"
         | "team_plan_list"
         | "team_plan_read"

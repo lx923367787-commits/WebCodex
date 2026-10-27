@@ -28,6 +28,7 @@ fn job(index: usize) -> AgentExecutionJobMetadata {
     }))
     .unwrap();
     AgentExecutionJobMetadata {
+        workspace_snapshot: None,
         binding,
         resource_set_id: "resource-profile".into(),
         native_create_attempted: false,

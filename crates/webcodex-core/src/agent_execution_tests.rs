@@ -8,6 +8,7 @@ pub(crate) fn start_fixture() -> AgentExecutionStart {
     };
     let launch_intent_hash = compute_launch_intent_hash(&process, None, 30).unwrap();
     AgentExecutionStart {
+        workspace_source: None,
         binding: AgentExecutionBinding {
             version: 1,
             project: "project-a".into(),
@@ -49,6 +50,42 @@ pub(crate) fn start_fixture() -> AgentExecutionStart {
         stdin: None,
         timeout_secs: 30,
     }
+}
+
+#[test]
+fn workspace_source_is_bound_to_launch_and_exact_runner() {
+    let mut start = start_fixture();
+    let original = start.binding.launch_intent_hash.clone();
+    start.workspace_source = Some(AgentExecutionWorkspaceSource {
+        project: "agent:runner-1:repo".into(),
+        root: "C:/authorized/repo".into(),
+    });
+    assert!(start.validate().is_err());
+    start.binding.launch_intent_hash = compute_workspace_launch_intent_hash(
+        &start.process,
+        start.stdin.as_deref(),
+        start.timeout_secs,
+        start.workspace_source.as_ref(),
+    )
+    .unwrap();
+    assert_ne!(original, start.binding.launch_intent_hash);
+    start.validate().unwrap();
+    start.workspace_source.as_mut().unwrap().root = "C:/another/repo".into();
+    assert!(start.validate().is_err());
+    start.workspace_source.as_mut().unwrap().project = "agent:other:repo".into();
+    start.binding.launch_intent_hash = compute_workspace_launch_intent_hash(
+        &start.process,
+        start.stdin.as_deref(),
+        start.timeout_secs,
+        start.workspace_source.as_ref(),
+    )
+    .unwrap();
+    assert_eq!(
+        start.validate().unwrap_err(),
+        "agent_workspace_source_runner_mismatch"
+    );
+    start.workspace_source.as_mut().unwrap().root = "C:/state/agent-runtime/other/private".into();
+    assert!(start.workspace_source.as_ref().unwrap().validate().is_err());
 }
 
 pub(crate) fn close_fixture() -> AgentExecutionClose {
@@ -518,6 +555,7 @@ fn agent_execution_v1_capability_is_an_explicit_non_baseline_registration_bit() 
 #[test]
 fn agent_execution_resource_facts_are_closed_and_use_opaque_executable_identity() {
     let fact = AgentExecutionResourceDescriptor {
+        project_workspace_copy: false,
         reviewed_controls: None,
         provider: None,
         resource_set_id: "fixture".into(),

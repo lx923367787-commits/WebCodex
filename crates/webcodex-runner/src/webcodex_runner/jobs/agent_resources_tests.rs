@@ -46,6 +46,7 @@ fn start(profiles: &ValidatedResourceProfiles) -> AgentExecutionStart {
         args: vec!["--bounded-task".into()],
     };
     AgentExecutionStart {
+        workspace_source: None,
         binding: AgentExecutionBinding {
             version: 1,
             project: "project".into(),
@@ -143,7 +144,8 @@ fn descriptors_export_only_path_free_configuration_facts() {
         format!("sha256:{}", "a".repeat(64))
     );
     let exported = serde_json::to_value(&descriptors[0]).unwrap();
-    assert_eq!(exported.as_object().unwrap().len(), 3);
+    assert_eq!(exported.as_object().unwrap().len(), 4);
+    assert_eq!(exported["project_workspace_copy"], cfg!(windows));
     let encoded = serde_json::to_string(&exported).unwrap();
     for private_value in ["resource-fixture", "worker.exe", "data.json", "runtime.dll"] {
         assert!(!encoded.contains(private_value));

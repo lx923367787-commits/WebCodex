@@ -655,6 +655,7 @@ mod tests {
 
     fn resource_for(catalog: &AgentCliCatalog) -> AgentExecutionResourceDescriptor {
         AgentExecutionResourceDescriptor {
+            project_workspace_copy: false,
             resource_set_id: catalog.resource_set_id.clone(),
             manifest_hash: catalog.resource_manifest_hash.clone(),
             executable_identity: catalog.executable_identity.clone(),

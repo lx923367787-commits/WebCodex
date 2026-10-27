@@ -27,6 +27,30 @@ use webcodex_core::runner_protocol::{
 
 const RESOURCE_CLEANUP_BUDGET: Duration = Duration::from_secs(10);
 
+fn validate_workspace_source(
+    start: &AgentExecutionStart,
+    policy: &super::RunnerPolicy,
+    registry: &std::path::Path,
+) -> Result<(), String> {
+    let Some(source) = &start.workspace_source else {
+        return Ok(());
+    };
+    source.validate()?;
+    let prefix = format!("agent:{}:", start.binding.target.client_id);
+    let local_id = source
+        .project
+        .strip_prefix(&prefix)
+        .ok_or("agent_workspace_source_runner_mismatch")?;
+    let root = crate::webcodex_runner::projects::registered_project_root_for_execution(
+        registry, local_id,
+    )?;
+    if root.to_str() != Some(source.root.as_str()) {
+        return Err("agent_workspace_project_changed".into());
+    }
+    crate::webcodex_runner::shell::cwd_allowed(policy, std::path::Path::new(&source.root))
+        .map_err(|_| "agent_workspace_root_not_allowed".to_owned())
+}
+
 #[derive(Debug, Clone)]
 struct AgentExecutionConfiguration {
     profiles: ValidatedResourceProfiles,
@@ -330,6 +354,7 @@ impl JobManager {
                     return Err("agent_execution_already_recorded_reobserve".into());
                 }
                 metadata.jobs.push(AgentExecutionJobMetadata {
+                    workspace_snapshot: None,
                     binding: start.binding.clone(),
                     resource_set_id: start.resource_set_id.clone(),
                     native_create_attempted: false,
@@ -388,11 +413,19 @@ impl JobManager {
                     let manager = self.clone_for_worker();
                     let guard = self.workers.enter();
                     let worker_id = id.clone();
+                    let workspace_policy = queued.policy.clone();
+                    let workspace_registry = queued.project_registry_dir.clone();
                     match std::thread::Builder::new()
                         .name("agent-isolated-job".into())
                         .spawn(move || {
                             let _guard = guard;
-                            manager.run_isolated_job(&worker_id, start, configuration);
+                            manager.run_isolated_job(
+                                &worker_id,
+                                start,
+                                configuration,
+                                workspace_policy,
+                                workspace_registry,
+                            );
                             manager.start_available_queued();
                         }) {
                         Ok(worker) => {
@@ -419,9 +452,12 @@ impl JobManager {
         id: &str,
         start: AgentExecutionStart,
         configuration: AgentExecutionConfiguration,
+        policy: super::RunnerPolicy,
+        project_registry_dir: PathBuf,
     ) {
         #[cfg(windows)]
-        let result = self.run_isolated_job_windows(id, &start, &configuration);
+        let result = validate_workspace_source(&start, &policy, &project_registry_dir)
+            .and_then(|()| self.run_isolated_job_windows(id, &start, &configuration));
         #[cfg(not(windows))]
         let result: Result<(), String> = Err("agent_execution_platform_unavailable".into());
         if let Err(error) = result {
@@ -1135,6 +1171,20 @@ impl JobManager {
             start,
             &configuration.resource_root,
         )?;
+        configuration
+            .store
+            .update_agent_execution_metadata(|metadata| {
+                let job = metadata
+                    .jobs
+                    .iter_mut()
+                    .find(|job| job.binding == start.binding)
+                    .ok_or("agent_execution_start_not_recorded")?;
+                if job.native_create_attempted {
+                    return Err("agent_workspace_capture_after_start".into());
+                }
+                job.workspace_snapshot = prepared.workspace_snapshot.clone();
+                Ok(())
+            })?;
         let proxy_requested = prepared.proxy_requested();
         let (auth_copy_expected, _) = configuration.profiles.cleanup_requirements(start)?;
         let cleanup_required = auth_copy_expected || proxy_requested;

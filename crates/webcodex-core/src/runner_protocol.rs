@@ -3516,6 +3516,9 @@ pub struct AgentExecutionResourceDescriptor {
     pub provider: Option<crate::agent_cli::AgentCliProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed_controls: Option<crate::agent_cli_controls::ReviewedAgentCliControls>,
+    /// Runner support for a separately authorized project copy in this Job's workspace.
+    #[serde(default)]
+    pub project_workspace_copy: bool,
 }
 
 impl AgentExecutionResourceDescriptor {
@@ -3863,6 +3866,57 @@ pub fn compute_launch_intent_hash(
     )
 }
 
+/// The source reference is trusted Server/Runner routing data, never CLI argv or
+/// a model-supplied path. Its root is checked against live registration before copying.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionWorkspaceSource {
+    pub project: String,
+    pub root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionWorkspaceSnapshot {
+    pub manifest_sha256: String,
+    pub file_count: usize,
+    pub total_bytes: u64,
+}
+impl AgentExecutionWorkspaceSource {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.project.len() > 256
+            || !self.project.starts_with("agent:")
+            || self.project.chars().any(char::is_control)
+            || self.root.is_empty()
+            || self.root.len() > 4096
+            || self.root.chars().any(char::is_control)
+            || crate::sensitive_paths::is_secret_path(&self.root)
+        {
+            return Err("agent_workspace_source_invalid".into());
+        }
+        Ok(())
+    }
+}
+
+pub fn compute_workspace_launch_intent_hash(
+    process: &AgentExecutionProcess,
+    stdin: Option<&str>,
+    timeout_secs: u64,
+    workspace: Option<&AgentExecutionWorkspaceSource>,
+) -> Result<String, String> {
+    let launch = compute_launch_intent_hash(process, stdin, timeout_secs)?;
+    match workspace {
+        None => Ok(launch),
+        Some(source) => {
+            source.validate()?;
+            agent_execution_hash(
+                "webcodex.agent_execution.workspace_launch.v1",
+                &(launch, source),
+            )
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExecutionStart {
@@ -3871,6 +3925,8 @@ pub struct AgentExecutionStart {
     pub process: AgentExecutionProcess,
     pub stdin: Option<String>,
     pub timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_source: Option<AgentExecutionWorkspaceSource>,
 }
 
 /// Exact safe recovery metadata. Logical project authority stays in the
@@ -3910,6 +3966,7 @@ impl std::fmt::Debug for AgentExecutionStart {
             .field("process", &"[REDACTED]")
             .field("stdin_present", &self.stdin.is_some())
             .field("timeout_secs", &self.timeout_secs)
+            .field("workspace_source_present", &self.workspace_source.is_some())
             .finish()
     }
 }
@@ -3922,9 +3979,21 @@ impl AgentExecutionStart {
             return Err("agent_execution_start_requires_job_carrier".into());
         }
         if self.binding.launch_intent_hash
-            != compute_launch_intent_hash(&self.process, self.stdin.as_deref(), self.timeout_secs)?
+            != compute_workspace_launch_intent_hash(
+                &self.process,
+                self.stdin.as_deref(),
+                self.timeout_secs,
+                self.workspace_source.as_ref(),
+            )?
         {
             return Err("agent_execution_launch_hash_mismatch".into());
+        }
+        if self.workspace_source.as_ref().is_some_and(|source| {
+            !source
+                .project
+                .starts_with(&format!("agent:{}:", self.binding.target.client_id))
+        }) {
+            return Err("agent_workspace_source_runner_mismatch".into());
         }
         agent_execution_bytes(self).map(|_| ())
     }

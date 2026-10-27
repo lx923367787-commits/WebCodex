@@ -242,6 +242,7 @@ pub(crate) fn start(index: u32) -> AgentExecutionStart {
         args: vec!["--task".into(), "private synthetic input".into()],
     };
     AgentExecutionStart {
+        workspace_source: None,
         binding: AgentExecutionBinding {
             version: 1,
             project: "project".into(),
@@ -303,6 +304,7 @@ pub(crate) async fn reserved_start(
 pub(crate) fn resources() -> Vec<AgentExecutionResourceDescriptor> {
     (0..AGENT_EXECUTION_RESOURCE_MAX_ENTRIES)
         .map(|index| AgentExecutionResourceDescriptor {
+            project_workspace_copy: false,
             reviewed_controls: None,
             provider: None,
             resource_set_id: format!("resources-{index}"),
@@ -1195,6 +1197,7 @@ async fn agent_execution_resource_registration_is_bounded_unique_strict_and_atom
     duplicate[1] = duplicate[0].clone();
     let mut excessive = resources();
     excessive.push(AgentExecutionResourceDescriptor {
+        project_workspace_copy: false,
         resource_set_id: "extra".into(),
         ..original.clone()
     });
@@ -1234,7 +1237,8 @@ async fn agent_execution_resource_lookup_requires_exact_instance_and_access_with
         .await
         .unwrap();
     let fields = serde_json::to_value(&fact).unwrap();
-    assert_eq!(fields.as_object().unwrap().len(), 3);
+    assert_eq!(fields.as_object().unwrap().len(), 4);
+    assert_eq!(fields["project_workspace_copy"], false);
     assert!(fact.executable_identity.starts_with("sha256:"));
     let mut foreign = access();
     foreign.username = Some("other-owner".into());

@@ -136,6 +136,9 @@ pub(crate) struct AgentExecutionJobMetadata {
     pub(crate) stop_receipt: Option<AgentExecutionStopReceipt>,
     #[serde(default)]
     pub(crate) resource_cleanup: Option<AgentExecutionResourceCleanupMetadata>,
+    #[serde(default)]
+    pub(crate) workspace_snapshot:
+        Option<webcodex_core::runner_protocol::AgentExecutionWorkspaceSnapshot>,
 }
 
 /// Write-ahead resource ownership for this exact immutable job binding. Legacy

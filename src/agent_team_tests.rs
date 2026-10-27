@@ -410,6 +410,7 @@ fn member_cli_worker_cas_is_readable_by_the_exact_root_manager_with_a_fresh_perm
             &caller,
             preparation,
             AgentExecutionStart {
+                workspace_source: None,
                 binding: identity,
                 resource_set_id: "synthetic-resources".into(),
                 process,

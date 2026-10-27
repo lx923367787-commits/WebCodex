@@ -403,7 +403,9 @@ async fn agent_isolation_http_blocked_execution_never_reaches_legacy_dispatch() 
         ("checkpoint", "agent_tool_not_isolated"),
         ("cli_resume", "agent_tool_not_isolated"),
         ("export_session", "agent_tool_not_isolated"),
-        ("read_file", "agent_tool_not_isolated"),
+        // The file adapter is now admitted, but still rejects arbitrary legacy
+        // shell arguments before any project or filesystem dispatch.
+        ("read_file", "workspace_invalid_input"),
     ] {
         denied(fixture.api(token(&a), tool, arguments.clone()).await, code);
         denied(fixture.mcp(token(&a), tool, arguments.clone()).await, code);
@@ -528,6 +530,7 @@ async fn agent_isolation_http_inventory_exposes_only_broker_tools() {
                 "agent_meeting",
                 "agent_private",
                 "agent_project_files",
+                "apply_text_edits",
                 "goal_bootstrap",
                 "goal_checkpoint",
                 "goal_claim_node",
@@ -536,6 +539,9 @@ async fn agent_isolation_http_inventory_exposes_only_broker_tools() {
                 "goal_mode_start",
                 "goal_plan_save",
                 "goal_read",
+                "read_file",
+                "read_files",
+                "search_project_texts",
                 "team_agent_start",
                 "team_cli_catalog",
                 "team_cli_close",

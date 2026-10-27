@@ -70,6 +70,48 @@ fn main() {
                 .expect("write boundary readiness");
             wait_observation_release(release);
         }
+        "lpac-project-workspace" => {
+            let host_source = args.get(2).expect("host source sentinel");
+            let other_private = args.get(3).expect("other Agent sentinel");
+            assert_eq!(
+                std::fs::read_to_string("src/main.txt").unwrap(),
+                "source-v1"
+            );
+            std::fs::write("src/main.txt", "source-v2").unwrap();
+            assert!(
+                std::fs::read(host_source).is_err(),
+                "host source must remain outside the sandbox"
+            );
+            assert!(
+                std::fs::read(other_private).is_err(),
+                "other Agent private state must remain denied"
+            );
+            let manifest = std::env::var("WEBCODEX_PROJECT_MANIFEST").unwrap();
+            assert!(std::fs::read_to_string(&manifest)
+                .unwrap()
+                .contains("src/main.txt"));
+            assert!(std::fs::OpenOptions::new()
+                .write(true)
+                .open(&manifest)
+                .is_err());
+            assert!(observation_command()
+                .arg("lpac-project-verify")
+                .status()
+                .unwrap()
+                .success());
+            std::fs::write(
+                "project-ready",
+                "source-read; copy-edited; child-validation-passed; host-and-other-private-denied",
+            )
+            .unwrap();
+            wait_observation_release("release");
+        }
+        "lpac-project-verify" => {
+            assert_eq!(
+                std::fs::read_to_string("src/main.txt").unwrap(),
+                "source-v2"
+            );
+        }
         "lpac-observe-tree" => {
             let ready = args.get(2).expect("ready base");
             let release = args.get(3).expect("release file");

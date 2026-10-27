@@ -89,6 +89,7 @@ fn query() -> AgentCliCatalogQuery {
 }
 fn resource() -> AgentExecutionResourceDescriptor {
     AgentExecutionResourceDescriptor {
+        project_workspace_copy: false,
         reviewed_controls: None,
         resource_set_id: "workbuddy-resource".into(),
         manifest_hash: "b".repeat(64),

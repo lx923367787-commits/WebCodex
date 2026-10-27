@@ -135,6 +135,7 @@ fn start(preparation: &AgentCliPreparation) -> AgentExecutionStart {
     binding.launch_intent_hash = compute_launch_intent_hash(&process, None, 120).unwrap();
     binding.resource_manifest_hash = "a".repeat(64);
     AgentExecutionStart {
+        workspace_source: None,
         binding,
         resource_set_id: "resources-1".into(),
         process,

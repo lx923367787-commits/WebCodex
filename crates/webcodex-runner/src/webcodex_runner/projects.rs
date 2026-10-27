@@ -1127,6 +1127,27 @@ fn load_project_files_for_path_resolution(
     Ok(projects)
 }
 
+/// Resolve execution authority without running Git, hooks or project code.
+pub(crate) fn registered_project_root_for_execution(
+    registry: &Path,
+    project_id: &str,
+) -> Result<PathBuf, &'static str> {
+    let projects = load_project_files_for_path_resolution(registry)?;
+    let mut matches = projects.iter().filter(|project| project.id == project_id);
+    let project = matches
+        .next()
+        .ok_or("agent_workspace_project_unavailable")?;
+    if project.disabled || matches.next().is_some() {
+        return Err("agent_workspace_project_unavailable");
+    }
+    let root = canonicalize_existing(Path::new(&project.path))
+        .map_err(|_| "agent_workspace_project_unavailable")?;
+    if !root.is_dir() {
+        return Err("agent_workspace_project_unavailable");
+    }
+    Ok(root)
+}
+
 fn projects_matching_canonical_path(
     projects: &[RunnerProjectFile],
     canonical_path: &Path,

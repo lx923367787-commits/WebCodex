@@ -31,6 +31,14 @@ pub struct NativeWorkspaceCatalog {
     pub projects: Vec<NativeWorkspace>,
 }
 
+/// Business-file authority, independent of an Agent's private workspace and CLI budget.
+/// Registered projects are resolved by the Runner registry, never by a model path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentProjectFilesGrant {
+    Named(NativeWorkspace),
+    Registered { project: String },
+}
+
 fn error(code: &'static str) -> AgentIsolationError {
     AgentIsolationError::new(code)
 }
@@ -300,6 +308,17 @@ impl Database {
         binding: &VerifiedAgentRun,
         write: bool,
     ) -> Result<NativeWorkspace, AgentIsolationError> {
+        match self.agent_project_files_grant(binding, write)? {
+            AgentProjectFilesGrant::Named(workspace) => Ok(workspace),
+            AgentProjectFilesGrant::Registered { .. } => Err(error("workspace_not_authorized")),
+        }
+    }
+
+    pub fn agent_project_files_grant(
+        &self,
+        binding: &VerifiedAgentRun,
+        write: bool,
+    ) -> Result<AgentProjectFilesGrant, AgentIsolationError> {
         use crate::agent_isolation::{
             agent_run_goal_scope_on_connection, agent_run_task_goal_on_connection,
             authorize_agent_assignment_on_connection, enrollment_projection_on_connection,
@@ -323,7 +342,51 @@ impl Database {
         if let Some(goal) = agent_run_task_goal_on_connection(&conn, binding)? {
             agent_run_goal_scope_on_connection(&conn, binding, Some(&goal))?;
         }
-        native_workspace_on_connection(&conn, binding)
+        if is_native_workspace_id(binding.project()) {
+            return native_workspace_on_connection(&conn, binding)
+                .map(AgentProjectFilesGrant::Named);
+        }
+        // Legacy native chats carry an exact registered Project id. Recheck its
+        // operator grant in the authenticated host, not merely the Agent label.
+        let host: Option<String> = conn.query_row(
+            "SELECT h.host_id FROM wc_native_agent_hosts h JOIN wc_agent_host_windows w ON w.principal_key=h.principal_key WHERE w.run_id=?1 AND w.enabled=1 AND h.enabled=1",
+            [binding.run_id()], |r| r.get(0),
+        ).optional().map_err(unavailable)?;
+        let host = host.ok_or_else(|| error("workspace_host_unavailable"))?;
+        if let Some((owner, catalog)) = read_on_connection(&conn, &host)? {
+            if owner != binding.owner_user() {
+                return Err(error("workspace_not_authorized"));
+            }
+            let mut folders = catalog
+                .projects
+                .into_iter()
+                .filter(|p| p.enabled)
+                .flat_map(|p| p.folders)
+                .filter(|f| f.project == binding.project());
+            let folder = folders
+                .next()
+                .ok_or_else(|| error("workspace_not_authorized"))?;
+            if folders.any(|f| f != folder) {
+                return Err(error("workspace_ambiguous"));
+            }
+            return Ok(AgentProjectFilesGrant::Named(NativeWorkspace {
+                id: binding.project().into(),
+                name: folder.name.clone(),
+                enabled: true,
+                folders: vec![folder],
+                team_project: None,
+            }));
+        }
+        let granted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM wc_native_host_auto_enrollment e JOIN users u ON u.id=e.owner_user WHERE e.host_id=?1 AND e.owner_user=?2 AND e.project=?3 AND u.disabled=0 AND u.disabled_at IS NULL)",
+            params![host, binding.owner_user(), binding.project()], |r| r.get(0),
+        ).map_err(unavailable)?;
+        if !granted || !binding.project().starts_with("agent:") {
+            return Err(error("workspace_not_authorized"));
+        }
+        Ok(AgentProjectFilesGrant::Registered {
+            project: binding.project().into(),
+        })
     }
 }
 

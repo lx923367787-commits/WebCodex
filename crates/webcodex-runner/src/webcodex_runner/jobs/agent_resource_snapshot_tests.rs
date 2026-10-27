@@ -15,6 +15,120 @@ struct Fixture {
     publish: PathBuf,
 }
 
+fn workspace_capture_fixture() -> (
+    tempfile::TempDir,
+    ValidatedResourceProfiles,
+    AgentExecutionStart,
+    PathBuf,
+    PathBuf,
+) {
+    let base = PathBuf::from(
+        std::env::var_os("WEBCODEX_AGENT_EXECUTION_TEST_ROOT").expect("explicit validation root"),
+    );
+    let temp = tempfile::Builder::new()
+        .prefix("project-workspace-")
+        .tempdir_in(base)
+        .unwrap();
+    let executable = temp.path().join("synthetic.exe");
+    fs::write(&executable, b"never executed").unwrap();
+    let mut config = profile();
+    config.executable = executable;
+    config.executable_sha256 = sha256(b"never executed");
+    config.files.clear();
+    let profiles = validated(config);
+    let mut launch = start(&profiles);
+    launch.process.executable = format!("sha256:{}", sha256(b"never executed"));
+    let source = temp.path().join("project");
+    fs::create_dir(&source).unwrap();
+    launch.workspace_source = Some(AgentExecutionWorkspaceSource {
+        project: "agent:runner:repo".into(),
+        root: source.to_str().unwrap().into(),
+    });
+    launch.binding.launch_intent_hash = compute_workspace_launch_intent_hash(
+        &launch.process,
+        launch.stdin.as_deref(),
+        launch.timeout_secs,
+        launch.workspace_source.as_ref(),
+    )
+    .unwrap();
+    let resources = temp.path().join("resources");
+    (temp, profiles, launch, source, resources)
+}
+
+#[test]
+#[ignore = "explicit Windows filesystem snapshot validation; no CLI or account access"]
+fn project_workspace_capture_is_writable_private_and_preserves_source() {
+    let (_temp, profiles, launch, source, resources) = workspace_capture_fixture();
+    for (name, content) in [
+        ("src/main.rs", "fn main() {}"),
+        ("Cargo.toml", "[package]"),
+        ("资料/readme.txt", "reference"),
+        (".env", "private credential"),
+        ("agent-runtime/other/private/memory.txt", "other memory"),
+        ("runner-agent-resources/other/home/state.txt", "other state"),
+        ("target/generated.txt", "generated"),
+        ("publish/manifest.json", "stale delivery"),
+    ] {
+        let path = source.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    let root_pins = initialize_resource_root(&resources).unwrap();
+    let prepared = prepare(&profiles, &launch, &resources).unwrap();
+    let snapshot = prepared.workspace_snapshot.as_ref().unwrap();
+    assert_eq!(snapshot.file_count, 3);
+    assert_eq!(
+        fs::read_to_string(prepared.cwd.join("资料/readme.txt")).unwrap(),
+        "reference"
+    );
+    for excluded in [
+        ".env",
+        "agent-runtime",
+        "runner-agent-resources",
+        "target",
+        "publish",
+    ] {
+        assert!(!prepared.cwd.join(excluded).exists());
+    }
+    let manifest = fs::read(&prepared.environment["WEBCODEX_PROJECT_MANIFEST"]).unwrap();
+    assert_eq!(sha256(&manifest), snapshot.manifest_sha256);
+    assert!(!String::from_utf8(manifest)
+        .unwrap()
+        .contains("other/private"));
+    fs::write(prepared.cwd.join("src/main.rs"), "changed in task").unwrap();
+    assert_eq!(
+        fs::read_to_string(source.join("src/main.rs")).unwrap(),
+        "fn main() {}"
+    );
+    // Preparation releases host source handles; a user's later edit remains possible.
+    fs::write(source.join("src/main.rs"), "user edit").unwrap();
+    drop(prepared);
+    drop(root_pins);
+}
+
+#[test]
+#[ignore = "explicit Windows filesystem links and snapshot limit validation"]
+fn project_workspace_capture_rejects_links_and_oversized_inputs() {
+    for kind in ["hardlink", "symlink", "oversized"] {
+        let (temp, profiles, launch, source, resources) = workspace_capture_fixture();
+        let outside = temp.path().join("outside.txt");
+        fs::write(&outside, "outside").unwrap();
+        let input = source.join("input.txt");
+        match kind {
+            "hardlink" => fs::hard_link(&outside, &input).unwrap(),
+            "symlink" => symlink_file(&outside, &input).unwrap(),
+            _ => fs::File::create(&input)
+                .unwrap()
+                .set_len(256 * 1024 * 1024 + 1)
+                .unwrap(),
+        }
+        let pins = initialize_resource_root(&resources).unwrap();
+        assert!(prepare(&profiles, &launch, &resources).is_err(), "{kind}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "outside");
+        drop(pins);
+    }
+}
+
 #[test]
 #[ignore = "explicit isolated Windows validation root; no provider or real auth access"]
 fn manifest_v2_computes_hashes_and_reuses_path_and_v1_checks() {

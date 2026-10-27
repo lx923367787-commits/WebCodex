@@ -105,6 +105,7 @@ fn start(fixture: &Fixture, index: usize) -> AgentExecutionStart {
     }))
     .unwrap();
     let start = AgentExecutionStart {
+        workspace_source: None,
         binding,
         resource_set_id: "resource-profile".into(),
         process,
@@ -159,6 +160,7 @@ fn cleanup_fixture(stopped: bool) -> (Fixture, AgentExecutionStart) {
         .store
         .update_agent_execution_metadata(|metadata| {
             metadata.jobs.push(AgentExecutionJobMetadata {
+                workspace_snapshot: None,
                 binding: member.binding.clone(),
                 resource_set_id: member.resource_set_id.clone(),
                 native_create_attempted: !stopped,
@@ -518,6 +520,7 @@ fn legacy_records_never_claim_proxy_or_auth_during_recovery() {
         .store
         .update_agent_execution_metadata(|metadata| {
             metadata.jobs.push(AgentExecutionJobMetadata {
+                workspace_snapshot: None,
                 binding: member.binding.clone(),
                 resource_set_id: member.resource_set_id.clone(),
                 native_create_attempted: true,

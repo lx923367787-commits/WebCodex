@@ -15,6 +15,7 @@ fn query() -> AgentCliCatalogQuery {
 }
 fn resource() -> AgentExecutionResourceDescriptor {
     AgentExecutionResourceDescriptor {
+        project_workspace_copy: false,
         resource_set_id: "fixed-profile".into(),
         manifest_hash: "a".repeat(64),
         executable_identity: format!("sha256:{}", "b".repeat(64)),

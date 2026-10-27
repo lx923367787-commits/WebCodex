@@ -290,6 +290,7 @@ impl Fixture {
                 &caller,
                 preparation,
                 AgentExecutionStart {
+                    workspace_source: None,
                     binding: binding.clone(),
                     resource_set_id: "synthetic-resources".into(),
                     process,
