@@ -107,6 +107,7 @@ describe("office policy", () => {
     const api = apiFixture();
     render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, revision: 0 } }} api={api} onSaved={vi.fn()} />);
     expect(screen.getByRole("button", { name: "保存团队策略" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "高级诊断" }));
     expect(screen.getByRole("button", { name: /验证委派计划/ })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
     await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 0, expect.objectContaining({ mode: "auto", subagents: { min: 0, max: 4 }, cli_per_agent: { min: 0, max: 2 } })));
@@ -213,6 +214,10 @@ describe("office policy", () => {
   it("validates an explicit plan against the saved revision without launching work", async () => {
     const api = apiFixture();
     render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
+    expect(screen.queryByLabelText("计划子 Agent 数量")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "高级诊断" })).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByRole("button", { name: "高级诊断" }));
+    expect(api.evaluatePlan).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("计划子 Agent 数量"), { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: /验证委派计划/ }));
     await screen.findByText("✓ 计划符合已保存策略");

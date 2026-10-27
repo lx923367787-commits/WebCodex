@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { AiOfficeApi, CliCatalog, CliProviderId, OfficePlan, OfficePlanEvaluation, OfficePolicy, OfficePolicyInput, OfficeProject, OfficeProvider } from "./types";
 
 const PROVIDERS: { id: CliProviderId; name: string; mark: string }[] = [
@@ -39,6 +39,8 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
   const [evaluating, setEvaluating] = useState(false);
   const [evaluation, setEvaluation] = useState<OfficePlanEvaluation | null>(null);
   const [evaluationError, setEvaluationError] = useState("");
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const diagnosticsId = useId();
 
   useEffect(() => {
     if (!dirty) {
@@ -147,17 +149,17 @@ export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficePr
       <div className="ao-save-bar"><div><strong>{dirty ? "有尚未保存的修改" : revision === 0 ? "首次使用请保存团队策略" : "没有待保存修改"}</strong><span>当前版本 {revision} · {project.name}</span></div><button type="button" className="ao-button ao-button-primary" disabled={saving || reloading || invalidRange || invalidBudget || (!dirty && revision > 0)} onClick={() => void save()}>{saving ? "保存中…" : "保存团队策略"}</button></div>
       {message && <p className="ao-success" role="status">{message}</p>}
       {(error || policyChangedElsewhere) && <div className="ao-policy-error" role="alert"><p>{error || "策略已在其他位置更新。当前草稿保留，请载入最新策略后再编辑。"}</p><button type="button" className="ao-button ao-button-subtle" disabled={reloading || saving} onClick={() => void reload()}>{reloading ? "载入中…" : "载入最新策略（替换草稿）"}</button></div>}
-    </div>
-    <aside className="ao-policy-aside">
-      <section className="ao-policy-summary"><span className="ao-small-kicker">YOUR TEAM, YOUR RULES</span><h3>你定方向。<br />总经理来组织。</h3><p>简单任务，一个 AI 就够了；复杂项目，再把合适的工作交给合适的成员。</p><div className="ao-summary-tree"><span>你 · 大老板</span><i /><strong>总经理 Agent</strong><i /><div><span>子 Agent</span><span>CLI 工具</span></div></div><p className="ao-policy-boundary">这些规则仅约束经 Server 登记的当前项目团队计划。上限在冻结计划和占用调用预算时限制；自定义下限在标记成功时按已核实派发与调用证据检查。现有任务不会自动重排。</p></section>
-      <section className="ao-card ao-plan-card"><span className="ao-small-kicker">PLAN CHECK</span><h3>试一下这套分工</h3><p className="ao-muted">使用已保存的策略验证计划，不执行 CLI。</p><label>总任务<input aria-label="验证计划的总任务" disabled={evaluating} value={planTask} onChange={(event) => { setPlanTask(event.target.value); setEvaluation(null); }} /></label><div className="ao-plan-counts"><label>子 Agent 数量<input type="number" aria-label="计划子 Agent 数量" disabled={evaluating} min={0} max={32} value={planAgents} onChange={(event) => { setPlanAgents(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label><label>每位 CLI 次数<input type="number" aria-label="计划每个 Agent CLI 次数" disabled={evaluating} min={0} max={32} value={planCliCalls} onChange={(event) => { setPlanCliCalls(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label></div>
-        {planCliCalls > 0 && <div className="ao-plan-cli"><label>CLI 工具<select aria-label="验证计划 CLI 工具" value={planProvider} onChange={(event) => { setPlanProvider(event.target.value as CliProviderId); setPlanModel(""); setPlanEffort(""); setEvaluation(null); }}><option value="workbuddy">WorkBuddy</option><option value="antigravity">Antigravity</option></select></label><label>实际调用模型<select aria-label="验证计划模型" value={planModel} onChange={(event) => { setPlanModel(event.target.value); setEvaluation(null); }}><option value="">先刷新并选择模型</option>{planCatalog?.models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>{Boolean(planCatalog?.efforts.length) && <label>实际调用强度<select aria-label="验证计划思考强度" value={planEffort} onChange={(event) => { setPlanEffort(event.target.value); setEvaluation(null); }}><option value="">请选择</option>{planCatalog?.efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label>}</div>}
+      <section className="ao-advanced-diagnostics">
+        <button type="button" className="ao-advanced-toggle" aria-expanded={diagnosticsOpen} aria-controls={diagnosticsId} onClick={() => setDiagnosticsOpen((open) => !open)}><span>高级诊断</span><span aria-hidden="true">{diagnosticsOpen ? "收起 −" : "展开 +"}</span></button>
+        {diagnosticsOpen && <div id={diagnosticsId} className="ao-plan-card"><h3>假设计划校验</h3><p className="ao-muted">仅检查下面的假设计划是否符合已保存策略，不修改设置或启动任务。</p><label>假设的总任务<input aria-label="验证计划的总任务" disabled={evaluating} value={planTask} onChange={(event) => { setPlanTask(event.target.value); setEvaluation(null); }} /></label><div className="ao-plan-counts"><label>假设的子 Agent 人数<input type="number" aria-label="计划子 Agent 数量" disabled={evaluating} min={0} max={32} value={planAgents} onChange={(event) => { setPlanAgents(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label><label>假设的每人 CLI 次数<input type="number" aria-label="计划每个 Agent CLI 次数" disabled={evaluating} min={0} max={32} value={planCliCalls} onChange={(event) => { setPlanCliCalls(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label></div>
+        {planCliCalls > 0 && <div className="ao-plan-cli"><label>假设的 CLI 工具<select aria-label="验证计划 CLI 工具" value={planProvider} onChange={(event) => { setPlanProvider(event.target.value as CliProviderId); setPlanModel(""); setPlanEffort(""); setEvaluation(null); }}><option value="workbuddy">WorkBuddy</option><option value="antigravity">Antigravity</option></select></label><label>假设的调用模型<select aria-label="验证计划模型" value={planModel} onChange={(event) => { setPlanModel(event.target.value); setEvaluation(null); }}><option value="">先刷新并选择模型</option>{planCatalog?.models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>{Boolean(planCatalog?.efforts.length) && <label>假设的思考强度<select aria-label="验证计划思考强度" value={planEffort} onChange={(event) => { setPlanEffort(event.target.value); setEvaluation(null); }}><option value="">请选择</option>{planCatalog?.efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label>}</div>}
         <button type="button" className="ao-button ao-button-primary" onClick={() => void evaluate()} disabled={evaluating || dirty || revision === 0 || !planTask.trim() || (planCliCalls > 0 && (!planModel || (Boolean(planCatalog?.efforts.length) && !planEffort)))}>{evaluating ? "验证中…" : "验证委派计划"}<span>↗</span></button>
-        {(dirty || revision === 0) && <p className="ao-inline-note">先保存策略，再验证委派计划。</p>}
-        {evaluation && <div className={`ao-evaluation ${evaluation.admitted ? "is-admitted" : "is-rejected"}`} role="status"><strong>{evaluation.admitted ? "✓ 计划符合已保存策略" : "计划未通过策略检查"}</strong><span>{evaluation.subagent_count} 位子 Agent · {evaluation.cli_call_count} 次 CLI · 策略 v{evaluation.policy_revision}</span>{evaluation.violations.length > 0 && <ul>{evaluation.violations.map((violation, index) => <li key={`${violation.code}-${index}`}>{violation.agent_id ? `${violation.agent_id}：` : ""}{violation.message}</li>)}</ul>}<small>仅验证，没有启动 Agent 或 CLI 进程。</small><small>计划通过不代表实际执行下限已满足，成功状态仍需 Server 核实执行证据。</small></div>}
+        {(dirty || revision === 0) && <p className="ao-inline-note">诊断使用已保存的策略，请先保存上方设置。</p>}
+        {evaluation && <div className={`ao-evaluation ${evaluation.admitted ? "is-admitted" : "is-rejected"}`} role="status"><strong>{evaluation.admitted ? "✓ 计划符合已保存策略" : "计划未通过策略检查"}</strong><span>{evaluation.subagent_count} 位子 Agent · {evaluation.cli_call_count} 次 CLI · 策略 v{evaluation.policy_revision}</span>{evaluation.violations.length > 0 && <ul>{evaluation.violations.map((violation, index) => <li key={`${violation.code}-${index}`}>{violation.agent_id ? `${violation.agent_id}：` : ""}{violation.message}</li>)}</ul>}<small>仅验证，没有启动 Agent 或 CLI 进程。</small></div>}
         {evaluationError && <p className="ao-error" role="alert">{evaluationError}</p>}
+        </div>}
       </section>
-    </aside>
+    </div>
   </div>;
 }
 
