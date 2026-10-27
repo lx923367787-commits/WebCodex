@@ -11,7 +11,7 @@ const snapshot: OfficeSnapshot = {
 
 describe("Project team settings loading", () => {
   it("identifies cached policy as unconfirmed and retains server limitations", async () => {
-    const api: AiOfficeApi = { snapshot: vi.fn().mockResolvedValue({ ...snapshot, limitations: ["Server 策略读取失败，显示旧缓存。"] }), savePolicy: vi.fn(), refreshCli: vi.fn(), evaluatePlan: vi.fn() };
+    const api: AiOfficeApi = { snapshot: vi.fn().mockResolvedValue({ ...snapshot, limitations: ["Server 策略读取失败，显示旧缓存。"] }), savePolicy: vi.fn(), discoverCli: vi.fn().mockResolvedValue([]), refreshCli: vi.fn(), evaluatePlan: vi.fn() };
     render(<ProjectTeamSettings project={project} api={api} onBack={vi.fn()} />);
     expect(await screen.findByText("当前策略尚未获 Server 确认")).toBeInTheDocument();
     expect(screen.getByText("Server 策略读取失败，显示旧缓存。")).toBeInTheDocument();
@@ -23,7 +23,7 @@ describe("Project team settings loading", () => {
     let finishRead!: (value: OfficeSnapshot) => void;
     const api: AiOfficeApi = {
       snapshot: vi.fn<AiOfficeApi["snapshot"]>().mockResolvedValueOnce(snapshot).mockImplementationOnce(() => new Promise((resolve) => { finishRead = resolve; })),
-      savePolicy: vi.fn<AiOfficeApi["savePolicy"]>(async (_id, revision, policy) => ({ ...policy, revision: revision + 1 })), refreshCli: vi.fn(), evaluatePlan: vi.fn(),
+      savePolicy: vi.fn<AiOfficeApi["savePolicy"]>(async (_id, revision, policy) => ({ ...policy, revision: revision + 1 })), discoverCli: vi.fn().mockResolvedValue([]), refreshCli: vi.fn(), evaluatePlan: vi.fn(),
     };
     render(<ProjectTeamSettings project={project} api={api} onBack={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /我来设定边界/ }));
@@ -39,7 +39,7 @@ describe("Project team settings loading", () => {
   it("does not overwrite a saved revision with an older cached observation", async () => {
     const api: AiOfficeApi = {
       snapshot: vi.fn().mockResolvedValue(snapshot),
-      savePolicy: vi.fn<AiOfficeApi["savePolicy"]>(async (_id, revision, policy) => ({ ...policy, revision: revision + 1 })), refreshCli: vi.fn(), evaluatePlan: vi.fn(),
+      savePolicy: vi.fn<AiOfficeApi["savePolicy"]>(async (_id, revision, policy) => ({ ...policy, revision: revision + 1 })), discoverCli: vi.fn().mockResolvedValue([]), refreshCli: vi.fn(), evaluatePlan: vi.fn(),
     };
     render(<ProjectTeamSettings project={project} api={api} onBack={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /我来设定边界/ }));
@@ -51,7 +51,7 @@ describe("Project team settings loading", () => {
   });
 
   it("keeps demonstration policies explicitly separate from server enforcement", async () => {
-    const api: AiOfficeApi = { snapshot: vi.fn().mockResolvedValue({ ...snapshot, source: "demo" }), savePolicy: vi.fn(), refreshCli: vi.fn(), evaluatePlan: vi.fn() };
+    const api: AiOfficeApi = { snapshot: vi.fn().mockResolvedValue({ ...snapshot, source: "demo" }), savePolicy: vi.fn(), discoverCli: vi.fn().mockResolvedValue([]), refreshCli: vi.fn(), evaluatePlan: vi.fn() };
     render(<ProjectTeamSettings project={project} api={api} onBack={vi.fn()} />);
     expect(await screen.findByText("演示策略 · 不约束真实任务")).toBeInTheDocument();
     expect(screen.queryByText(/Server 已确认当前项目策略/)).not.toBeInTheDocument();
@@ -62,7 +62,7 @@ describe("Project team settings loading", () => {
     const nextProject = { id: "project-gamma", name: "Gamma", path: "C:/work/Gamma" };
     const api: AiOfficeApi = {
       snapshot: vi.fn<AiOfficeApi["snapshot"]>(async (id) => id === project.id ? snapshot : { ...snapshot, enforcement: "managed_tasks", projects: [{ ...snapshot.projects[0], ...nextProject, policy: { ...snapshot.projects[0].policy, revision: 9 } }] }),
-      savePolicy: vi.fn<AiOfficeApi["savePolicy"]>(() => new Promise((resolve) => { finishSave = resolve; })), refreshCli: vi.fn(), evaluatePlan: vi.fn(),
+      savePolicy: vi.fn<AiOfficeApi["savePolicy"]>(() => new Promise((resolve) => { finishSave = resolve; })), discoverCli: vi.fn().mockResolvedValue([]), refreshCli: vi.fn(), evaluatePlan: vi.fn(),
     };
     const { rerender } = render(<ProjectTeamSettings project={project} api={api} onBack={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /我来设定边界/ }));
@@ -76,7 +76,7 @@ describe("Project team settings loading", () => {
   });
 
   it("keeps the folder context and allows retry after a load failure", async () => {
-    const api: AiOfficeApi = { snapshot: vi.fn().mockRejectedValueOnce(new Error("连接暂时不可用")).mockResolvedValue(snapshot), savePolicy: vi.fn(), refreshCli: vi.fn(), evaluatePlan: vi.fn() };
+    const api: AiOfficeApi = { snapshot: vi.fn().mockRejectedValueOnce(new Error("连接暂时不可用")).mockResolvedValue(snapshot), savePolicy: vi.fn(), discoverCli: vi.fn().mockResolvedValue([]), refreshCli: vi.fn(), evaluatePlan: vi.fn() };
     const onBack = vi.fn();
     render(<ProjectTeamSettings project={project} api={api} onBack={onBack} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("连接暂时不可用");
@@ -89,7 +89,7 @@ describe("Project team settings loading", () => {
   });
 
   it("does not substitute another project's policy when the requested id disappeared", async () => {
-    const api: AiOfficeApi = { snapshot: vi.fn().mockResolvedValue({ ...snapshot, projects: [{ ...snapshot.projects[0], id: "other-project" }] }), savePolicy: vi.fn(), refreshCli: vi.fn(), evaluatePlan: vi.fn() };
+    const api: AiOfficeApi = { snapshot: vi.fn().mockResolvedValue({ ...snapshot, projects: [{ ...snapshot.projects[0], id: "other-project" }] }), savePolicy: vi.fn(), discoverCli: vi.fn().mockResolvedValue([]), refreshCli: vi.fn(), evaluatePlan: vi.fn() };
     render(<ProjectTeamSettings project={project} api={api} onBack={vi.fn()} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("登记信息已变化");
     expect(screen.queryByRole("button", { name: "保存团队策略" })).not.toBeInTheDocument();

@@ -10,6 +10,8 @@ pub mod artifact_policy;
 pub mod audit_preview;
 pub mod authority;
 pub mod build_info;
+pub mod cli_adapter;
+pub mod cli_result;
 pub mod cli_fallback;
 pub mod coding_agent;
 pub mod goal;

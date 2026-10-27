@@ -181,6 +181,7 @@ pub(crate) fn supports_execution(tool: &str) -> bool {
         || matches!(
             tool,
             "team_cli_start"
+                | "cli"
                 | "team_cli_observe"
                 | "team_cli_close"
                 | "team_cli_catalog"

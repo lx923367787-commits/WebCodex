@@ -40,6 +40,7 @@ export const aiOfficeApi: AiOfficeApi = {
   team: teamRequest,
   snapshot: (projectId) => invoke("get_ai_office_snapshot", { request: { projectId: projectId ?? null } }),
   savePolicy: (projectId, expectedRevision, policy) => invoke("save_ai_office_policy", { request: { projectId, expectedRevision, policy } }),
+  discoverCli: () => invoke("discover_ai_office_clis"),
   refreshCli: (providerId) => invoke("refresh_ai_office_cli", { providerId }),
   evaluatePlan: (projectId, expectedRevision, plan) => invoke("evaluate_ai_office_plan", { request: { projectId, expectedRevision, plan } }),
 };
@@ -90,6 +91,7 @@ export const aiOfficeDemoApi: AiOfficeApi = {
     return snapshot;
   },
   savePolicy: (projectId, expectedRevision, policy) => previewRequest({ op: "save_policy", args: { projectId, expectedRevision, policy } }),
+  discoverCli: () => previewRequest({ op: "discover_cli" }),
   refreshCli: (providerId) => previewRequest({ op: "refresh_cli", providerId }),
   evaluatePlan: (projectId, expectedRevision, plan) => previewRequest({ op: "evaluate_plan", args: { projectId, expectedRevision, plan } }),
 };

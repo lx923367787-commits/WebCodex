@@ -39,6 +39,7 @@ fn agent(id: &str, cli_calls: Vec<OfficeCliCall>) -> OfficeAgentPlan {
 
 fn custom_policy() -> OfficePolicy {
     let mut settings = OfficePolicyInput::default();
+    settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| ProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
     settings.mode = PolicyMode::Custom;
     settings.subagents = CountRange { min: 1, max: 2 };
     settings.cli_per_agent = CountRange { min: 1, max: 2 };
@@ -231,7 +232,7 @@ fn invalid_policy_ranges_and_duplicate_provider_ids_fail_before_save() {
     policy.subagents.min = 10;
     assert!(validate_policy(&policy).is_err());
     policy = OfficePolicyInput::default();
-    policy.providers[1].provider_id = "workbuddy".into();
+    policy.providers = vec![ProviderPreference { provider_id:"duplicate".into(), enabled:true, model:None, effort:None }; 2];
     assert!(validate_policy(&policy).is_err());
     policy = OfficePolicyInput::default();
     policy.cli_per_agent.max = 32;
@@ -243,6 +244,7 @@ fn invalid_policy_ranges_and_duplicate_provider_ids_fail_before_save() {
 #[test]
 fn minimum_cli_budget_includes_manager_and_accepts_feasible_maxima() {
     let mut policy = OfficePolicyInput::default();
+    policy.providers = vec![ProviderPreference { provider_id:"workbuddy".into(), enabled:true, model:None, effort:None }];
     policy.mode = PolicyMode::Custom;
     policy.subagents = CountRange { min: 16, max: 32 };
     policy.cli_per_agent = CountRange { min: 2, max: 32 };

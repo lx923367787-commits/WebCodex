@@ -60,15 +60,7 @@ impl Default for TeamPolicyInput {
             mode: TeamPolicyMode::Auto,
             subagents: TeamCountRange { min: 0, max: 4 },
             cli_per_agent: TeamCountRange { min: 0, max: 2 },
-            providers: ["workbuddy", "antigravity"]
-                .into_iter()
-                .map(|id| TeamProviderPreference {
-                    provider_id: id.into(),
-                    enabled: true,
-                    model: None,
-                    effort: None,
-                })
-                .collect(),
+            providers: Vec::new(),
         }
     }
 }
@@ -304,7 +296,7 @@ fn project_id(value: &str) -> Result<()> {
     }
 }
 fn provider(value: &str) -> bool {
-    matches!(value, "workbuddy" | "antigravity")
+    webcodex_core::cli_adapter::valid_cli_id(value)
 }
 fn task_id(value: &str) -> Result<()> {
     validate_id(value, AGENT_TASK_ID_PREFIX, "invalid_agent_task_id")
@@ -328,7 +320,7 @@ fn validate_policy(settings: &TeamPolicyInput) -> Result<()> {
         ));
     }
     let mut ids = BTreeSet::new();
-    if settings.providers.len() > 2
+    if settings.providers.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS
         || settings.providers.iter().any(|p| {
             !provider(&p.provider_id)
                 || !ids.insert(&p.provider_id)

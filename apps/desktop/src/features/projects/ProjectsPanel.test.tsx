@@ -33,7 +33,7 @@ function officeFixture(registered = projects): AiOfficeApi {
   return {
     snapshot: vi.fn(async () => snapshot),
     savePolicy: vi.fn(async (_project, revision, input) => ({ ...input, revision: revision + 1 })),
-    refreshCli: vi.fn(), evaluatePlan: vi.fn(),
+    discoverCli: vi.fn().mockResolvedValue([]), refreshCli: vi.fn(), evaluatePlan: vi.fn(),
   };
 }
 

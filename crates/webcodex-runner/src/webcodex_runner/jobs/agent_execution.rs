@@ -135,6 +135,12 @@ fn execution_identity_collides(
 }
 
 impl JobManager {
+    pub(crate) fn agent_cli_inventory(&self, sink: &RunnerSink, query: &webcodex_core::agent_cli::AgentCliInventoryQuery) -> Result<webcodex_core::agent_cli::AgentCliInventory, String> {
+        let adapters: Vec<_> = lock_unpoison(&self.agent_execution).configuration.as_ref()
+            .map(|configuration| configuration.profiles.descriptors().into_iter()
+                .filter_map(|resource| resource.reviewed_controls?.adapter).collect()).unwrap_or_default();
+        crate::webcodex_runner::agent_cli::discover_inventory(sink, query, &adapters)
+    }
     pub(crate) fn agent_cli_catalog(
         &self,
         sink: &RunnerSink,
@@ -1186,6 +1192,7 @@ impl JobManager {
                 Ok(())
             })?;
         let proxy_requested = prepared.proxy_requested();
+        let result_verifier = std::cell::RefCell::new(webcodex_core::cli_result::CliResultVerifier::new(prepared.result_contract().cloned()));
         let (auth_copy_expected, _) = configuration.profiles.cleanup_requirements(start)?;
         let cleanup_required = auth_copy_expected || proxy_requested;
         let (child, stdin, stdout, stderr, stop_requested) = {
@@ -1333,6 +1340,7 @@ impl JobManager {
                     break;
                 };
                 let text = String::from_utf8_lossy(&bytes).into_owned();
+                if stdout { result_verifier.borrow_mut().observe_stdout(&bytes); }
                 self.update_and_send(
                     id,
                     RunnerJobDelta {
@@ -1438,6 +1446,9 @@ impl JobManager {
         };
         let uncertain =
             observation_failed || helper_error || !helpers_finished || cleanup_error.is_some();
+        let cli_result_error = if !uncertain && !timed_out && !stop_requested.load(Ordering::SeqCst) && exit_code == Some(0) {
+            result_verifier.borrow().finish().err().map(str::to_owned)
+        } else { None };
         self.update_and_send(
             id,
             RunnerJobDelta {
@@ -1447,7 +1458,7 @@ impl JobManager {
                     "timeout"
                 } else if stop_requested.load(Ordering::SeqCst) {
                     "stopped"
-                } else if exit_code == Some(0) {
+                } else if exit_code == Some(0) && cli_result_error.is_none() {
                     "completed"
                 } else {
                     "failed"
@@ -1456,7 +1467,8 @@ impl JobManager {
                 exit_code: exit_code.map(|code| code as i32),
                 duration_ms: Some(began.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
                 error: cleanup_error
-                    .or_else(|| uncertain.then(|| "agent_execution_completion_unknown".into())),
+                    .or_else(|| uncertain.then(|| "agent_execution_completion_unknown".into()))
+                    .or(cli_result_error),
                 command_execution_state: Some(if uncertain {
                     ShellCommandExecutionState::OutcomeUnknown
                 } else if timed_out {

@@ -1,4 +1,13 @@
-export type CliProviderId = "workbuddy" | "antigravity";
+export type CliProviderId = string;
+export interface CliInstallation {
+  providerId: CliProviderId;
+  label: string;
+  installed: boolean;
+  native: boolean;
+  adapterAvailable: boolean;
+  status: string;
+  message: string;
+}
 export type TeamAction = "policy-get" | "policy-save" | "plan-list" | "plan-read" | "task-create";
 export type OfficeEnforcement = "demo_plan_only" | "managed_tasks";
 export interface CountRange { min: number; max: number }
@@ -73,6 +82,7 @@ export interface AiOfficeApi {
   team?(action: TeamAction, params: Record<string, unknown>): Promise<unknown>;
   snapshot(projectId?: string): Promise<OfficeSnapshot>;
   savePolicy(projectId: string, expectedRevision: number, policy: OfficePolicyInput): Promise<OfficePolicy>;
+  discoverCli(): Promise<CliInstallation[]>;
   refreshCli(providerId: CliProviderId): Promise<CliCatalog>;
   evaluatePlan(projectId: string, expectedRevision: number, plan: OfficePlan): Promise<OfficePlanEvaluation>;
 }

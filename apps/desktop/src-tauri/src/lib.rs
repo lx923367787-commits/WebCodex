@@ -27,6 +27,12 @@ pub async fn ai_office_preview_request(
     request: serde_json::Value,
 ) -> serde_json::Value {
     use serde_json::json;
+    if request["op"] == "discover_cli" {
+        return match cli_catalog::discover_ai_office_clis() {
+            Ok(installed) => json!({"success":true,"output":installed}),
+            Err(error) => json!({"success":false,"error":error}),
+        };
+    }
     if request["op"] == "refresh_cli" {
         return match cli_catalog::refresh_ai_office_cli(
             request["providerId"].as_str().unwrap_or_default().into(),
@@ -129,7 +135,7 @@ pub fn run() {
                                 topology.experience == models::Experience::Full
                                     && matches!(topology.server, models::ServerTopology::Local)
                             })
-                            && next.readiness.runtime_ready
+                            && next.readiness.services_ready()
                             && next.openai_tunnel_configured
                             && next.regular_tunnel.is_none()
                         {
@@ -158,6 +164,7 @@ pub fn run() {
             ai_office_commands::evaluate_ai_office_plan,
             ai_office_commands::ai_office_team_call,
             cli_catalog::refresh_ai_office_cli,
+            cli_catalog::discover_ai_office_clis,
             commands::get_desktop_state,
             commands::open_powershell_install_guide,
             commands::get_launch_at_login,

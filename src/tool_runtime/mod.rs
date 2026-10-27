@@ -13,7 +13,9 @@ mod cli_fallback;
 pub(crate) use cli_fallback::failure_reason as agent_cli_failure_reason;
 pub(crate) use jobs::is_terminal_job_status as agent_cli_job_terminal;
 pub(crate) use process::classify_process_failure as agent_cli_process_failure;
-pub(crate) use team_task::{fixed_cli_process, structured_failure_code};
+pub(crate) use team_task::{cli_process_with_adapter, structured_failure_code};
+#[cfg(test)]
+pub(crate) use team_task::fixed_cli_process;
 mod coding_agent;
 mod coding_task;
 mod coding_task_tools;

@@ -4,7 +4,9 @@
 //! CLI metadata comes only from D's fixed exact-Runner/resource query. Metadata
 //! cannot prove account entitlement or authorize nested execution.
 
-use crate::agent_team_execution::{AgentTeamAssets, AgentTeamCatalog, ObservedCliProvider};
+use crate::agent_team_execution::{
+    AgentTeamAssets, AgentTeamCatalog, AssetFuture, ObservedCliProvider, UnavailableCliProvider,
+};
 use crate::Database;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -96,7 +98,7 @@ impl RunnerAgentTeamAssets {
             .get_runner_semantic_view_checked_for_auth(client_id, Some(access))
             .await
             .map_err(|_| "agent_team_catalog_runner_unavailable")?;
-        if !runner.view.connected || !runner.view.capabilities.native_tool_plugins {
+        if !runner.view.connected {
             return Err("agent_team_catalog_runner_unavailable".into());
         }
         if let Some(folder) = &folder {
@@ -214,7 +216,7 @@ impl RunnerAgentTeamAssets {
         &self,
         caller: &VerifiedAgentRun,
         scope: &CatalogScope,
-    ) -> Result<Vec<ReadyCliCatalog>, String> {
+    ) -> Result<(Vec<ReadyCliCatalog>, Vec<UnavailableCliProvider>), String> {
         let started = Instant::now();
         let deadline = started
             + Duration::from_secs(AGENT_CLI_CONTROL_TIMEOUT_SECS)
@@ -230,33 +232,37 @@ impl RunnerAgentTeamAssets {
         .map_err(|_| "agent_team_catalog_timeout")??;
         // D owns each query's absolute deadline and cleanup. Do not wrap these
         // futures in a shorter timeout or drop one because the other failed.
-        let (workbuddy, antigravity) = tokio::join!(
-            self.registry.query_agent_cli_catalog(
-                &scope.access,
-                &scope.target,
-                AgentCliProvider::WorkBuddy,
-                format!("agent:{}:catalog", caller.agent_id()),
-            ),
-            self.registry.query_agent_cli_catalog(
-                &scope.access,
-                &scope.target,
-                AgentCliProvider::Antigravity,
-                format!("agent:{}:catalog", caller.agent_id()),
-            ),
-        );
-        // The same current run, owner and exact Runner must still hold before
-        // either response is consumed, including an unavailable/error result.
-        timeout_at(deadline, self.validate_scope(caller, scope))
-            .await
-            .map_err(|_| "agent_team_catalog_timeout")??;
-        let mut catalogs = Vec::with_capacity(2);
-        for (expected_provider, result) in [
-            (AgentCliProvider::WorkBuddy, workbuddy),
-            (AgentCliProvider::Antigravity, antigravity),
-        ] {
+        let resources = timeout_at(deadline, self.registry.list_agent_execution_resources(&scope.access, &scope.target))
+            .await.map_err(|_| "agent_team_catalog_timeout")??;
+        let providers: BTreeSet<_> = resources.iter().filter_map(|resource| resource.provider).collect();
+        let results = futures_util::future::join_all(providers.iter().map(|provider| async {
+            (*provider, self.registry.query_agent_cli_catalog(&scope.access, &scope.target, *provider, format!("agent:{}:catalog", caller.agent_id())).await)
+        })).await;
+        timeout_at(deadline, self.validate_scope(caller, scope)).await.map_err(|_| "agent_team_catalog_timeout")??;
+        let mut catalogs = Vec::with_capacity(providers.len());
+        let mut unavailable = Vec::new();
+        if providers.is_empty() {
+            let inventory = self.registry.query_agent_cli_inventory(&scope.access, &scope.target, None, format!("agent:{}:cli-discover", caller.agent_id())).await?;
+            timeout_at(deadline, self.validate_scope(caller, scope)).await.map_err(|_| "agent_team_catalog_timeout")??;
+            for installation in inventory.installations {
+                unavailable.push(cli_unavailable(AgentCliProvider::parse(&installation.provider_id)?, "agent_cli_provider_resource_unavailable"));
+            }
+        }
+        for (expected_provider, result) in results {
             // Missing/unsupported resources need not block ordinary GPT work.
             // Absence is not proof of installation status; raw errors stay private.
-            let Ok(catalog) = result else { continue };
+            let catalog = match result {
+                Ok(catalog) => catalog,
+                Err(reason) => {
+                    unavailable.push(cli_unavailable(expected_provider, &reason));
+                    continue;
+                }
+            };
+            let unavailable_status = if catalog.status == "unavailable" {
+                "agent_cli_metadata_unavailable"
+            } else {
+                "agent_cli_metadata_probe_failed"
+            };
             if let Some(mut ready) = map_cli_catalog(
                 catalog,
                 &scope.target,
@@ -283,13 +289,19 @@ impl RunnerAgentTeamAssets {
                 let Ok(resource) = resource.map_err(|_| "agent_team_catalog_timeout")? else {
                     // This provider may have been withdrawn. A current scope
                     // does not make that absence invalidate another provider.
+                    unavailable.push(cli_unavailable(
+                        expected_provider,
+                        "agent_execution_resource_unavailable",
+                    ));
                     continue;
                 };
                 bind_reviewed_controls(&mut ready.provider, resource)?;
                 catalogs.push(ready);
+            } else {
+                unavailable.push(cli_unavailable(expected_provider, unavailable_status));
             }
         }
-        Ok(catalogs)
+        Ok((catalogs, unavailable))
     }
 
     async fn read_catalog(
@@ -392,10 +404,10 @@ impl RunnerAgentTeamAssets {
         let host_catalog_ref = format!("sha256:{:x}", Sha256::digest(identity));
         // Ordinary GPT starts need only the Host's cached profile directory.
         // Do not construct or dispatch a CLI metadata query on that path.
-        let cli_catalogs = if include_cli {
+        let (cli_catalogs, unavailable_providers) = if include_cli {
             self.read_cli_catalogs(caller, &scope).await?
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let mut observed_at_ms = profiles.observed_at_ms;
         let mut expires_at_ms = profiles.expires_at_ms;
@@ -416,6 +428,7 @@ impl RunnerAgentTeamAssets {
             observed_at_ms,
             expires_at_ms,
             providers,
+            unavailable_providers,
             host_profile_ids: profiles.ids,
             host_catalog_ref,
             host_profiles_expires_at_ms: profiles.expires_at_ms,
@@ -423,7 +436,33 @@ impl RunnerAgentTeamAssets {
     }
 }
 
+fn cli_unavailable(provider: AgentCliProvider, reason: &str) -> UnavailableCliProvider {
+    let reason_code = match reason {
+        "agent_isolated_execution_unavailable" => "agent_isolated_execution_unavailable",
+        "agent_cli_provider_resource_unavailable" | "agent_execution_resource_unavailable" => {
+            "agent_cli_provider_resource_unavailable"
+        }
+        "agent_cli_provider_resource_ambiguous" => "agent_cli_provider_resource_ambiguous",
+        "agent_cli_metadata_unavailable" => "agent_cli_metadata_unavailable",
+        "agent_cli_metadata_probe_failed" => "agent_cli_metadata_probe_failed",
+        _ => "agent_cli_catalog_query_failed",
+    };
+    UnavailableCliProvider {
+        provider_id: provider.id().into(),
+        reason_code,
+    }
+}
+
 impl AgentTeamAssets for RunnerAgentTeamAssets {
+    fn inventory<'a>(&'a self, caller: &'a VerifiedAgentRun, provider: Option<AgentCliProvider>) -> AssetFuture<'a, webcodex_core::agent_cli::AgentCliInventory> {
+        Box::pin(async move {
+            let access = self.owner_access(caller)?;
+            let target = self.checked_target(caller, &access).await?;
+            let inventory = self.registry.query_agent_cli_inventory(&access, &target, provider, format!("agent:{}:cli-discover", caller.agent_id())).await?;
+            if self.checked_target(caller, &access).await? != target { return Err("agent_team_catalog_runner_changed".into()); }
+            Ok(inventory)
+        })
+    }
     fn catalog<'a>(
         &'a self,
         caller: &'a VerifiedAgentRun,
@@ -489,11 +528,7 @@ fn map_cli_catalog(
     if !bounded(&catalog.cli_version, 128)
         || !bounded(&catalog.resource_set_id, 256)
         || !is_sha256(&catalog.resource_manifest_hash)
-        || catalog.source
-            != match provider {
-                AgentCliProvider::WorkBuddy => "installed_help",
-                AgentCliProvider::Antigravity => "live_catalog",
-            }
+        || !matches!(catalog.source.as_str(), "installed_help" | "live_catalog")
         || catalog.models.is_empty()
         || !bounded_options(&catalog.models, 256, 128)
         || !bounded_options(&catalog.efforts, 32, 64)
@@ -525,7 +560,7 @@ fn bind_reviewed_controls(
 ) -> Result<(), String> {
     let mismatch = "agent_team_cli_resource_binding_mismatch";
     resource.validate().map_err(|_| mismatch)?;
-    if resource.provider.map(AgentCliProvider::id) != Some(provider.provider_id.as_str())
+    if resource.provider.as_ref().map(AgentCliProvider::id) != Some(provider.provider_id.as_str())
         || resource.resource_set_id != provider.resource_set_id
         || resource.manifest_hash != provider.resource_manifest_hash
         || resource.executable_identity != format!("sha256:{}", provider.executable_sha256)
@@ -629,6 +664,25 @@ mod tests {
         ReviewedAgentCliControls, ReviewedControlArg, ReviewedControlFile,
     };
 
+    #[test]
+    fn cli_diagnostics_preserve_only_known_codes_without_private_error_text() {
+        let unavailable = cli_unavailable(
+            AgentCliProvider::WorkBuddy,
+            "agent_isolated_execution_unavailable",
+        );
+        assert_eq!(
+            unavailable.reason_code,
+            "agent_isolated_execution_unavailable"
+        );
+        assert_eq!(unavailable.provider_id, "workbuddy");
+        let hidden = cli_unavailable(
+            AgentCliProvider::Antigravity,
+            "private path and credential-bearing provider stderr",
+        );
+        assert_eq!(hidden.reason_code, "agent_cli_catalog_query_failed");
+        assert!(!serde_json::to_string(&hidden).unwrap().contains("private"));
+    }
+
     fn cli_observed() -> AgentCliCatalog {
         AgentCliCatalog {
             version: 1,
@@ -686,6 +740,7 @@ mod tests {
             }],
             verification_evidence_sha256: "e".repeat(64),
             independent_review_sha256: "f".repeat(64),
+            adapter: None,
         };
         catalog.resource_manifest_hash = record.execution_manifest_sha256().unwrap();
         let mut resource = resource_for(&catalog);

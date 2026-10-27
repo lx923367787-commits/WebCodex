@@ -401,6 +401,13 @@ pub(crate) fn dispatch_request_with_outcome(
     let shell = &config.shell;
 
     let dispatch_result = match invocation.operation {
+        RunnerOperation::AgentCliInventory(query) => {
+            let result = super::agent_cli::bounded_json_result(
+                jobs.agent_cli_inventory(&sink, &query),
+                webcodex_core::agent_cli::AGENT_CLI_CATALOG_MAX_BYTES,
+            );
+            sink.submit_result_with_metadata(request_id, result, config, runtime).map(|_| true)
+        }
         RunnerOperation::AgentCliCatalog(query) => {
             let result = super::agent_cli::bounded_json_result(
                 jobs.agent_cli_catalog(&sink, &query),

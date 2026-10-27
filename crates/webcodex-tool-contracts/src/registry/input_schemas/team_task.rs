@@ -13,7 +13,7 @@ fn task_id() -> Value {
 }
 
 fn provider() -> Value {
-    json!({"type":"string","enum":["workbuddy","antigravity"]})
+    json!({"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z0-9][a-z0-9._-]*$","description":"CLI adapter ID returned by local discovery; selection does not authorize execution."})
 }
 
 fn optional_text(max: usize) -> Value {
@@ -32,7 +32,7 @@ pub(crate) fn team_policy_schema() -> Value {
         json!({
             "mode":{"type":"string","enum":["auto","custom"]},
             "subagents":range,"cli_per_agent":range,
-            "providers":{"type":"array","maxItems":2,"items":object(json!({
+            "providers":{"type":"array","maxItems":32,"items":object(json!({
                 "provider_id":provider(),"enabled":{"type":"boolean"},
                 "model":optional_text(256),"effort":optional_text(64)
             }), &["provider_id","enabled"])}

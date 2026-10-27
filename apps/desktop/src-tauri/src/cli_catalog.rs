@@ -1,16 +1,27 @@
 //! Desktop-only provider lookup and proxy selection. All fixed queries, bounded
 //! process ownership and parsers live in the shared process metadata helper.
 use crate::platform;
-use std::path::PathBuf;
 pub use webcodex_process::cli_catalog::CliCatalog;
-use webcodex_process::cli_catalog::{probe_installed_cli, Provider, TrustedMetadataContext};
+use webcodex_process::cli_catalog::{probe_cli_adapter, Provider, TrustedMetadataContext};
+use webcodex_process::cli_registry::{discover_cli_installations, CliInstallation};
+
+#[tauri::command]
+pub fn discover_ai_office_clis() -> Result<Vec<CliInstallation>, String> {
+    discover_cli_installations(&[])
+}
 
 #[tauri::command]
 pub async fn refresh_ai_office_cli(provider_id: String) -> Result<CliCatalog, String> {
-    let provider = Provider::parse(&provider_id)?;
-    let Some(executable) = find_executable(provider) else {
-        return Ok(CliCatalog::unavailable(provider));
+    let adapters = webcodex_process::cli_registry::configured_cli_adapters()?;
+    let adapter = adapters.iter().find(|adapter| adapter.id == provider_id).ok_or("CLI adapter is not registered")?;
+    let provider = Provider::for_adapter(adapter);
+    let Some(installation) = discover_cli_installations(&[])?.into_iter().find(|entry| entry.provider_id == provider_id) else {
+        let mut catalog = CliCatalog::unavailable(provider);
+        catalog.provider_id = adapter.id.clone(); catalog.label = adapter.label.clone();
+        return Ok(catalog);
     };
+    if !installation.native { return Err(installation.message.into()); }
+    let executable = installation.executable;
     let explicit_proxy = [
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -38,7 +49,7 @@ pub async fn refresh_ai_office_cli(provider_id: String) -> Result<CliCatalog, St
             return Ok(catalog);
         }
     };
-    probe_installed_cli(provider, &executable, &context).await
+    probe_cli_adapter(adapter, &executable, &context).await
 }
 
 fn selected_system_proxy(
@@ -57,27 +68,6 @@ fn selected_system_proxy(
         .ok_or_else(|| {
             "CLI 元数据查询不支持带凭据或无效的系统代理配置；请核查已有配置后刷新。".into()
         })
-}
-
-fn find_executable(provider: Provider) -> Option<PathBuf> {
-    let mut directories = Vec::new();
-    if cfg!(windows) {
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            directories.push(
-                PathBuf::from(local)
-                    .join(provider.installation_directory())
-                    .join("bin"),
-            );
-        }
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        directories.extend(std::env::split_paths(&path));
-    }
-    directories
-        .into_iter()
-        .filter(|directory| directory.is_absolute())
-        .map(|directory| directory.join(provider.executable()))
-        .find(|path| path.is_file())
 }
 
 #[cfg(test)]

@@ -2,6 +2,28 @@ use super::*;
 use crate::runner_protocol::AgentExecutionResourceDescriptor;
 
 #[test]
+fn registered_native_adapter_uses_its_own_bound_protocol_without_a_product_enum() {
+    let provider = AgentCliProvider::parse("third-party-cli").unwrap();
+    let mut adapter = crate::cli_adapter::cli_adapters(&[]).unwrap().remove(0);
+    adapter.id = provider.id().into();
+    adapter.label = "Synthetic third-party CLI".into();
+    let mut value = record(provider);
+    value.loading_method = "registered-native-cli-v1".into();
+    value.adapter = Some(adapter.clone());
+    let (base, _) = adapter.invocation("observed-model", Some("high"), "task").unwrap();
+    let args = compose_reviewed_cli_argv(&value, &base).unwrap();
+    validate_reviewed_cli_argv(&value, &args).unwrap();
+    let original_hash = value.review_sha256().unwrap();
+    value.adapter.as_mut().unwrap().invocation.as_mut().unwrap().model_flag = "--changed-model".into();
+    assert_ne!(original_hash, value.review_sha256().unwrap());
+    assert!(validate_reviewed_cli_argv(&value, &args).is_err());
+    value.adapter.as_mut().unwrap().id = "another-cli".into();
+    assert!(value.require_supported_loading().is_err());
+    assert_eq!(serde_json::to_string(&provider).unwrap(), "\"third-party-cli\"");
+    assert!(AgentCliProvider::parse("cmd.exe /c arbitrary").is_err());
+}
+
+#[test]
 fn antigravity_mapping_binds_binary_templates_and_tool_policy() {
     let mut value = record(AgentCliProvider::Antigravity);
     value.cli_version = ANTIGRAVITY_FILES_VERSION.into();
@@ -54,6 +76,7 @@ fn record(provider: AgentCliProvider) -> ReviewedAgentCliControls {
         }],
         verification_evidence_sha256: "c".repeat(64),
         independent_review_sha256: "d".repeat(64),
+        adapter: None,
     }
 }
 
@@ -73,6 +96,7 @@ fn base(provider: AgentCliProvider) -> Vec<String> {
             "--output-format",
             "stream-json",
         ]),
+        _ => panic!("legacy fixture requires an explicitly selected built-in recipe"),
     }
     args.into_iter().map(String::from).collect()
 }

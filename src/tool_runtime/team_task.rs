@@ -232,50 +232,35 @@ pub(crate) fn fixed_cli_process(
     effort: Option<&str>,
     instruction: &str,
 ) -> Result<(String, Vec<String>, String), ToolResult> {
-    let mut args = vec!["--model".into(), model.into()];
-    if let Some(effort) = effort {
-        if effort.trim().is_empty() {
-            return Err(error(
-                "team_effort_required",
-                "A supplied reasoning effort must be nonblank",
-            ));
-        }
-        args.extend(["--effort".into(), effort.into()]);
-    } else if provider != "antigravity" {
-        return Err(error(
-            "team_effort_required",
-            "Select the CLI's discovered reasoning effort before dispatch",
-        ));
-    }
-    match provider {
-        "workbuddy" => {
-            args.extend([
-                "--print".into(),
-                "--input-format".into(),
-                "text".into(),
-                "--output-format".into(),
-                "json".into(),
-            ]);
-            Ok(("codebuddy".into(), args, instruction.into()))
-        }
-        "antigravity" => {
-            args.extend([
-                "--input-format".into(),
-                "stream-json".into(),
-                "--output-format".into(),
-                "stream-json".into(),
-            ]);
-            let stdin = format!(
-                "{}\n",
-                json!({"event":"user","message":{"content":instruction}})
-            );
-            Ok(("agy".into(), args, stdin))
-        }
-        _ => Err(error(
-            "team_provider_unavailable",
-            "The selected CLI provider is not supported",
-        )),
-    }
+    cli_process_with_adapter(None, provider, model, effort, instruction)
+}
+
+pub(crate) fn cli_process_with_adapter(
+    selected: Option<&webcodex_core::cli_adapter::CliAdapter>, provider: &str,
+    model: &str, effort: Option<&str>, instruction: &str,
+) -> Result<(String, Vec<String>, String), ToolResult> {
+    let adapters = webcodex_core::cli_adapter::cli_adapters(&[])
+        .map_err(|code| error(&code, "CLI adapter registry is unavailable"))?;
+    let adapter = selected.or_else(|| adapters.iter().find(|adapter| adapter.id == provider))
+        .filter(|adapter| adapter.id == provider)
+        .ok_or_else(|| {
+            error(
+                "team_provider_unavailable",
+                "Select a discovered CLI with a configured invocation adapter",
+            )
+        })?;
+    let (args, stdin) = adapter.invocation(model, effort, instruction).map_err(|code| {
+        let code = if code == "cli_adapter_effort_required" || (effort.is_some_and(|e| e.trim().is_empty())) {
+            "team_effort_required"
+        } else { &code };
+        error(code, "The CLI's discovered model and reasoning capabilities must match the selected adapter")
+    })?;
+    let command = adapter.executables.first().expect("validated adapter");
+    Ok((
+        command.strip_suffix(".exe").unwrap_or(command).into(),
+        args,
+        stdin,
+    ))
 }
 
 impl ToolRuntime {

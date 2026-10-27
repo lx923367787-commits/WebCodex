@@ -171,6 +171,10 @@ pub struct ReviewedAgentCliControls {
     pub fixed_args: Vec<ReviewedControlArg>,
     pub verification_evidence_sha256: String,
     pub independent_review_sha256: String,
+    /// Administrator-reviewed protocol for an extensible native CLI. It is
+    /// covered by the same review/resource digest and is never a model input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<crate::cli_adapter::CliAdapter>,
 }
 
 fn digest(value: &str) -> Result<(), String> {
@@ -278,6 +282,12 @@ impl ReviewedAgentCliControls {
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err("agent_cli_controls_unsupported_version".into());
+        }
+        if let Some(adapter) = &self.adapter {
+            adapter.validate()?;
+            if adapter.id != self.provider.id() || adapter.invocation.is_none() {
+                return Err("agent_cli_controls_adapter_mismatch".into());
+            }
         }
         identifier(&self.record_id, 128)?;
         text(&self.cli_version, 128)?;
@@ -401,6 +411,9 @@ impl ReviewedAgentCliControls {
     /// obtain the record through the trusted configuration boundary.
     pub fn require_supported_loading(&self) -> Result<(), String> {
         self.validate_shape()?;
+        if self.loading_method == "registered-native-cli-v1" {
+            return self.adapter.as_ref().map(|_| ()).ok_or("agent_cli_controls_adapter_required".into());
+        }
         if self.provider == AgentCliProvider::Antigravity {
             if self.cli_version != ANTIGRAVITY_FILES_VERSION
                 || self.executable_sha256 != ANTIGRAVITY_FILES_EXE_SHA256
@@ -433,50 +446,34 @@ impl ReviewedAgentCliControls {
     }
 }
 
-fn base_len(provider: AgentCliProvider, args: &[String]) -> usize {
-    match provider {
-        AgentCliProvider::WorkBuddy => 9,
-        AgentCliProvider::Antigravity if args.get(2).map(String::as_str) != Some("--effort") => 6,
-        AgentCliProvider::Antigravity => 8,
-    }
+fn selected_adapter(record: &ReviewedAgentCliControls) -> Result<crate::cli_adapter::CliAdapter, String> {
+    if let Some(adapter) = &record.adapter { return Ok(adapter.clone()); }
+    crate::cli_adapter::cli_adapters(&[])?.into_iter().find(|adapter| adapter.id == record.provider.id())
+        .ok_or("agent_cli_controls_adapter_required".into())
 }
-fn validate_base(provider: AgentCliProvider, args: &[String]) -> Result<(), String> {
-    if args.len() != base_len(provider, args) || args[0] != "--model" {
+fn base_len(record: &ReviewedAgentCliControls, args: &[String]) -> Result<usize, String> {
+    let adapter = selected_adapter(record)?;
+    let invocation = adapter.invocation.as_ref().ok_or("agent_cli_controls_adapter_required")?;
+    let effort_index = invocation.prefix_args.len() + 2;
+    let explicit_effort = invocation.effort_flag.as_ref().is_some_and(|flag| args.get(effort_index) == Some(flag));
+    Ok(invocation.prefix_args.len() + 2 + if explicit_effort {2} else {0} + invocation.fixed_args.len())
+}
+fn validate_base(record: &ReviewedAgentCliControls, args: &[String]) -> Result<(), String> {
+    let adapter = selected_adapter(record)?;
+    let invocation = adapter.invocation.as_ref().ok_or("agent_cli_controls_adapter_required")?;
+    let index = invocation.prefix_args.len();
+    if args.len() != base_len(record, args)? || args.get(index) != Some(&invocation.model_flag) {
         return Err("agent_cli_controls_invalid_business_argv".into());
     }
-    let explicit_effort = args[2] == "--effort";
-    if !explicit_effort && provider != AgentCliProvider::Antigravity {
-        return Err("agent_cli_controls_invalid_business_argv".into());
+    let model = args.get(index + 1).ok_or("agent_cli_controls_invalid_business_argv")?;
+    let explicit_effort = invocation.effort_flag.as_ref().is_some_and(|flag| args.get(index + 2) == Some(flag));
+    let effort = if explicit_effort {Some(args.get(index + 3).ok_or("agent_cli_controls_invalid_business_argv")?.as_str())} else {None};
+    for value in std::iter::once(model.as_str()).chain(effort) {
+        if value.starts_with(['-', '@']) { return Err("agent_cli_controls_invalid_business_value".into()); }
     }
-    let values = std::iter::once((&args[1], 128)).chain(explicit_effort.then_some((&args[3], 64)));
-    for (value, max) in values {
-        text(value, max)?;
-        if value.starts_with(['-', '@']) {
-            return Err("agent_cli_controls_invalid_business_value".into());
-        }
-    }
-    let expected: &[&str] = match provider {
-        AgentCliProvider::WorkBuddy => &[
-            "--print",
-            "--input-format",
-            "text",
-            "--output-format",
-            "json",
-        ],
-        AgentCliProvider::Antigravity => &[
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-        ],
-    };
-    if !args[if explicit_effort { 4 } else { 2 }..]
-        .iter()
-        .map(String::as_str)
-        .eq(expected.iter().copied())
-    {
-        return Err("agent_cli_controls_invalid_business_argv".into());
-    }
+    let (expected, _) = adapter.invocation(model, effort, "validate")
+        .map_err(|_| "agent_cli_controls_invalid_business_argv")?;
+    if expected != args { return Err("agent_cli_controls_invalid_business_argv".into()); }
     Ok(())
 }
 
@@ -488,7 +485,7 @@ fn compose_shape(
     base: &[String],
 ) -> Result<Vec<String>, String> {
     record.validate_shape()?;
-    validate_base(record.provider, base)?;
+    validate_base(record, base)?;
     let mut args = base.to_vec();
     for arg in &record.fixed_args {
         args.push(arg.flag.clone());
@@ -520,7 +517,7 @@ pub fn validate_reviewed_cli_argv(
     record: &ReviewedAgentCliControls,
     actual_argv: &[String],
 ) -> Result<(), String> {
-    let count = base_len(record.provider, actual_argv);
+    let count = base_len(record, actual_argv)?;
     if actual_argv.len() < count || compose_shape(record, &actual_argv[..count])? != actual_argv {
         return Err("agent_cli_controls_argument_override".into());
     }

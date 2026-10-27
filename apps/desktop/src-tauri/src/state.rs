@@ -2221,7 +2221,7 @@ impl DesktopCore {
         }
 
         let current = self.refresh_runtime_status(cancellation).await?;
-        if !current.readiness.runtime_ready {
+        if !current.readiness.services_ready() {
             return Err(DesktopError::new(
                 "runtime_not_ready",
                 "Local WebCodex runtime is not ready",

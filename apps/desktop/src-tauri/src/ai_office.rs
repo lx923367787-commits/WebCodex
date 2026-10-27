@@ -52,15 +52,7 @@ impl Default for OfficePolicyInput {
             mode: PolicyMode::Auto,
             subagents: CountRange { min: 0, max: 4 },
             cli_per_agent: CountRange { min: 0, max: 2 },
-            providers: ["workbuddy", "antigravity"]
-                .into_iter()
-                .map(|id| ProviderPreference {
-                    provider_id: id.into(),
-                    enabled: true,
-                    model: None,
-                    effort: None,
-                })
-                .collect(),
+            providers: Vec::new(),
         }
     }
 }
@@ -173,7 +165,7 @@ fn valid_text(value: &str, limit: usize) -> bool {
 }
 
 fn known_provider(id: &str) -> bool {
-    matches!(id, "workbuddy" | "antigravity")
+    webcodex_core::cli_adapter::valid_cli_id(id)
 }
 
 fn validate_policy(policy: &OfficePolicyInput) -> DesktopResult<()> {
@@ -185,7 +177,7 @@ fn validate_policy(policy: &OfficePolicyInput) -> DesktopResult<()> {
         return Err(office_error("ai_office_invalid_policy", "Count ranges must be ordered; at most 32 subagents and 32 CLI calls per agent are supported."));
     }
     let mut seen = BTreeSet::new();
-    if policy.providers.len() > 2
+    if policy.providers.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS
         || policy.providers.iter().any(|p| {
             !known_provider(&p.provider_id)
                 || !seen.insert(&p.provider_id)

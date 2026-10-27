@@ -7,12 +7,27 @@ use std::sync::{Arc, Barrier};
 const PROJECT: &str = "agent:runner:team";
 
 #[test]
+fn policy_defaults_do_not_select_products_and_custom_registry_ids_round_trip() {
+    assert!(TeamPolicyInput::default().providers.is_empty());
+    let (_dir, db) = database();
+    let owner = principal('a');
+    let mut policy = TeamPolicyInput::default();
+    policy.providers = vec![TeamProviderPreference { provider_id:"third-party-cli".into(), enabled:true, model:Some("observed-model".into()), effort:None }];
+    let saved = db.save_team_policy(&owner, PROJECT, 0, policy.clone()).unwrap();
+    assert_eq!(saved.settings, policy);
+    assert_eq!(db.get_team_policy(&owner, PROJECT).unwrap(), saved);
+    policy.providers[0].provider_id = "cmd /c untrusted".into();
+    assert!(db.save_team_policy(&owner, PROJECT, saved.revision, policy).is_err());
+}
+
+#[test]
 fn saved_policy_effort_resolves_null_and_replays_original_revision() {
     let (_dir, db) = database();
     let owner = principal('a');
     let root = task(&db, &owner, PROJECT, "saved-root");
     let child = task(&db, &owner, PROJECT, "saved-child");
     let mut settings = TeamPolicyInput::default();
+    settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
     settings.providers[0].model = Some("discovered-model".into());
     settings.providers[0].effort = Some("high".into());
     settings.providers[1].model = Some("agy-model".into());
@@ -176,6 +191,7 @@ fn custom_policy_rejects_impossible_cli_minimum_and_keeps_feasible_maxima() {
     let (_dir, db) = database();
     let owner = principal('a');
     let mut settings = TeamPolicyInput::default();
+    settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
     settings.mode = TeamPolicyMode::Custom;
     settings.subagents = TeamCountRange { min: 2, max: 32 };
     settings.cli_per_agent = TeamCountRange { min: 11, max: 32 };
@@ -204,6 +220,7 @@ fn legacy_policy_with_impossible_cli_minimum_remains_readable_and_revisable() {
     let (dir, db) = database();
     let owner = principal('a');
     let mut settings = TeamPolicyInput::default();
+    settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| crate::TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
     settings.mode = TeamPolicyMode::Custom;
     settings.subagents = TeamCountRange { min: 2, max: 2 };
     settings.cli_per_agent = TeamCountRange { min: 11, max: 11 };
@@ -347,6 +364,7 @@ fn custom_policy_counts_all_ordinary_members_and_pins_native_selection() {
     let root = task(&db, &owner, PROJECT, "root");
     let child = task(&db, &owner, PROJECT, "child");
     let mut settings = TeamPolicyInput::default();
+    settings.providers = ["workbuddy", "antigravity"].into_iter().map(|id| TeamProviderPreference { provider_id:id.into(), enabled:true, model:None, effort:None }).collect();
     settings.mode = TeamPolicyMode::Custom;
     settings.subagents = TeamCountRange { min: 1, max: 1 };
     settings.cli_per_agent = TeamCountRange { min: 1, max: 2 };

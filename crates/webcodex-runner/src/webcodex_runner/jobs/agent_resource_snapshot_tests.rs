@@ -556,6 +556,7 @@ fn reviewed_catalog_rechecks_and_pins_the_entire_readonly_payload() {
         }],
         verification_evidence_sha256: "d".repeat(64),
         independent_review_sha256: "e".repeat(64),
+        adapter: None,
     });
     let profiles = validated(p);
     profiles.verify_sources().unwrap();

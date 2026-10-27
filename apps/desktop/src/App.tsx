@@ -483,7 +483,7 @@ function shouldStartPreferredTunnel(state: DesktopState) {
   return state.preferred_connection === "open_ai_tunnel" &&
     state.topology?.experience === "full" &&
     state.topology.server.kind === "local" &&
-    state.readiness.runtime_ready &&
+    state.readiness.server === "ready" && state.readiness.runner === "ready" &&
     state.openai_tunnel_configured &&
     !state.regular_tunnel;
 }
