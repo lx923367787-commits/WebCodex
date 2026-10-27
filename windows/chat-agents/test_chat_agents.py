@@ -660,6 +660,55 @@ class ChatAgentServiceTests(unittest.TestCase):
         self.thread_factory.assert_not_called()
         self.transport.discover_profiles.assert_not_called()
 
+    def test_host_maintenance_refreshes_near_expiry_without_hiding_valid_catalog(self):
+        with patch.object(chat.time, "time", return_value=10000):
+            self.save_profiles(observed_at=6701)
+            self.assertFalse(self.service.maintain_chat_profiles())
+            self.thread_factory.assert_not_called()
+            self.save_profiles(observed_at=6700)
+            self.assertTrue(self.service.maintain_chat_profiles())
+            current = self.service.read_chat_profiles()
+            self.assertEqual(current["state"], "ready")
+            self.assertFalse(current["refresh_required"])
+            self.assertTrue(current["refresh_in_progress"])
+            self.assertEqual(current["observed_at"], 6700)
+            self.assertEqual(self.service.selected_profile(PROFILE["profile_id"]), PROFILE)
+            self.assertFalse(self.service.maintain_chat_profiles())
+            self.service.discover_chat_profiles(refresh=True)
+            self.thread_factory.assert_called_once()
+            self.threads[-1].run()
+            self.assertEqual(self.service.read_chat_profiles()["observed_at"], 10000)
+
+    def test_failed_maintenance_preserves_observation_but_never_renews_expiry(self):
+        with patch.object(chat.time, "time", return_value=10000):
+            self.save_profiles(observed_at=6700)
+            self.service.maintain_chat_profiles()
+            self.transport.discover_profiles.side_effect = RuntimeError("PRIVATE_ACCOUNT_ERROR")
+            self.threads[-1].run()
+            current = self.service.read_chat_profiles()
+            self.assertEqual(current["observed_at"], 6700)
+            self.assertFalse(current["refresh_required"])
+            self.assertEqual(current["reason"], "discovery_failed")
+            self.assertNotIn("PRIVATE_ACCOUNT_ERROR", json.dumps(current))
+        with patch.object(chat.time, "time", return_value=10300):
+            self.assertTrue(self.service.read_chat_profiles()["refresh_required"])
+            with self.assertRaises(chat.ProfileUnavailable):
+                self.service.selected_profile(PROFILE["profile_id"])
+
+    def test_maintenance_recovers_missing_cache_and_respects_busy_or_stopping(self):
+        (self.root / "thinking-profiles.json").unlink()
+        with patch.object(self.service, "browser_worker_busy", return_value=True):
+            self.assertFalse(self.service.maintain_chat_profiles())
+        self.thread_factory.assert_not_called()
+        self.assertTrue(self.service.maintain_chat_profiles())
+        self.assertEqual(self.service.read_chat_profiles()["state"], "discovering")
+        self.threads[-1].run()
+        self.assertFalse(self.service.read_chat_profiles()["refresh_required"])
+        self.save_profiles(observed_at=1)
+        self.service._stopping.set()
+        self.assertFalse(self.service.maintain_chat_profiles())
+        self.thread_factory.assert_called_once()
+
     def test_profiles_read_reports_ready_and_stale_cache_without_refresh(self):
         path = self.root / "thinking-profiles.json"
         for observed_at, refresh_required in ((chat.time.time(), False), (1, True)):

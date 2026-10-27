@@ -160,8 +160,10 @@ class Service:
                 result[key] = value[key]
         observed = value.get("observed_at")
         fresh = (type(observed) in (int, float) and math.isfinite(observed)
-                 and 0 <= time.time() - observed <= PROFILE_MAX_AGE)
+                 and 0 <= time.time() - observed < PROFILE_MAX_AGE)
         result["refresh_required"] = state != "ready" or not fresh
+        if value.get("refreshing") is True and self.live(value):
+            result["refresh_in_progress"] = True
         return result
 
     def read_chat_profiles(self):
@@ -180,12 +182,13 @@ class Service:
             raise ProfileUnavailable("thinking_profile_not_discovered")
         return matches[0]
 
-    def discover_chat_profiles(self, refresh=False):
+    def discover_chat_profiles(self, refresh=False, *, preserve_ready=False):
         if type(refresh) is not bool:
             raise ValueError("invalid_refresh")
         with watcher_lock(self.runtime / "registry"):
             current = self.profiles_state()
-            if current["state"] == "discovering" or (not refresh and current["state"] != "not_discovered"):
+            if (current["state"] == "discovering" or current.get("refresh_in_progress")
+                    or (not refresh and current["state"] != "not_discovered")):
                 return current
             if self._stopping.is_set():
                 return dict(current, discovery_started=False, reason="service_stopping")
@@ -194,6 +197,11 @@ class Service:
             job_id = str(uuid.uuid4())
             state = {"state": "discovering", "job_id": job_id, "owner_instance": self.owner_instance,
                      "created_at": time.time(), "profiles": []}
+            # Host maintenance keeps a still-valid observation readable while
+            # replacing it. Only a successful browser observation renews its TTL.
+            if preserve_ready and current["state"] == "ready" and not current["refresh_required"]:
+                state.update(state="ready", profiles=current["profiles"],
+                             observed_at=current["observed_at"], refreshing=True)
             path = self.runtime / "thinking-profiles.json"
             write_json(path, state)
             try:
@@ -202,11 +210,32 @@ class Service:
                 self._thread, self._active_job_id = thread, job_id
                 thread.start()
             except Exception:
-                write_json(path, dict(state, state="failed", reason="discovery_start_failed", observed_at=time.time()))
+                failed = dict(state, reason="discovery_start_failed", refreshing=False)
+                if state.get("refreshing") is not True:
+                    failed.update(state="failed", observed_at=time.time())
+                write_json(path, failed)
             return self.profiles_state()
+
+    def maintain_chat_profiles(self):
+        """Activated Host only: refresh missing/stale or nearly expired choices.
+
+        This is not a model tool. The coordinator owns STOP/PAUSE, connection
+        admission and retry pacing; the existing browser worker owns discovery.
+        """
+        current = self.profiles_state()
+        if current["state"] == "discovering" or current.get("refresh_in_progress"):
+            return False
+        if (current["state"] == "ready" and not current["refresh_required"]
+                and time.time() - current["observed_at"] < PROFILE_MAX_AGE - 300):
+            return False
+        if self._stopping.is_set() or self.browser_worker_busy():
+            return False
+        self.discover_chat_profiles(refresh=True, preserve_ready=True)
+        return True
 
     def discover_worker(self, job_id):
         path = self.runtime / "thinking-profiles.json"
+        state = {}
         try:
             state = read_json(path)
             if state.get("job_id") != job_id or state.get("owner_instance") != self.owner_instance:
@@ -219,10 +248,13 @@ class Service:
             if self._stopping.is_set() or not isinstance(discovered, dict):
                 raise ValueError("discovery_failed")
             profiles = profile_catalog(discovered.get("profiles"))
-            result = dict(state, state="ready", profiles=profiles, observed_at=time.time())
+            result = dict(state, state="ready", profiles=profiles, observed_at=time.time(), refreshing=False)
         except Exception:
-            result = {"state": "failed", "job_id": job_id, "owner_instance": self.owner_instance,
-                      "profiles": [], "observed_at": time.time(), "reason": "discovery_failed"}
+            if state.get("refreshing") is True:
+                result = dict(state, refreshing=False, reason="discovery_failed")
+            else:
+                result = {"state": "failed", "job_id": job_id, "owner_instance": self.owner_instance,
+                          "profiles": [], "observed_at": time.time(), "reason": "discovery_failed"}
         # A replacement service may have explicitly refreshed after our owner
         # vanished. Never overwrite a newer discovery generation.
         current = read_json(path)

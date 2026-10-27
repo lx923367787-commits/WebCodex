@@ -86,6 +86,9 @@ class AutomaticDispatchTests(unittest.TestCase):
         self.lock = Mock(side_effect=lambda path: contextlib.nullcontext())
         self.binder = Mock()
         self.state_reader = Mock(return_value={"mode": "running", "generation": 7})
+        maintenance = patch.object(self.service, "maintain_chat_profiles", return_value=False)
+        self.profile_maintenance = maintenance.start()
+        self.addCleanup(maintenance.stop)
 
     def dispatcher(self, **kwargs):
         options = {"state_reader": self.state_reader, "lock_factory": self.lock,
@@ -158,6 +161,38 @@ class AutomaticDispatchTests(unittest.TestCase):
         self.assertEqual(self.fallback.discovered, [])
         self.assertEqual(self.member.discovered, [])
         self.assertEqual(self.fallback.finished, 0)
+        self.profile_maintenance.assert_not_called()
+
+    def test_profile_maintenance_uses_current_control_and_bounded_retry(self):
+        now = [0]
+        self.profile_maintenance.return_value = True
+        pump = self.dispatcher(clock=lambda: now[0])
+        pump._tick(self.context)
+        self.profile_maintenance.assert_called_once()
+        now[0] = 299
+        pump._tick(self.context)
+        self.profile_maintenance.assert_called_once()
+        now[0] = 300
+        pump._tick(self.context)
+        self.assertEqual(self.profile_maintenance.call_count, 2)
+        self.assertEqual(self.fallback.finished, 3)
+
+    def test_profile_maintenance_failure_cannot_retry_on_every_tick(self):
+        now = [0]
+        pump = self.dispatcher(clock=lambda: now[0])
+        self.profile_maintenance.side_effect = ValueError("fixture-failure")
+        with self.assertRaises(ValueError):
+            pump._tick(self.context)
+        now[0] = 5
+        pump._tick(self.context)
+        self.profile_maintenance.assert_called_once()
+        self.assertEqual(self.fallback.finished, 2)
+
+    def test_profile_maintenance_never_runs_after_control_generation_changes(self):
+        self.state_reader.side_effect = [
+            {"mode": "running", "generation": 7}, {"mode": "paused", "generation": 8}]
+        self.dispatcher(advance_fn=Mock())._tick(self.context)
+        self.profile_maintenance.assert_not_called()
 
     def test_shutdown_during_state_read_prevents_dispatch(self):
         def state_reader(path):

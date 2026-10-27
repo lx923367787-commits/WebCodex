@@ -103,6 +103,38 @@ fn plan(root: &str, child: &str) -> TeamPlanInput {
 }
 
 #[test]
+fn assigned_manager_can_read_own_receipts_before_registering_a_team_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open(&temp.path().join("state.db")).unwrap();
+    let root = task(&db, "planless-root");
+    let manager = enroll(&db, &root, AgentEnrollmentPurpose::Manager, None, "manager");
+    let unrelated = task(&db, "unrelated-root");
+    let other = enroll(
+        &db,
+        &unrelated,
+        AgentEnrollmentPurpose::Manager,
+        None,
+        "other",
+    );
+    let receipts = db.list_agent_team_receipts(&manager, &root, 0, 20).unwrap();
+    assert_eq!(receipts.total_count, 0);
+    assert!(receipts.receipts.is_empty());
+    assert!(db
+        .list_agent_team_receipts(&manager, &root, 0, MAX_TEAM_LIST_LIMIT + 1)
+        .is_err());
+    assert!(db
+        .list_agent_team_receipts(&manager, &unrelated, 0, 20)
+        .is_err());
+    assert!(db.list_agent_team_receipts(&other, &root, 0, 20).is_err());
+    assert_eq!(
+        db.list_agent_team_plans(&manager, &root, 0, 20)
+            .unwrap()
+            .total_count,
+        0
+    );
+}
+
+#[test]
 fn assigned_team_registration_checks_child_budget_when_aggregate_and_project_allow() {
     let temp = tempfile::tempdir().unwrap();
     let db = Database::open(&temp.path().join("state.db")).unwrap();

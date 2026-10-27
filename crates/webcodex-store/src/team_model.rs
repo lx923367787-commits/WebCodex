@@ -419,7 +419,24 @@ impl Database {
             task,
         )?;
         if authority.purpose == AgentEnrollmentPurpose::Manager {
-            let plan = plan_on(&tx, &authority.communication_principal, task)?;
+            let plan = match plan_on(&tx, &authority.communication_principal, task) {
+                Ok(plan) => plan,
+                Err(error) if error.code() == "team_task_not_found" => {
+                    // An authorized native manager exists before registering a
+                    // team plan. It can already inspect its own receipts, but
+                    // absence of a plan grants no access to other tasks.
+                    return receipts_on(
+                        &tx,
+                        &authority.communication_principal,
+                        &authority.project,
+                        None,
+                        Some(task),
+                        offset,
+                        limit,
+                    );
+                }
+                Err(error) => return Err(error),
+            };
             delegated_plan_on(&tx, binding, &plan.plan)?;
             receipts_on(
                 &tx,

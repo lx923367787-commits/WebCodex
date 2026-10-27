@@ -78,7 +78,8 @@ DESCRIPTIONS = {
         "or worker startup. Takes no arguments. A missing catalog returns not_discovered; stale or incomplete "
         "state does not authorize selection. For a new task require state=ready and refresh_required=false, "
         "then match the main GPT's explicitly selected profile_id. This read never chooses a default. "
-        "Only an explicit discover_chat_profiles call can start or refresh discovery."
+        "Discovery is started only by an explicit discover_chat_profiles call or the activated Host coordinator; "
+        "this read never starts it."
     ),
     "discover_chat_profiles": (
         "Discover current browser model/thinking choices without sending a prompt. Starts one asynchronous "
