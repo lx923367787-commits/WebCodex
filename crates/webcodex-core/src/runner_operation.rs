@@ -525,6 +525,7 @@ pub enum RunnerOperation {
     AgentExecutionClose(crate::runner_protocol::AgentExecutionClose),
     AgentCliCatalog(crate::agent_cli::AgentCliCatalogQuery),
     AgentCliDelivery(crate::agent_cli::AgentCliDeliveryQuery),
+    LocalCliDiscover(crate::local_cli::LocalCliQuery),
     File(RunnerFileOperation),
     Project(RunnerProjectOperation),
     Computer(RunnerComputerOperation),
@@ -567,6 +568,7 @@ impl RunnerOperation {
             Self::AgentExecutionClose(_) => crate::runner_protocol::AGENT_EXECUTION_CLOSE_KIND,
             Self::AgentCliCatalog(_) => crate::agent_cli::AGENT_CLI_CATALOG_KIND,
             Self::AgentCliDelivery(_) => crate::agent_cli::AGENT_CLI_DELIVERY_KIND,
+            Self::LocalCliDiscover(_) => crate::local_cli::LOCAL_CLI_DISCOVER_KIND,
             Self::Project(operation) => operation.kind.wire_kind(),
             Self::Computer(operation) => operation.kind.wire_kind(),
             Self::Validation { .. } => crate::validation_bridge::AGENT_VALIDATION_REQUEST_KIND,
@@ -791,6 +793,11 @@ fn encode_operation(
     let mut wire = empty_wire(metadata, kind, 30);
     match operation {
         RunnerOperation::AgentExecutionClose(_) => unreachable!("handled before generic encoding"),
+        RunnerOperation::LocalCliDiscover(query) => {
+            query.validate()?;
+            wire.content =
+                Some(serde_json::to_string(&query).map_err(|_| "local_cli_encoding_failed")?);
+        }
         RunnerOperation::AgentCliCatalog(query) => {
             query.validate()?;
             if wire.client_id != query.target.client_id {
@@ -1305,6 +1312,19 @@ fn decode_operation(wire: &RunnerRequest) -> Result<RunnerOperation, String> {
                 .validate()
                 .map_err(|error| format!("invalid SSH resource request: {error}"))?;
             Ok(RunnerOperation::SshResource(operation))
+        }
+        crate::local_cli::LOCAL_CLI_DISCOVER_KIND => {
+            ensure_special_payloads_absent(wire)?;
+            ensure_empty_generic_execution_fields(wire, true)?;
+            let content = bounded_content(
+                wire,
+                crate::local_cli::LOCAL_CLI_MAX_BYTES,
+                "local_cli_discover",
+            )?;
+            let query: crate::local_cli::LocalCliQuery =
+                serde_json::from_str(content).map_err(|_| "local_cli_invalid_payload")?;
+            query.validate()?;
+            Ok(RunnerOperation::LocalCliDiscover(query))
         }
         crate::agent_cli::AGENT_CLI_CATALOG_KIND => {
             ensure_special_payloads_absent(wire)?;

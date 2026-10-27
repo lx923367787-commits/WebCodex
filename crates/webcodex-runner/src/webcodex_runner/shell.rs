@@ -425,19 +425,14 @@ fn configured_process_command(
 fn native_cli_environment(
     shell: &ShellConfig,
     profile: Option<&PreparedShellProfile>,
-    program: &str,
-    args: &[String],
-    resolved: &OsStr,
+    _program: &str,
+    _args: &[String],
+    _resolved: &OsStr,
 ) -> Result<Vec<(String, String)>, String> {
-    if shell.environment_mode != ShellEnvironmentMode::Inherit {
-        return Ok(Vec::new());
-    }
-    let local = std::env::var_os("LOCALAPPDATA");
-    let Some(cli) = native_cli_env::recognized_program(program, args, resolved, local.as_deref())
-    else {
-        return Ok(Vec::new());
-    };
-    if cli != native_cli_env::NativeCli::Antigravity {
+    if shell.environment_mode != ShellEnvironmentMode::Inherit
+        || profile.is_some()
+        || env_lookup(&shell.env, "PATH").is_some()
+    {
         return Ok(Vec::new());
     }
     let environment = match profile {
@@ -445,7 +440,6 @@ fn native_cli_environment(
         None => base_shell_env(shell, &ShellProfileConfig::default())?,
     };
     Ok(native_cli_env::environment_overrides(
-        cli,
         &environment,
         native_cli_env::system_proxy().as_deref(),
     ))
@@ -455,7 +449,7 @@ fn resolve_process_program(
     shell: &ShellConfig,
     profile: Option<&PreparedShellProfile>,
     program: &str,
-    args: &[String],
+    _args: &[String],
     cwd: Option<&Path>,
 ) -> Result<OsString, String> {
     #[cfg(windows)]
@@ -479,16 +473,14 @@ fn resolve_process_program(
                     && profile.is_none()
                     && env_lookup(&shell.env, "PATH").is_none()
                 {
-                    let local = std::env::var_os("LOCALAPPDATA");
-                    if let Some(candidate) =
-                        native_cli_env::fallback_program(program, args, local.as_deref())
-                    {
-                        if let Some(super::util::ResolvedProgram::Native(path)) =
-                            super::util::resolve_program_in_path(
-                                &candidate.to_string_lossy(),
-                                OsStr::new(""),
-                            )
-                        {
+                    if let Some(candidate) = super::installed_cli::resolve_installed(program) {
+                        if let Some(
+                            super::util::ResolvedProgram::Native(path)
+                            | super::util::ResolvedProgram::Batch(path),
+                        ) = super::util::resolve_program_in_path(
+                            &candidate.to_string_lossy(),
+                            OsStr::new(""),
+                        ) {
                             return Ok(path.into_os_string());
                         }
                     }
@@ -499,7 +491,7 @@ fn resolve_process_program(
     }
     #[cfg(not(windows))]
     {
-        let _ = (shell, profile, args, cwd);
+        let _ = (shell, profile, _args, cwd);
         Ok(OsString::from(program))
     }
 }

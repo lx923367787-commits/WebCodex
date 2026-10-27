@@ -1,192 +1,26 @@
-//! Windows defaults for the two fixed native team CLI installations only.
-//! No shell, process spawn, global environment mutation, or config writes.
+//! Per-process use of the current user's credential-free system proxy.
+//! No product/version recognition, global environment writes or login copies.
 use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NativeCli {
-    WorkBuddy,
-    Antigravity,
-}
-
-impl NativeCli {
-    fn alias(self) -> &'static str {
-        match self {
-            Self::WorkBuddy => "codebuddy",
-            Self::Antigravity => "agy",
-        }
-    }
-    fn executable(self) -> &'static str {
-        match self {
-            Self::WorkBuddy => "codebuddy.exe",
-            Self::Antigravity => "agy.exe",
-        }
-    }
-}
-
-fn valid_selection(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
-}
-fn supported_args(cli: NativeCli, args: &[String]) -> bool {
-    if args == ["--version"] || args == ["--help"] {
-        return true;
-    }
-    if cli == NativeCli::Antigravity && args == ["models"] {
-        return true;
-    }
-    let [model_flag, model, effort_flag, effort, tail @ ..] = args else {
-        return false;
-    };
-    if model_flag != "--model" || effort_flag != "--effort" || !valid_selection(model) {
-        return false;
-    }
-    let common_effort = matches!(effort.as_str(), "low" | "medium" | "high" | "xhigh" | "max");
-    match cli {
-        NativeCli::WorkBuddy => {
-            (common_effort || effort == "minimal")
-                && tail
-                    == [
-                        "--print",
-                        "--input-format",
-                        "text",
-                        "--output-format",
-                        "json",
-                    ]
-        }
-        NativeCli::Antigravity => {
-            common_effort
-                && tail
-                    == [
-                        "--input-format",
-                        "stream-json",
-                        "--output-format",
-                        "stream-json",
-                    ]
-        }
-    }
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    left.as_os_str()
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
-}
-
-fn fixed_binary(cli: NativeCli, local_appdata: &OsStr) -> Option<PathBuf> {
-    let local = Path::new(local_appdata);
-    if !local.is_absolute() {
-        return None;
-    }
-    let local = local.canonicalize().ok()?;
-    let bin = local.join(cli.alias()).join("bin").canonicalize().ok()?;
-    // A directory junction or executable symlink must not expand the default
-    // search outside the current user's fixed installation directory.
-    if !bin.starts_with(&local) {
-        return None;
-    }
-    let executable = bin.join(cli.executable()).canonicalize().ok()?;
-    if !executable.is_file()
-        || !executable
-            .parent()
-            .is_some_and(|parent| same_path(parent, &bin))
-        || !executable.file_name().is_some_and(|name| {
-            name.to_string_lossy()
-                .eq_ignore_ascii_case(cli.executable())
-        })
-    {
-        return None;
-    }
-    Some(executable)
-}
-
-/// Called only after the normal PATH lookup failed, and only when the caller
-/// has ruled out isolated/prepared/explicit-PATH environments.
-pub(super) fn fallback_program(
-    program: &str,
-    args: &[String],
-    local_appdata: Option<&OsStr>,
-) -> Option<PathBuf> {
-    let cli = match program.to_ascii_lowercase().as_str() {
-        "codebuddy" => NativeCli::WorkBuddy,
-        "agy" => NativeCli::Antigravity,
-        _ => return None,
-    };
-    if !supported_args(cli, args) {
-        return None;
-    }
-    fixed_binary(cli, local_appdata?)
-}
-
-/// A same-named executable in a project/PATH receives no extra environment.
-/// Even bare aliases must resolve to the exact canonical fixed installation.
-pub(super) fn recognized_program(
-    program: &str,
-    args: &[String],
-    resolved: &OsStr,
-    local_appdata: Option<&OsStr>,
-) -> Option<NativeCli> {
-    let requested = Path::new(program);
-    for cli in [NativeCli::WorkBuddy, NativeCli::Antigravity] {
-        let alias = program.eq_ignore_ascii_case(cli.alias());
-        let absolute_native = requested.is_absolute()
-            && requested.file_name().is_some_and(|name| {
-                name.to_string_lossy()
-                    .eq_ignore_ascii_case(cli.executable())
-            });
-        if !alias && !absolute_native {
-            continue;
-        }
-        if !supported_args(cli, args) {
-            continue;
-        }
-        let Some(fixed) = local_appdata.and_then(|local| fixed_binary(cli, local)) else {
-            continue;
-        };
-        let resolved = Path::new(resolved).canonicalize().ok()?;
-        if !same_path(&resolved, &fixed) {
-            continue;
-        }
-        if alias {
-            return Some(cli);
-        }
-        if requested.is_absolute()
-            && requested
-                .canonicalize()
-                .ok()
-                .is_some_and(|path| same_path(&path, &fixed))
-        {
-            return Some(cli);
-        }
-    }
-    None
-}
 
 pub(super) fn environment_overrides(
-    cli: NativeCli,
     environment: &HashMap<String, String>,
     system_proxy: Option<&str>,
 ) -> Vec<(String, String)> {
-    if cli != NativeCli::Antigravity {
-        return Vec::new();
-    }
-    let mut result = vec![("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into())];
-    let explicit = environment.keys().any(|key| {
+    if environment.keys().any(|key| {
         ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]
             .iter()
             .any(|name| key.eq_ignore_ascii_case(name))
-    });
-    if !explicit {
-        if let Some(proxy) = system_proxy.and_then(normalize_proxy_server) {
-            result.extend([
-                ("HTTP_PROXY".into(), proxy.clone()),
-                ("HTTPS_PROXY".into(), proxy),
-            ]);
-        }
+    }) {
+        return Vec::new();
     }
-    result
+    let Some(proxy) = system_proxy.and_then(normalize_proxy_server) else {
+        return Vec::new();
+    };
+    vec![
+        ("HTTP_PROXY".into(), proxy.clone()),
+        ("HTTPS_PROXY".into(), proxy),
+    ]
 }
-
 fn normalize_proxy_server(value: &str) -> Option<String> {
     if value.len() > 8192 {
         return None;

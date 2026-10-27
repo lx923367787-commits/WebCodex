@@ -38,6 +38,8 @@ pub use agent_execution_close::{
 #[cfg(test)]
 mod agent_execution_close_tests;
 mod agent_meeting;
+mod local_cli;
+pub use local_cli::LocalCliCall;
 mod agent_task;
 pub use agent_isolation::{
     AgentAssignmentOperation, AgentEnrollmentAuthority, AgentEnrollmentClaim, AgentEnrollmentGrant,

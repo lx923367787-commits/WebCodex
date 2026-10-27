@@ -941,6 +941,46 @@ impl RunnerRegistry {
         Ok((request_id, rx))
     }
 
+    /// Read installed command locations through the exact authorized Runner.
+    /// No process, credentials, or provider approval is created by discovery.
+    pub async fn enqueue_local_cli_discovery(
+        &self,
+        client_id: &str,
+        query: webcodex_core::local_cli::LocalCliQuery,
+        access: &crate::RunnerAccess,
+    ) -> Result<(String, oneshot::Receiver<ShellRunResponse>), String> {
+        query.validate()?;
+        let request_id = next_request_id();
+        let (tx, rx) = oneshot::channel();
+        let request = encode_runner_operation(
+            &request_id,
+            client_id,
+            "local_cli".into(),
+            RunnerOperation::LocalCliDiscover(query),
+        )?;
+        let mut inner = self.inner.lock().await;
+        let runner = inner
+            .runners
+            .get(client_id)
+            .ok_or("local_cli_runner_unavailable")?;
+        assert_runner_access(Some(access), runner)
+            .map_err(|_| "local_cli_runner_not_authorized")?;
+        if !runner.runner_features.supports(RunnerFeature::LocalCli) {
+            return Err("local_cli_runner_upgrade_required".into());
+        }
+        enqueue_pending_request_locked(
+            self.telemetry.as_ref(),
+            &mut inner,
+            client_id,
+            request_id.clone(),
+            request,
+            Some(tx),
+            None,
+        )?;
+        notify_runner_locked(&inner, client_id);
+        Ok((request_id, rx))
+    }
+
     pub async fn enqueue_run(
         &self,
         body: ShellRunRequest,

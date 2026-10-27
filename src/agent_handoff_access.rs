@@ -25,6 +25,7 @@ pub(crate) fn ensure(
             | "agent_private"
             | "agent_meeting"
             | "agent_project_files"
+            | "local_cli"
     ) || crate::agent_team::supports(tool)
         || crate::tool_runtime::named_project_files::supports(tool)
     {

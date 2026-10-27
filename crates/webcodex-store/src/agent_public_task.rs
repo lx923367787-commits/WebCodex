@@ -119,6 +119,7 @@ pub(crate) fn require_public_task_quiescent_on_connection(
     task: &str,
     completing_actor: Option<&VerifiedAgentRun>,
 ) -> Result<(), CommunicationStoreError> {
+    crate::local_cli::require_quiescent(conn, task).map_err(assignment)?;
     crate::agent_execution_close::require_agent_task_execution_quiescent_on_connection(
         conn, owner_user, project, task,
     )

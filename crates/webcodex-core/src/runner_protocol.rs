@@ -602,6 +602,9 @@ pub struct RunnerCapabilities {
     /// therefore false; the Server must fail closed without a shell fallback.
     #[serde(default)]
     pub structured_process_argv: bool,
+    /// Generic installed-program discovery, independent of isolated model providers.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub local_cli: bool,
     /// Bounded typed script payloads executed from Runner-owned temporary
     /// files. Missing on older Runners and therefore false; this is never
     /// inferred from shell, validation argv, or process argv support.
@@ -943,6 +946,7 @@ impl Default for RunnerCapabilities {
             structured_go_test_tool: false,
             structured_go_test_packages: false,
             structured_process_argv: false,
+            local_cli: false,
             structured_script_payload: false,
             internal_posix_script: false,
             structured_execution_jobs: false,
@@ -4490,6 +4494,7 @@ mod envelope_tests {
                 structured_go_test_tool: true,
                 structured_go_test_packages: true,
                 structured_process_argv: true,
+                local_cli: false,
                 structured_script_payload: true,
                 internal_posix_script: true,
                 structured_execution_jobs: true,

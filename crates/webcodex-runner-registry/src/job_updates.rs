@@ -607,7 +607,7 @@ fn validate_detached_idempotency_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn detached_job_id_for_key(
+pub fn detached_job_id_for_key(
     initiator: &DetachedInitiatorIdentity,
     key: &str,
 ) -> Result<String, String> {

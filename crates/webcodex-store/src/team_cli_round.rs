@@ -118,7 +118,10 @@ pub(super) fn cli_slot_budget_on(
             }
         }
     }
-    if index < original_budget {
+    let local_calls = crate::local_cli::call_count(conn, source).map_err(store_error)?;
+    let replay: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_team_cli_attempts WHERE root_task_id=?1 AND source_task_id=?2 AND call_index=?3)",
+        params![root,source,index], |r|r.get(0)).map_err(store_error)?;
+    if replay || index.saturating_add(local_calls) < original_budget {
         Ok(())
     } else {
         Err(error(

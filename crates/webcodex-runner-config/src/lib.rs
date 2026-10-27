@@ -263,6 +263,7 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // older generated configs must never claim it implicitly.
             structured_go_test_packages: false,
             structured_process_argv: true,
+            local_cli: false,
             structured_script_payload: true,
             // Internal generated-program execution is a running-binary
             // capability and must fail closed across mixed-version rollout.

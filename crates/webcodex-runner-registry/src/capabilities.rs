@@ -34,6 +34,7 @@ pub enum RunnerFeature {
     StructuredGoTestTool,
     StructuredGoTestPackages,
     StructuredProcessArgv,
+    LocalCli,
     StructuredScriptPayload,
     InternalPosixScript,
     StructuredExecutionJobs,
@@ -68,7 +69,7 @@ pub enum RunnerFeature {
     ComputerTextInput,
 }
 
-const ALL_RUNNER_FEATURES: [RunnerFeature; 58] = [
+const ALL_RUNNER_FEATURES: [RunnerFeature; 59] = [
     RunnerFeature::Shell,
     RunnerFeature::FileRead,
     RunnerFeature::FileWrite,
@@ -95,6 +96,7 @@ const ALL_RUNNER_FEATURES: [RunnerFeature; 58] = [
     RunnerFeature::StructuredGoTestTool,
     RunnerFeature::StructuredGoTestPackages,
     RunnerFeature::StructuredProcessArgv,
+    RunnerFeature::LocalCli,
     RunnerFeature::StructuredScriptPayload,
     RunnerFeature::InternalPosixScript,
     RunnerFeature::StructuredExecutionJobs,
@@ -211,6 +213,7 @@ impl RunnerFeature {
             Self::NativeToolPlugins => wire::RUNNER_CAPABILITY_NATIVE_TOOL_PLUGINS,
             Self::ManagedSshResources => wire::RUNNER_CAPABILITY_MANAGED_SSH_RESOURCES,
             Self::RunnerConfigControl => wire::RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL,
+            Self::LocalCli => "local_cli",
             Self::ComputerControl => wire::RUNNER_CAPABILITY_COMPUTER_CONTROL,
             Self::ComputerScrollToElement => wire::RUNNER_CAPABILITY_COMPUTER_SCROLL_TO_ELEMENT,
             Self::ComputerKeyInput => wire::RUNNER_CAPABILITY_COMPUTER_KEY_INPUT,
@@ -284,6 +287,7 @@ impl RunnerFeature {
             wire::RUNNER_CAPABILITY_NATIVE_TOOL_PLUGINS => Self::NativeToolPlugins,
             wire::RUNNER_CAPABILITY_MANAGED_SSH_RESOURCES => Self::ManagedSshResources,
             wire::RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL => Self::RunnerConfigControl,
+            "local_cli" => Self::LocalCli,
             wire::RUNNER_CAPABILITY_COMPUTER_CONTROL => Self::ComputerControl,
             wire::RUNNER_CAPABILITY_COMPUTER_SCROLL_TO_ELEMENT => Self::ComputerScrollToElement,
             wire::RUNNER_CAPABILITY_COMPUTER_KEY_INPUT => Self::ComputerKeyInput,
@@ -318,6 +322,7 @@ impl RunnerFeature {
             | Self::ProjectLifecycle
             | Self::ProjectPathRegistration => RunnerFeatureInference::GenerationEligible,
             Self::Shell
+            | Self::LocalCli
             | Self::Git
             | Self::StructuredCargoTestExecutionPolicy
             | Self::ApplyTextEditLineScope
@@ -358,6 +363,7 @@ impl RunnerFeature {
 
     fn advertised_by(self, capabilities: &RunnerCapabilities) -> bool {
         match self {
+            Self::LocalCli => capabilities.local_cli,
             Self::Shell => capabilities.shell,
             Self::FileRead => capabilities.file_read,
             Self::FileWrite => capabilities.file_write,

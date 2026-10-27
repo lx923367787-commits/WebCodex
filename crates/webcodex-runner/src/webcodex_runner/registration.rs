@@ -3,22 +3,22 @@
 use crate::webcodex_runner;
 use crate::webcodex_runner::jobs::JobManager;
 use crate::webcodex_runner::transport::http::{
-    RUNNER_REGISTER_PATH, RunnerHttpError, RunnerHttpErrorKind, bounded_single_line,
-    is_active_instance_lease_conflict, looks_like_auth_failure_message, post_json,
+    bounded_single_line, is_active_instance_lease_conflict, looks_like_auth_failure_message,
+    post_json, RunnerHttpError, RunnerHttpErrorKind, RUNNER_REGISTER_PATH,
 };
 use crate::webcodex_runner::{
-    HotRunnerConfig, ReloadableRunnerConfig, RunnerConfig, RunnerProjectCache, ShellConfig,
-    SshConnectionPool, hostname, max_concurrent_jobs,
+    hostname, max_concurrent_jobs, HotRunnerConfig, ReloadableRunnerConfig, RunnerConfig,
+    RunnerProjectCache, ShellConfig, SshConnectionPool,
 };
 use reqwest::blocking::Client;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use webcodex_core::runner_protocol::{
-    RUNNER_PROTOCOL_GENERATION_V2, RunnerCapabilities, RunnerPolicySummary, RunnerProjectSummary,
-    RunnerRegisterRequest, RunnerRegisterResponse, ShellJobInventory, ShellProfileSummaryEntry,
-    ShellProfilesSummary, ShellProjectInventoryStatus,
+    RunnerCapabilities, RunnerPolicySummary, RunnerProjectSummary, RunnerRegisterRequest,
+    RunnerRegisterResponse, ShellJobInventory, ShellProfileSummaryEntry, ShellProfilesSummary,
+    ShellProjectInventoryStatus, RUNNER_PROTOCOL_GENERATION_V2,
 };
 use webcodex_core::{build_info, runner_protocol};
 
@@ -193,6 +193,7 @@ pub(crate) fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabili
     // wire shape, so advertise them independently for rolling upgrades.
     capabilities.structured_go_test_packages = true;
     capabilities.structured_process_argv = true;
+    capabilities.local_cli = true;
     capabilities.structured_script_payload = true;
     capabilities.internal_posix_script = true;
     capabilities.structured_execution_jobs = true;

@@ -33,6 +33,7 @@ mod host_goal_review_probe;
 mod host_goals;
 mod hygiene;
 mod jobs;
+mod local_cli;
 mod lsp;
 mod memory;
 mod metadata;

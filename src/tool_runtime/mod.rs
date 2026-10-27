@@ -63,6 +63,7 @@ mod hygiene_tools;
 mod job_tools;
 mod jobs;
 pub(crate) mod kernel;
+pub(crate) mod local_cli;
 mod lsp_tools;
 pub(crate) mod memory;
 pub(crate) mod metadata;

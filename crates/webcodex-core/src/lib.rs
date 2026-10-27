@@ -15,6 +15,7 @@ pub mod coding_agent;
 pub mod goal;
 pub mod host_goal;
 pub mod job_observation;
+pub mod local_cli;
 pub mod lsp_bridge;
 pub mod mcp_gateway;
 pub mod memory_contract;

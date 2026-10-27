@@ -132,8 +132,8 @@ pub use agent_execution::{
 pub use capabilities::{RunnerFeature, RunnerFeatureSet};
 pub use job_status::job_status_is_active;
 pub use job_updates::{
-    JobLogWait, JobLogWaitOutcome, ShellJobLogObservation, ShellJobStartMetadata,
-    StructuredJobExecution,
+    detached_job_id_for_key, JobLogWait, JobLogWaitOutcome, ShellJobLogObservation,
+    ShellJobStartMetadata, StructuredJobExecution,
 };
 pub use jobs::{command_preview, process_preview, script_preview, COMMAND_PREVIEW_MAX_CHARS};
 pub(crate) use protocol::AcceptedRunnerProtocol;

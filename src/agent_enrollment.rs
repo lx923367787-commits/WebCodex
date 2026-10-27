@@ -570,7 +570,9 @@ pub(crate) fn assignment(db: &Database, binding: &VerifiedAgentRun, args: &Value
                 "project_access":project_access,
                 "evidence_review_guidance":crate::agent_team_decision::GUIDANCE,
                 "execution_access":{"cli_call_budget":projection.policy.max_cli_calls,
-                    "arbitrary_process":false,"file_access_depends_on_cli_budget":false}}),
+                    "arbitrary_process":false,"file_access_depends_on_cli_budget":false,
+                    "local_cli_tool":"local_cli","local_cli_execution_mode":"runner_user",
+                    "local_cli_requires_project_grant":true,"local_cli_requires_frozen_plan":false}}),
             )
         }
         Err(error) => crate::agent_isolation::denial(error.code()),
