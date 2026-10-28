@@ -722,12 +722,67 @@ impl Database {
         Ok(h)
     }
 
+    pub fn host_goal_handoff_failure_code(value: Option<&str>) -> Option<&'static str> {
+        match value {
+            Some("launch_failed") => Some("launch_failed"),
+            Some("thinking_policy_changed") => Some("thinking_policy_changed"),
+            Some("goal_not_active") => Some("goal_not_active"),
+            Some("old_execution_not_quiescent") => Some("old_execution_not_quiescent"),
+            Some("All four handoff startup attempts failed or timed out") => {
+                Some("attempts_exhausted")
+            }
+            Some(_) => Some("handoff_failed"),
+            None => None,
+        }
+    }
+
+    /// Lifecycle data only: never deserialize or return objective, plan, state,
+    /// checkpoint reason, paths or freeform failure text from mixed snapshots.
+    /// The caller must first authorize the owning task/project in this connection.
+    pub(crate) fn host_goal_lifecycle_metadata_on_connection(
+        conn: &Connection,
+        owner: &str,
+        id: &str,
+    ) -> Result<serde_json::Value, GoalStoreError> {
+        conn.query_row(
+            "SELECT g.goal_id,g.project,g.phase,g.revision,g.created_at,g.updated_at,
+                json_extract(g.snapshot_json,'$.fence'),json_extract(g.snapshot_json,'$.plan_version'),
+                c.sequence,json_extract(c.snapshot_json,'$.revision'),json_extract(c.snapshot_json,'$.source_fence'),json_extract(c.snapshot_json,'$.created_at'),
+                json_extract(h.snapshot_json,'$.status'),json_extract(h.snapshot_json,'$.attempt_count'),
+                json_extract(h.snapshot_json,'$.created_at'),json_extract(h.snapshot_json,'$.committed_at'),
+                json_extract(h.snapshot_json,'$.deadline_at'),json_extract(h.snapshot_json,'$.failure_reason')
+             FROM wc_host_goals g
+             LEFT JOIN wc_host_goal_handoffs h ON h.goal_id=g.goal_id AND h.owner_key=g.owner_key
+             LEFT JOIN wc_host_goal_checkpoints c ON c.goal_id=g.goal_id AND c.sequence=COALESCE(json_extract(h.snapshot_json,'$.checkpoint_sequence'),(SELECT MAX(sequence) FROM wc_host_goal_checkpoints WHERE goal_id=g.goal_id))
+             WHERE g.owner_key=?1 AND g.goal_id=?2",
+            params![owner,id],
+            |row| {
+                let failure: Option<String> = row.get(17)?;
+                Ok(serde_json::json!({
+                    "goal_id":row.get::<_,String>(0)?,"project":row.get::<_,String>(1)?,
+                    "goal_phase":row.get::<_,String>(2)?,"goal_revision":row.get::<_,u64>(3)?,
+                    "created_at":row.get::<_,i64>(4)?,"updated_at":row.get::<_,i64>(5)?,
+                    "goal_fence":row.get::<_,u64>(6)?,"plan_version":row.get::<_,u64>(7)?,
+                    "checkpoint_sequence":row.get::<_,Option<u64>>(8)?,
+                    "checkpoint_revision":row.get::<_,Option<u64>>(9)?,
+                    "source_fence":row.get::<_,Option<u64>>(10)?,
+                    "checkpoint_created_at":row.get::<_,Option<i64>>(11)?,
+                    "handoff_status":row.get::<_,Option<String>>(12)?,
+                    "handoff_attempt_count":row.get::<_,Option<u32>>(13)?,
+                    "handoff_created_at":row.get::<_,Option<i64>>(14)?,
+                    "handoff_committed_at":row.get::<_,Option<i64>>(15)?,
+                    "handoff_deadline_at":row.get::<_,Option<i64>>(16)?,
+                    "handoff_failure_code":Self::host_goal_handoff_failure_code(failure.as_deref()),
+                }))
+            },
+        ).optional().map_err(unavailable)?.ok_or_else(not_found)
+    }
+
     pub fn read_host_goal_handoff_control_metadata(
         &self,
         owner: &str,
         id: &str,
     ) -> Result<serde_json::Value, GoalStoreError> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT g.phase,json_extract(g.snapshot_json,'$.fence'),json_extract(c.snapshot_json,'$.revision'),json_extract(c.snapshot_json,'$.source_fence'),json_extract(c.snapshot_json,'$.created_at') FROM wc_host_goals g JOIN wc_host_goal_handoffs h ON h.goal_id=g.goal_id AND h.owner_key=g.owner_key LEFT JOIN wc_host_goal_checkpoints c ON c.goal_id=g.goal_id AND c.sequence=json_extract(h.snapshot_json,'$.checkpoint_sequence') WHERE g.owner_key=?1 AND g.goal_id=?2",params![owner,id],|r|Ok(serde_json::json!({"goal_phase":r.get::<_,String>(0)?,"goal_fence":r.get::<_,u64>(1)?,"checkpoint_revision":r.get::<_,Option<u64>>(2)?,"source_fence":r.get::<_,Option<u64>>(3)?,"checkpoint_created_at":r.get::<_,Option<i64>>(4)?}))).optional().map_err(unavailable)?.ok_or_else(not_found)
+        Self::host_goal_lifecycle_metadata_on_connection(&self.conn.lock().unwrap(), owner, id)
     }
 }

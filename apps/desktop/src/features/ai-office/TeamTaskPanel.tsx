@@ -21,25 +21,26 @@ interface ManagedPlan {
 }
 interface CliAttempt {
   attempt_id: string; project_id: string; root_task_id: string; source_task_id: string;
-  call_index: number; provider_id: string; model: string; effort: string | null;
-  fallback_thinking_profile_id: string; timeout_secs: number | null;
+  call_index: number; provider_id: string; model: string | null; effort: string | null;
+  fallback_thinking_profile_id?: string | null; timeout_secs: number | null;
   dispatch_state: "reserved" | "dispatching" | "bound" | "terminal" | "unknown";
   job_id: string | null; execution_state: "not_started" | "completed" | "timed_out" | "outcome_unknown" | null;
   error_code: string | null; observation_revision: number;
 }
 interface AttemptPage { attempts: CliAttempt[]; total_count: number; next_offset: number | null }
 interface FallbackRecord extends RecoveryObservation {
-  host_request_id?: string | null; thinking_profile_id?: string;
+  host_request_id?: string | null; thinking_profile_id?: string | null;
   cancel_requested?: boolean; response_observed?: boolean; slot_held?: boolean;
 }
 type AgentState = "queued" | "starting" | "running" | "unknown" | "cancelled" | "confirmed_not_started" | "verified_terminal";
 interface TeamAgent {
   team_agent_attempt_id: string; project: string; root_task_id: string; source_task_id: string;
-  thinking_profile_id: string; role: "subagent"; state: AgentState;
+  thinking_profile_id?: string | null; role: "subagent"; state: AgentState;
   host_request_id: string | null; cancel_requested: boolean; response_observed: boolean;
-  revision: number; counts_toward_regular_min: true; counts_toward_regular_max: true; business_verified: false;
+  revision: number; business_verified: false;
 }
-interface TaskSummary { task_id: string; title: string; state: "ready" | "active" | "succeeded" | "failed" }
+interface PublicActivity { execution_state: string; wait_reason?: string; next_step?: string; last_progress_at_unix_ms?: number | null }
+interface TaskSummary { activity?: PublicActivity | null; task_id: string; title: string; state: "ready" | "active" | "succeeded" | "failed" }
 interface MemberCompletion {
   task_id: string; role: "manager" | "subagent";
   planned_cli_calls: number; consumed_cli_calls: number; confirmed_cli_calls: number; required_cli_calls: number;
@@ -65,9 +66,15 @@ interface PlanDetail {
 
 const DISPATCH = { reserved: "调用槽已预留", dispatching: "正在发送", bound: "已关联 Job", terminal: "执行终态已观测", unknown: "发送结果待核实" };
 const EXECUTION = { not_started: "未启动", completed: "执行已结束", timed_out: "执行超时", outcome_unknown: "执行结果待核实" };
-const AGENT_STATES: Record<AgentState, string> = { queued: "等待派发", starting: "正在启动对话", running: "对话进行中", unknown: "派发结果待核实", cancelled: "已请求取消", confirmed_not_started: "已核实未启动", verified_terminal: "宿主已结束 · 待验收" };
+const AGENT_STATES: Record<AgentState, string> = { queued: "等待派发", starting: "正在启动对话", running: "已派发 · 执行状态另行观测", unknown: "派发结果待核实", cancelled: "已请求取消", confirmed_not_started: "已核实未启动", verified_terminal: "宿主已结束 · 待验收" };
+const ACTIVITY: Record<string,string> = { queued:"排队中", running:"已观测执行中", waiting_dependencies:"等待依赖", blocked:"续跑受阻", completed:"任务已记录完成", failed:"任务记录失败", idle:"未观测执行", not_observed:"未观测执行" };
+function activityLabel(summary: TaskSummary | undefined): string { return summary?.activity ? ACTIVITY[summary.activity.execution_state] ?? "未观测执行" : "未提供执行观测"; }
 const TASK_STATES: Record<TaskSummary["state"], string> = { ready: "任务记录待执行", active: "任务记录进行中", succeeded: "任务记录已完成", failed: "任务记录失败" };
 const PAGE_SIZE = 20;
+
+function agentProfile(value: string | null | undefined): string {
+  return !value || value === "default" ? "工具默认设置" : value;
+}
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -86,7 +93,7 @@ function validMember(value: unknown): boolean {
   const member = object(value);
   return Boolean(member && typeof member.task_id === "string" && Array.isArray(member.cli_calls) && member.cli_calls.every((item) => {
     const call = object(item);
-    return call && typeof call.provider_id === "string" && typeof call.model === "string";
+    return call && typeof call.provider_id === "string" && (call.model == null || typeof call.model === "string");
   }));
 }
 function parseAttemptPage(value: unknown, projectId: string, rootId: string, offset: number): AttemptPage {
@@ -94,7 +101,7 @@ function parseAttemptPage(value: unknown, projectId: string, rootId: string, off
   if (!page || !Array.isArray(page.attempts) || page.attempts.length > PAGE_SIZE || !validCount(page.total_count) || !(page.next_offset === null || validCount(page.next_offset) && page.next_offset > offset)) throw new Error("CLI 尝试分页信息无效。");
   for (const entry of page.attempts) {
     const attempt = object(entry);
-    if (!attempt || attempt.project_id !== projectId || attempt.root_task_id !== rootId || typeof attempt.attempt_id !== "string" || typeof attempt.source_task_id !== "string" || typeof attempt.model !== "string" || typeof attempt.provider_id !== "string") throw new Error("CLI 尝试记录的任务归属无效。");
+    if (!attempt || attempt.project_id !== projectId || attempt.root_task_id !== rootId || typeof attempt.attempt_id !== "string" || typeof attempt.source_task_id !== "string" || (attempt.model !== null && typeof attempt.model !== "string") || typeof attempt.provider_id !== "string") throw new Error("CLI 尝试记录的任务归属无效。");
   }
   return page as unknown as AttemptPage;
 }
@@ -103,7 +110,7 @@ function parseDetail(value: unknown, projectId: string, rootId: string): PlanDet
   if (!result || result.enforcement !== "managed_tasks" || !plan || plan.project_id !== projectId || plan.root_task_id !== rootId || !policy || !validCount(policy.revision) || !assignments || !validMember(assignments.manager) || !Array.isArray(assignments.subagents) || !assignments.subagents.every(validMember) || !attempts || !Array.isArray(attempts.attempts) || !validCount(attempts.total_count) || !(attempts.next_offset === null || validCount(attempts.next_offset))) throw new Error("团队任务详情格式或项目归属无效。");
   for (const entry of attempts.attempts) {
     const attempt = object(entry);
-    if (!attempt || attempt.project_id !== projectId || attempt.root_task_id !== rootId || typeof attempt.attempt_id !== "string" || typeof attempt.source_task_id !== "string" || typeof attempt.model !== "string" || typeof attempt.provider_id !== "string") throw new Error("CLI 尝试记录的任务归属无效。");
+    if (!attempt || attempt.project_id !== projectId || attempt.root_task_id !== rootId || typeof attempt.attempt_id !== "string" || typeof attempt.source_task_id !== "string" || (attempt.model !== null && typeof attempt.model !== "string") || typeof attempt.provider_id !== "string") throw new Error("CLI 尝试记录的任务归属无效。");
   }
   if (!Array.isArray(result.fallbacks)) throw new Error("服务未提供恢复记录观测，当前无法确认恢复槽状态。");
   for (const entry of result.fallbacks) {
@@ -118,7 +125,7 @@ function parseDetail(value: unknown, projectId: string, rootId: string): PlanDet
     const seen = new Set<string>();
     for (const entry of result.agents) {
       const agent = object(entry);
-      if (!agent || agent.project !== projectId || agent.root_task_id !== rootId || typeof agent.source_task_id !== "string" || !subagentIds.has(agent.source_task_id) || seen.has(agent.source_task_id) || agent.role !== "subagent" || typeof agent.team_agent_attempt_id !== "string" || typeof agent.thinking_profile_id !== "string" || typeof agent.state !== "string" || typeof agent.cancel_requested !== "boolean" || typeof agent.response_observed !== "boolean" || !(agent.host_request_id === null || typeof agent.host_request_id === "string") || !validCount(agent.revision) || agent.counts_toward_regular_min !== true || agent.counts_toward_regular_max !== true) throw new Error("普通伙伴的项目或任务关联无效。");
+      if (!agent || agent.project !== projectId || agent.root_task_id !== rootId || typeof agent.source_task_id !== "string" || !subagentIds.has(agent.source_task_id) || seen.has(agent.source_task_id) || agent.role !== "subagent" || typeof agent.team_agent_attempt_id !== "string" || (agent.thinking_profile_id != null && typeof agent.thinking_profile_id !== "string") || typeof agent.state !== "string" || typeof agent.cancel_requested !== "boolean" || typeof agent.response_observed !== "boolean" || !(agent.host_request_id === null || typeof agent.host_request_id === "string") || !validCount(agent.revision)) throw new Error("普通伙伴的项目或任务关联无效。");
       seen.add(agent.source_task_id);
     }
   }
@@ -215,7 +222,7 @@ export function TeamTaskPanel({ api, projectId, demo = false }: { api: Pick<AiOf
       <CompletionPanel detail={detail} />
       <RegularAgentList detail={detail} />
       <CliAttemptsPanel key={projectId + "/" + detail.plan.root_task_id} team={team} projectId={projectId} rootId={detail.plan.root_task_id} initialPage={detail.attempts} />
-      <section className="ao-team-recovery"><header><div><h4>独立救场伙伴</h4><p>不占常规人数上下限，候选回复仍需验收。</p></div><strong aria-label={"根任务恢复槽占用 " + (slot ?? "未核实")}>{slot ?? "—"}<small>/ 1</small></strong></header>{detail.fallbacks_may_be_truncated !== false && <p className="ao-team-note">恢复记录可能未完整返回，不能据此认定未显示的恢复槽已释放。</p>}{detail.fallbacks.length === 0 ? <RecoveryStatusPanel availability="connected" slotOccupancy={slot} /> : detail.fallbacks.map((record) => <div className="ao-team-fallback" key={record.fallback_id}><RecoveryStatusPanel observation={{ ...record, policy_revision: record.policy_revision ?? detail.plan.policy.revision, blocked_reason: record.blocked_reason ?? null }} availability="connected" slotOccupancy={typeof record.slot_held === "boolean" ? record.slot_held ? 1 : 0 : null} source="live" />{record.thinking_profile_id && <p className="ao-team-note">总经理已选档位：<code>{record.thinking_profile_id}</code></p>}{record.host_request_id && <p className="ao-team-note">宿主请求：<code>{record.host_request_id}</code></p>}{record.response_observed && <p className="ao-team-candidate" role="status">已收到候选结果，等待业务验收。收到回复不代表任务成功，也不自动释放恢复槽。</p>}{record.cancel_requested && <p className="ao-team-note">已请求取消恢复，仍需核实宿主停止结果。</p>}</div>)}</section>
+      <section className="ao-team-recovery"><header><div><h4>独立救场伙伴</h4><p>恢复工作按需启动，候选回复仍需验收。</p></div><strong aria-label={"根任务恢复槽占用 " + (slot ?? "未核实")}>{slot ?? "—"}<small>/ 1</small></strong></header>{detail.fallbacks_may_be_truncated !== false && <p className="ao-team-note">恢复记录可能未完整返回，不能据此认定未显示的恢复槽已释放。</p>}{detail.fallbacks.length === 0 ? <RecoveryStatusPanel availability="connected" slotOccupancy={slot} /> : detail.fallbacks.map((record) => <div className="ao-team-fallback" key={record.fallback_id}><RecoveryStatusPanel observation={{ ...record, policy_revision: record.policy_revision ?? detail.plan.policy.revision, blocked_reason: record.blocked_reason ?? null }} availability="connected" slotOccupancy={typeof record.slot_held === "boolean" ? record.slot_held ? 1 : 0 : null} source="live" />{record.thinking_profile_id && <p className="ao-team-note">总经理已选档位：<code>{record.thinking_profile_id}</code></p>}{record.host_request_id && <p className="ao-team-note">宿主请求：<code>{record.host_request_id}</code></p>}{record.response_observed && <p className="ao-team-candidate" role="status">已收到候选结果，等待业务验收。收到回复不代表任务成功，也不自动释放恢复槽。</p>}{record.cancel_requested && <p className="ao-team-note">已请求取消恢复，仍需核实宿主停止结果。</p>}</div>)}</section>
     </div>}
   </section>;
 }
@@ -229,24 +236,21 @@ function dispatchLabel(agent: TeamAgent | undefined, observed: boolean): string 
   return AGENT_STATES[agent.state] ?? "派发状态待核实";
 }
 function Assignment({ member, role, summary, agent, dispatchObserved }: { member: PlanMember; role: string; summary?: TaskSummary; agent?: TeamAgent; dispatchObserved: boolean }) {
-  return <div className="ao-team-assignment"><span>{role} · {role === "总经理" ? "主任务协调" : dispatchLabel(agent, dispatchObserved)}</span><strong>{summary?.title || "任务标题未提供"}</strong><code>{member.task_id}</code><small>{summary ? TASK_STATES[summary.state] ?? "任务状态未提供" : "任务状态未提供"}</small><small>{member.cli_calls.length} 个已登记 CLI 调用槽</small>{member.cli_calls.map((call, index) => <p key={index}>{call.provider_id === "workbuddy" ? "WorkBuddy" : call.provider_id === "antigravity" ? "Antigravity" : call.provider_id} · {call.model}{call.effort ? " / " + call.effort : ""}</p>)}</div>;
+  return <div className="ao-team-assignment"><span>{role} · {role === "总经理" ? "主任务协调" : dispatchLabel(agent, dispatchObserved)}</span><strong>{summary?.title || "任务标题未提供"}</strong><code>{member.task_id}</code><small>{summary ? TASK_STATES[summary.state] ?? "任务状态未提供" : "任务状态未提供"}</small><small>{member.cli_calls.length} 个已登记 CLI 调用槽</small>{member.cli_calls.map((call, index) => <p key={index}>{call.provider_id === "workbuddy" ? "WorkBuddy" : call.provider_id === "antigravity" ? "Antigravity" : call.provider_id} · {call.model ?? "CLI 默认模型"}{call.effort ? " / " + call.effort : ""}</p>)}</div>;
 }
 function Fact({ label, value }: { label: string; value: string }) { return <div><dt>{label}</dt><dd>{value}</dd></div>; }
 
 function CompletionPanel({ detail }: { detail: PlanDetail }) {
   const completion = detail.completion;
   if (!completion) return <section className="ao-team-card" aria-label="实际执行与完成条件"><header><h4>实际执行与完成条件</h4></header><p className="ao-team-note">Server 尚未提供实际执行计数与完成条件，不能从计划人数、调用槽或派发记录数量推算。</p></section>;
-  const gate = {
-    not_required: { title: "自主模式 · 不设置最低执行门槛", note: "总经理自主安排人数与调用次数，任务仍需业务验收。" },
-    pending: { title: "最低执行要求尚未核实满足", note: "当前不能将该团队任务标记为成功；等待可信派发与调用证据。" },
-    satisfied: { title: "最低执行要求已核实满足", note: "数量条件已满足，仍须验收任务成果；这不等于业务成功。" },
-    cancelled: { title: "计划已请求取消", note: "取消中的计划不能继续标记成功，停止结果仍须独立核实。" },
-  }[completion.success_gate];
+  const gate = completion.success_gate === "cancelled"
+    ? { title: "计划已请求取消", note: "停止结果仍须独立核实。" }
+    : { title: "不设置最低执行门槛", note: "子 Agent 和 CLI 均为可选，任务按实际成果验收。" };
   return <section className="ao-team-card ao-team-completion" aria-label="实际执行与完成条件"><header><h4>实际执行与完成条件</h4><span>{TASK_STATES[completion.task_state]}</span></header>
     <div className={"ao-completion-gate is-" + completion.success_gate} role="status"><strong>{gate.title}</strong><p>{gate.note}</p></div>
-    <div className="ao-completion-metrics"><CompletionCount label="计划子 Agent" value={completion.planned_subagents} /><CompletionCount label="已核实派发" value={completion.confirmed_subagents} /><CompletionCount label="最低派发要求" value={completion.required_subagents} /><CompletionCount label="计划 CLI 调用" value={completion.planned_cli_calls} /><CompletionCount label="已占用调用预算" value={completion.consumed_cli_calls} /><CompletionCount label="已核实 CLI 调用" value={completion.confirmed_cli_calls} /></div>
-    <p className="ao-team-note">已核实数量为 0 表示尚无足够证据，不代表从未执行。占用预算包含预留、失败和结果未知的尝试，不等于已执行次数。</p>
-    <div className="ao-completion-members">{completion.members.map((member) => <article className="ao-completion-member" key={member.task_id} aria-label={"成员执行计数 " + member.task_id}><header><div><span>{member.role === "manager" ? "总经理" : nicknameForTask(member.task_id) + " · 常规伙伴"}</span><strong>{taskSummary(detail, member.task_id)?.title || "任务标题未提供"}</strong><code>{member.task_id}</code></div><span>{member.role === "manager" ? "主任务协调" : member.dispatch_confirmed ? "派发已核实" : "派发证据待确认"}</span></header><dl><Fact label="计划 CLI" value={String(member.planned_cli_calls)} /><Fact label="已占用预算" value={String(member.consumed_cli_calls)} /><Fact label="已核实调用" value={String(member.confirmed_cli_calls)} /><Fact label="最低调用要求" value={String(member.required_cli_calls)} /></dl><p>{completion.success_gate === "not_required" ? "自主模式不设置最低调用门槛。" : member.minimum_met ? "该成员最低调用数量已满足，仍需业务验收。" : "该成员最低调用证据尚未满足，阻止任务标记成功。"}</p></article>)}</div>
+    <div className="ao-completion-metrics"><CompletionCount label="计划子 Agent" value={completion.planned_subagents} /><CompletionCount label="已核实派发" value={completion.confirmed_subagents} /><CompletionCount label="计划 CLI 调用" value={completion.planned_cli_calls} /><CompletionCount label="已登记调用尝试" value={completion.consumed_cli_calls} /><CompletionCount label="已核实 CLI 调用" value={completion.confirmed_cli_calls} /></div>
+    <p className="ao-team-note">已核实数量为 0 表示尚无足够证据，不代表从未执行。登记尝试包含预留、失败和结果未知的尝试，不等于已执行次数。</p>
+    <div className="ao-completion-members">{completion.members.map((member) => <article className="ao-completion-member" key={member.task_id} aria-label={"成员执行计数 " + member.task_id}><header><div><span>{member.role === "manager" ? "总经理" : nicknameForTask(member.task_id) + " · 常规伙伴"}</span><strong>{taskSummary(detail, member.task_id)?.title || "任务标题未提供"}</strong><code>{member.task_id}</code></div><span>{member.role === "manager" ? "主任务协调" : member.dispatch_confirmed ? "派发已核实" : "派发证据待确认"}</span></header><dl><Fact label="计划 CLI" value={String(member.planned_cli_calls)} /><Fact label="已登记尝试" value={String(member.consumed_cli_calls)} /><Fact label="已核实调用" value={String(member.confirmed_cli_calls)} /></dl><p>调用次数仅作记录，不作为完成门槛。</p></article>)}</div>
     <p className="ao-team-note">GPT 目前以可信宿主回复核实派发；CLI 以真实 Job 已结束或超时的观测核实调用，失败的实际调用也计入。候选回复不能代替业务验收。</p>
   </section>;
 }
@@ -342,7 +346,7 @@ function CliAttemptsPanel({ team, projectId, rootId, initialPage }: { team: NonN
   return <section className="ao-team-card" aria-label="CLI 执行尝试"><header><h4>CLI 执行尝试</h4><span>已显示 {loaded.attempts.length} / {loaded.total_count} 条记录</span></header>
     <p className="ao-team-note">按创建顺序读取，每页最多 20 条；记录条数不等于已核实执行次数。</p>
     {error && <div className="ao-team-error" role="alert"><p>{error}</p><button type="button" className="ao-button ao-button-outline" disabled={Boolean(loading)} onClick={() => setRetry((value) => value + 1)}>重读已加载记录</button></div>}
-    <div className="ao-team-attempts">{loaded.attempts.map((attempt) => <article className="ao-team-attempt" key={attempt.attempt_id} data-attempt-id={attempt.attempt_id}><div><strong>{attempt.provider_id === "workbuddy" ? "WorkBuddy" : attempt.provider_id === "antigravity" ? "Antigravity" : attempt.provider_id}</strong><span>{DISPATCH[attempt.dispatch_state] ?? "未知发送状态"}</span></div><dl><Fact label="原任务" value={attempt.source_task_id} /><Fact label="执行尝试" value={attempt.attempt_id} /><Fact label="Job" value={attempt.job_id ?? "尚未关联"} /><Fact label="模型 / 强度" value={attempt.model + (attempt.effort ? " / " + attempt.effort : "")} /><Fact label="进程执行状态" value={attempt.execution_state ? EXECUTION[attempt.execution_state] ?? "未知执行状态" : "未提供可信观测"} /><Fact label="已选恢复档位" value={attempt.fallback_thinking_profile_id || "未提供"} />{attempt.error_code && <Fact label="错误代码" value={attempt.error_code} />}</dl></article>)}</div>
+    <div className="ao-team-attempts">{loaded.attempts.map((attempt) => <article className="ao-team-attempt" key={attempt.attempt_id} data-attempt-id={attempt.attempt_id}><div><strong>{attempt.provider_id === "workbuddy" ? "WorkBuddy" : attempt.provider_id === "antigravity" ? "Antigravity" : attempt.provider_id}</strong><span>{DISPATCH[attempt.dispatch_state] ?? "未知发送状态"}</span></div><dl><Fact label="原任务" value={attempt.source_task_id} /><Fact label="执行尝试" value={attempt.attempt_id} /><Fact label="Job" value={attempt.job_id ?? "尚未关联"} /><Fact label="模型 / 强度" value={(attempt.model ?? "CLI 默认模型") + (attempt.effort ? " / " + attempt.effort : "")} /><Fact label="进程执行状态" value={attempt.execution_state ? EXECUTION[attempt.execution_state] ?? "未知执行状态" : "未提供可信观测"} /><Fact label="已选恢复档位" value={agentProfile(attempt.fallback_thinking_profile_id)} />{attempt.error_code && <Fact label="错误代码" value={attempt.error_code} />}</dl></article>)}</div>
     {loaded.attempts.length === 0 && <p className="ao-team-note">暂无已登记的 CLI 执行尝试。</p>}
     <div className="ao-team-attempt-pagination">{loading === "refresh" && <span role="status">正在刷新已加载尝试…</span>}{loaded.next_offset !== null && <button type="button" className="ao-button ao-button-outline" disabled={Boolean(loading)} onClick={() => void loadMore()}>{loading === "more" ? "正在加载更多尝试…" : "加载更多尝试"}</button>}{loaded.next_offset === null && loaded.attempts.length >= loaded.total_count && <span>已显示当前全部尝试</span>}{loaded.next_offset === null && loaded.attempts.length < loaded.total_count && <span>服务尚未提供下一页位置，当前记录不完整。</span>}</div>
   </section>;
@@ -350,7 +354,7 @@ function CliAttemptsPanel({ team, projectId, rootId, initialPage }: { team: NonN
 
 function RegularAgentList({ detail }: { detail: PlanDetail }) {
   return <section className="ao-team-card"><header><h4>普通 GPT 小伙伴</h4><span>{detail.agents === undefined ? "派发观测未提供" : detail.agents.length + " 条派发记录"}</span></header>
-    {detail.agents === undefined ? <p className="ao-team-note">Server 尚未提供普通伙伴派发记录，不能确认成员是否已启动。</p> : detail.agents.length === 0 ? <p className="ao-team-note">计划中的普通伙伴尚未派发。</p> : <div className="ao-team-attempts">{detail.agents.map((agent) => <article className="ao-team-attempt" key={agent.team_agent_attempt_id}><div><strong>{nicknameForTask(agent.source_task_id)} · 普通 GPT 伙伴</strong><span>{dispatchLabel(agent, true)}</span></div><p className="ao-team-assigned-title">{taskSummary(detail, agent.source_task_id)?.title || "任务标题未提供"}</p><dl><Fact label="真实任务 ID" value={agent.source_task_id} /><Fact label="派发记录" value={agent.team_agent_attempt_id} /><Fact label="总经理所选档位" value={agent.thinking_profile_id} /><Fact label="宿主请求" value={agent.host_request_id ?? "尚未关联"} /><Fact label="记录版本" value={String(agent.revision)} /></dl>{agent.response_observed && <p className="ao-team-candidate" role="status">普通伙伴已返回候选回复，业务结果尚未验收。</p>}{agent.state === "verified_terminal" && <p className="ao-team-note">宿主执行终态已核实，不能据此认定业务任务成功。</p>}{agent.cancel_requested && <p className="ao-team-note">普通伙伴已收到取消请求，停止结果仍以宿主观测为准。</p>}</article>)}</div>}
+    {detail.agents === undefined ? <p className="ao-team-note">Server 尚未提供普通伙伴派发记录，不能确认成员是否已启动。</p> : detail.agents.length === 0 ? <p className="ao-team-note">计划中的普通伙伴尚未派发。</p> : <div className="ao-team-attempts">{detail.agents.map((agent) => <article className="ao-team-attempt" key={agent.team_agent_attempt_id}><div><strong>{nicknameForTask(agent.source_task_id)} · 普通 GPT 伙伴</strong><span>{dispatchLabel(agent, true)}</span></div><p className="ao-team-assigned-title">{taskSummary(detail, agent.source_task_id)?.title || "任务标题未提供"}</p><dl><Fact label="真实任务 ID" value={agent.source_task_id} /><Fact label="派发记录" value={agent.team_agent_attempt_id} /><Fact label="总经理所选档位" value={agentProfile(agent.thinking_profile_id)} /><Fact label="宿主请求" value={agent.host_request_id ?? "尚未关联"} /><Fact label="记录版本" value={String(agent.revision)} /></dl>{agent.response_observed && <p className="ao-team-candidate" role="status">普通伙伴已返回候选回复，业务结果尚未验收。</p>}{agent.state === "verified_terminal" && <p className="ao-team-note">宿主执行终态已核实，不能据此认定业务任务成功。</p>}{agent.cancel_requested && <p className="ao-team-note">普通伙伴已收到取消请求，停止结果仍以宿主观测为准。</p>}</article>)}</div>}
   </section>;
 }
 
@@ -360,17 +364,16 @@ function ManagedTeamOffice({ detail }: { detail: PlanDetail }) {
   const managerId = detail.plan.plan.manager.task_id;
   const members: SceneMember[] = [detail.plan.plan.manager, ...detail.plan.plan.subagents].map((member) => {
     const manager = member.task_id === managerId;
-    const agent = detail.agents?.find((record) => record.source_task_id === member.task_id);
     return {
       id: member.task_id, name: nicknameForTask(member.task_id), role: manager ? "总经理" : "GPT 伙伴",
-      state: manager ? "主任务协调" : dispatchLabel(agent, detail.agents !== undefined),
+      state: activityLabel(taskSummary(detail,member.task_id)),
       task: taskSummary(detail, member.task_id)?.title || "任务标题未提供",
-      parentId: manager ? null : managerId, working: !manager && agent?.state === "running", kind: manager ? "manager" : "agent",
+      parentId: manager ? null : managerId, working: taskSummary(detail,member.task_id)?.activity?.execution_state === "running", kind: manager ? "manager" : "agent",
     };
   });
   const person = members.find((member) => member.id === selectedId) ?? members[0];
   const agent = detail.agents?.find((record) => record.source_task_id === person?.id);
   const summary = person ? taskSummary(detail, person.id) : undefined;
   const regionId = "ao-task-office-" + detail.plan.root_task_id;
-  return <section className="ao-team-office"><button type="button" className="ao-team-office-toggle" aria-expanded={open} aria-controls={regionId} onClick={() => setOpen((value) => !value)}><div><span className="ao-small-kicker">YOUR REAL TEAM</span><strong>{open ? "收起任务小人办公室" : "展开任务小人办公室"}</strong></div><span>{members.length} 个计划任务 {open ? "−" : "+"}</span></button>{open && <div className="ao-team-office-content" id={regionId}><p className="ao-team-note">小人对应真实任务 ID，昵称仅用于辨认。走动是装饰；未派发的成员不会标为工作中。</p><OfficeScene members={members} selectedId={person?.id ?? null} onSelect={setSelectedId} demo={false} />{person && <section className="ao-team-person" aria-label="选中伙伴的真实任务"><OfficeGlyph kind={person.kind} residentId={person.id} /><div><strong>{person.name} · {person.role}</strong><h4>{person.task}</h4><dl><Fact label="真实任务 ID" value={person.id} /><Fact label="实际派发状态" value={person.state} /><Fact label="任务记录状态" value={summary ? TASK_STATES[summary.state] ?? "未提供" : "未提供"} /><Fact label="已选档位" value={agent?.thinking_profile_id ?? "未提供"} /><Fact label="宿主请求" value={agent?.host_request_id ?? "未关联"} /></dl>{person.id === managerId && <p className="ao-team-note">当前观测未关联总经理的真实对话，因此不将它标记为正在工作。</p>}{agent?.response_observed && <p className="ao-team-candidate">已收到候选回复，业务验收尚未确认。</p>}</div></section>}</div>}</section>;
+  return <section className="ao-team-office"><button type="button" className="ao-team-office-toggle" aria-expanded={open} aria-controls={regionId} onClick={() => setOpen((value) => !value)}><div><span className="ao-small-kicker">YOUR REAL TEAM</span><strong>{open ? "收起任务小人办公室" : "展开任务小人办公室"}</strong></div><span>{members.length} 个计划任务 {open ? "−" : "+"}</span></button>{open && <div className="ao-team-office-content" id={regionId}><p className="ao-team-note">小人对应真实任务 ID，昵称仅用于辨认。走动仅为装饰；只有系统观察到正在执行时才标记工作中，派发成功不代表仍在执行。</p><OfficeScene members={members} selectedId={person?.id ?? null} onSelect={setSelectedId} demo={false} />{person && <section className="ao-team-person" aria-label="选中伙伴的真实任务"><OfficeGlyph kind={person.kind} residentId={person.id} /><div><strong>{person.name} · {person.role}</strong><h4>{person.task}</h4><dl><Fact label="真实任务 ID" value={person.id} /><Fact label="实际执行观测" value={person.state} /><Fact label="实际派发状态" value={dispatchLabel(agent,detail.agents!==undefined)} /><Fact label="任务记录状态" value={summary ? TASK_STATES[summary.state] ?? "未提供" : "未提供"} /><Fact label="等待条件" value={summary?.activity?.wait_reason || "未登记"} /><Fact label="下一步" value={summary?.activity?.next_step || "未登记"} /><Fact label="最近公开进展" value={summary?.activity?.last_progress_at_unix_ms ? new Date(summary.activity.last_progress_at_unix_ms).toLocaleString() : "未观测"} /><Fact label="已选档位" value={agent ? agentProfile(agent.thinking_profile_id) : "未提供"} /><Fact label="宿主请求" value={agent?.host_request_id ?? "未关联"} /></dl>{person.id === managerId && summary?.activity?.execution_state !== "running" && <p className="ao-team-note">尚未收到总经理当前执行的系统观测，不将它标记为正在工作。</p>}{agent?.response_observed && <p className="ao-team-candidate">已收到候选回复，业务验收尚未确认。</p>}</div></section>}</div>}</section>;
 }

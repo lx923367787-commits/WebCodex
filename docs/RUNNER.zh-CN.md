@@ -112,7 +112,44 @@ runtime 工具 `register_project` 与 `create_project` 让客户端在在线 Run
 
 ## 本地 MCP provider
 
-Runner 可以直接托管供 WebCodex 内建 MCP gateway 使用的 persistent stdio MCP provider：
+Runner 可以连接本机 stdio MCP 程序或给定地址的 HTTP MCP 服务。日常接入优先使用
+下面的 `tool_connection`；手工配置仍可使用 `runner.toml`：
+
+### 连接一次，后续直接使用
+
+先确定工具所在电脑的 `client_id`。例如，“连接这个工具”对应 `connect`，“工具搬家了”
+对应 `update`，“查看连接”对应 `status`，“重新连接”对应 `reconnect`，“移除连接”对应
+`remove`。以下是传给 `tool_connection` 的示例参数，路径和 Runner 名称需替换为实际值：
+
+```jsonl
+{"client_id":"my-runner","action":"connect","kind":"mcp","id":"knowledge","entry":"E:/tools/knowledge/server.py","args":["--read-only"],"cwd":"E:/tools/knowledge"}
+{"client_id":"my-runner","action":"connect","kind":"plugin","id":"repo-tools","entry":"E:/tools/repo/plugin.mjs"}
+{"client_id":"my-runner","action":"status"}
+{"client_id":"my-runner","action":"update","kind":"mcp","id":"knowledge","entry":"E:/tools/knowledge-v2/server.py","args":["--read-only"],"cwd":"E:/tools/knowledge-v2"}
+{"client_id":"my-runner","action":"reconnect","kind":"mcp","id":"knowledge"}
+{"client_id":"my-runner","action":"remove","kind":"mcp","id":"knowledge"}
+```
+
+`entry` 可为本机可执行文件、Python/JavaScript 脚本的绝对路径、已有 MCP JSON 配置文件
+的绝对路径，或 `http://127.0.0.1:8123/mcp` 这样的 HTTP/HTTPS MCP 地址。JSON 的
+`mcpServers` 含多项时，`id` 必须匹配要导入的项；只有一项时可另取连接名。
+这是一次导入，原 JSON 后续改动需重新 `update`；不会自动扫描目录或跟踪其他应用配置。
+需要时可传 `args`、`cwd`、`env`、`headers`；搬动工具目录时也应核对并更新 `cwd`。
+凭据优先留在 Runner 本机已有配置文件中，不要粘贴到对话。
+
+成功连接会保存到该 Runner 的 `runner.toml` 并验证工具清单；新增、更新、重连、移除
+只切换指定连接，不重启整个 Runner。相同配置的 `connect` 可复用已有连接，以返回的
+连接 `id` 为准；已有同名连接配置
+不同时应使用 `update`。`remove` 只移除连接，不删除工具文件；`status` 返回当前状态、
+已知工具数和可用的安全错误码，
+不会调用业务工具，也不表示业务操作已经验证成功。该管理入口要求 `runner:manage`；
+连接后的 MCP/native plugin 仍通过各自的 `mcp_tool` / `plugin_tool` 使用并检查调用权限。
+管理响应丢失时先查 `status`；业务调用的 `outcome_unknown` 不能靠重连后盲目重发。
+
+HTTP 服务需预先运行，地址可以是本机、局域网或明确提供的远程 MCP 地址；接入不会
+自动安装工具、启动 HTTP 服务或完成上游 OAuth 登录。Python/Node 等脚本运行时需要已安装。
+
+### 手工配置
 
 ```toml
 [mcp]
@@ -128,21 +165,61 @@ env_from_env = { GITHUB_TOKEN = "GITHUB_TOKEN", PATH = "PATH", HOME = "HOME" }
 timeout_secs = 30
 ```
 
-`executable` 与可选 `cwd` 都是 Runner host-local operator 配置并且必须为绝对路径；非法路径会 fail closed。`[mcp]` 属于 restart-required 配置，不支持 provider hot reload。
+`executable` 与可选 `cwd` 都必须是 Runner 本机绝对路径；非法路径会 fail closed。
+手工修改 `[mcp]` 后，普通 `runner_config_reload` 仍报告 restart-required；需要重启才能
+完整应用这些手工改动。上面的 `tool_connection` 则负责保存并切换指定连接，两条路径不要混淆。
 
-provider 不会整体继承 Runner 环境。`env_from_env` 只复制显式列出的变量，WebCodex 自己的 sensitive transport/account credential 变量不允许映射；配置的 source variable 缺失时会在 provider 启动前失败。
+provider 保留 PATH、系统目录、临时目录、用户目录等基础运行环境，不会整体继承 Runner
+环境。额外值可用 `env` 显式提供，或用 `env_from_env` 从 Runner 指定变量复制；WebCodex
+自己的 sensitive transport/account credential 变量不允许映射，配置的 source variable
+缺失时会在 provider 启动前失败。
 
 把 credential 映射给 provider，就等于把这份 credential 委托给该 provider process。provider 可以按自身实现使用它，也可以通过正常 tool result 返回派生值甚至原始值；WebCodex 不会尝试对任意 provider output 做 secret redaction。因此应把 configured provider 视为 credential recipient，使用 least-privilege provider credential，并注意任何拥有 `mcp:local` 权限的 caller 都能行使这些 credential 为 provider 提供的能力。
 
-provider 在第一次真实交互时启动并复用。Server 只看到逻辑 provider `id`/`name`，不会拿到 executable path、环境 value、PID、stderr 或 Runner credential。`mcp_tool(action=list)` 只表示 provider id 是否可路由；`list(server=...)` 与 `describe` 才会与 provider 交互。
+手工配置的 provider 在第一次真实交互时启动并复用；`tool_connection connect/update`
+会在保存前连接并读取工具清单。运行状态与 gateway 响应不返回 executable path、环境值、
+PID 或 stderr；显式传给 `tool_connection` 的管理参数会经过 Server 转发。
+`mcp_tool(action=list)` 只表示 provider id 是否可路由；`list(server=...)` 与 `describe`
+才会与 provider 交互。
+
+### Python MCP 程序接入示例
+
+已有的 Python stdio MCP 程序可以复用本节的 gateway。以下路径、程序入口和连接名称均为占位示例，需替换为运行 Runner 的电脑上的实际值，并只保存在该电脑的 `runner.toml` 中。已有 `[mcp]` 时只追加 provider，不重复声明表或覆盖其他 provider：
+
+```toml
+[mcp]
+request_timeout_secs = 60
+
+[[mcp.providers]]
+id = "python-tools"
+name = "Python MCP tools"
+executable = 'C:\path\to\python.exe'
+args = ["-B", "run_mcp.py"]
+cwd = 'C:\path\to\mcp-project'
+env_from_env = { SystemRoot = "SystemRoot" }
+timeout_secs = 60
+```
+
+手工修改配置后，在现有任务空闲时重启该 Runner，使新的 MCP 注册进入 Server。插件热重载不会加载 `[mcp]` 的变更。Desktop 管理的 Runner 应通过 Desktop 的现有进程生命周期重新启动，保留原配置、连接和账号。stdio 程序由 Runner 在需要交互时启动；若程序还依赖独立的后台服务，应按该程序的说明先准备好依赖。
+
+原生插件 `[[plugins.providers]]` 与标准 MCP `[[mcp.providers]]` 是两个独立目录：前者使用 `webcodex-plugin-v1`、`command` 和 `plugin_tool`，后者使用 MCP、`executable` 和 `mcp_tool`。程序入口必须实现所选协议；仅注册原生插件时，`mcp_tool(action="list")` 不会发现它，可能仍返回 `servers=[]`。
+
+ChatGPT Agent 通过已有的 `mcp_tool` 查看连接和实际工具清单：
+
+```jsonl
+{"action":"list"}
+{"action":"list","server":"python-tools"}
+```
+
+随后对清单中的工具先 `describe` 再 `call`，按返回的输入 schema 提供参数。连接出现在目录中不代表业务操作已经验证成功；业务验证应遵循工具自身的说明和用户授权。工具安装目录、账号、凭据及保存的连接配置由各电脑分别管理，不随 WebCodex 源码分发。
 
 ### Provider-side gateway V1 compatibility
 
-Runner 到 configured local provider 的内建 gateway 有意限制为 bounded stdio tool subset，并不是所有 MCP feature 的透明 bridge：
+Runner 到 provider 的内建 gateway 支持 stdio 和 Streamable HTTP，仍是有界工具子集：
 
 - provider-side tool 行为基于 MCP `2025-06-18`；
-- 支持 `tools/list` 与 `tools/call`；
-- 不支持 callback、list pagination、media/resource 与端到端 progress forwarding；
+- 支持 `tools/list`、有界列表分页与 `tools/call`；
+- 不支持 callback、media/resource 与端到端 progress forwarding；
 - 支持 text tool result 与有界 `structuredContent`。
 
 不支持的 protocol/content shape 会 fail closed，而不是静默转换。

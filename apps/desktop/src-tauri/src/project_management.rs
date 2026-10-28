@@ -297,6 +297,8 @@ impl DesktopCore {
         let Some(connection) = connection_from_config(&self.config) else {
             return self.get_state().await;
         };
+        self.snapshot.project = project_snapshot(&self.config);
+        self.snapshot.chatgpt_activity = None;
         let client = stored_runner_client_id(&self.config);
         self.snapshot.binaries = Some(self.adapter.ensure_binaries(cancellation).await?.info());
         let server = self
@@ -317,6 +319,17 @@ impl DesktopCore {
             Ok(_) => ServerReadiness::Error,
             Err(_) => ServerReadiness::Unknown,
         };
+        if !runtime_autostart(&self.config)
+            && self.snapshot.readiness.server != ServerReadiness::Ready
+        {
+            self.snapshot.readiness = aggregate_readiness(
+                ServerReadiness::Stopped,
+                RunnerReadiness::Stopped,
+                ExposureReadiness::Disabled,
+                ProjectReadiness::None,
+            );
+            return self.get_state().await;
+        }
         let runner = self
             .adapter
             .observe_connection_until(&connection, client.as_deref(), cancellation, None)
@@ -327,72 +340,12 @@ impl DesktopCore {
             Ok(_) => RunnerReadiness::Connecting,
             Err(_) => RunnerReadiness::Unknown,
         };
-        self.project_selection_cleared();
-        self.get_state().await
-    }
-
-    pub(super) async fn resume_unselected_runtime(
-        &mut self,
-        cancellation: &CancellationContext,
-    ) -> DesktopResult<DesktopStateSnapshot> {
-        self.require_local_project_management()?;
-        let connection = connection_from_config(&self.config)
-            .ok_or_else(|| project_error("runtime_not_ready"))?;
-        let client = stored_runner_client_id(&self.config)
-            .ok_or_else(|| project_error("runtime_not_ready"))?;
-        let env_file = self
-            .config
-            .runtime
-            .as_ref()
-            .and_then(|r| r.server_env_file.clone())
-            .ok_or_else(|| project_error("runtime_not_ready"))?;
-        self.snapshot.binaries = Some(self.adapter.ensure_binaries(cancellation).await?.info());
-        let deadline = Deadline::after(SERVER_READY_TIMEOUT);
-        let running = self
-            .adapter
-            .server_status_until(
-                Some(&connection.server_url),
-                Some(&env_file),
-                Some(&connection.user_token_file),
-                cancellation,
-                deadline,
-            )
-            .await
-            .is_ok_and(|s| s.http_reachable);
-        if !running {
-            let command = self.adapter.local_server_command(&env_file)?;
-            self.spawn_owned(ProcessKind::LocalServer, command, false, cancellation)
-                .await?;
-        }
-        self.wait_for_server(
-            &connection.server_url,
-            Some(&env_file),
-            Some(&connection.user_token_file),
-            cancellation,
-            deadline,
-            !running,
-        )
-        .await?;
-        let deadline = Deadline::after(RUNNER_READY_TIMEOUT);
-        let running = self
-            .adapter
-            .observe_connection_until(&connection, Some(&client), cancellation, Some(deadline))
-            .await?
-            .online;
-        if !running {
-            let command = self
-                .adapter
-                .local_runner_command(&connection.runner_config)?;
-            self.spawn_owned(ProcessKind::LocalRunner, command, false, cancellation)
-                .await?;
-        }
-        self.wait_for_connection(&connection, Some(&client), cancellation, deadline, !running)
-            .await?;
-        self.snapshot.readiness.server = ServerReadiness::Ready;
-        self.snapshot.readiness.runner = RunnerReadiness::Ready;
-        self.config.runtime_autostart = Some(true);
-        self.save_config().await?;
-        self.project_selection_cleared();
+        self.snapshot.readiness = aggregate_readiness(
+            self.snapshot.readiness.server.clone(),
+            self.snapshot.readiness.runner.clone(),
+            exposure_readiness(self.config.topology.as_ref()),
+            ProjectReadiness::None,
+        );
         self.get_state().await
     }
 }

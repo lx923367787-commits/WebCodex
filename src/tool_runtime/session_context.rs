@@ -771,6 +771,23 @@ pub(crate) fn workflow_session_authority_fingerprint(
 ) -> Result<String, String> {
     let (authority_kind, authority_id) = match auth {
         None => ("local-dev", "local-dev".to_string()),
+        Some(auth) if auth.kind == crate::auth::AuthKind::ModelAgent => {
+            let run = auth
+                .agent_run
+                .as_ref()
+                .ok_or("Agent Workflow Session authority requires a verified run")?;
+            if auth
+                .user_id
+                .as_deref()
+                .is_some_and(|owner| owner != run.owner_user())
+            {
+                return Err("Agent Workflow Session authority owner mismatch".into());
+            }
+            // Shared runtime Sessions use the same account authority as other
+            // authorized project work. The verified run still owns the Agent's
+            // separate memory, objectives and acceptance resources.
+            ("managed-user", run.owner_user().to_owned())
+        }
         Some(auth) if auth.is_bootstrap => ("bootstrap", "server-bootstrap".to_string()),
         Some(auth) if auth.is_oauth_shared_key_subject() || auth.is_shared_key() => (
             "shared-key-group",
@@ -862,7 +879,7 @@ pub(crate) fn runtime_observation_principal(
         return Err("native_host_has_no_runtime_principal".into());
     }
     if let Some(binding) = auth.agent_run.as_ref() {
-        return Ok(("isolated-agent".to_string(), binding.run_id().to_string()));
+        return Ok(("isolated-agent".to_string(), binding.agent_id().to_string()));
     }
     if auth.is_bootstrap {
         return Ok((

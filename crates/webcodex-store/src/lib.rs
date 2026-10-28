@@ -40,6 +40,11 @@ mod agent_execution_close_tests;
 mod agent_meeting;
 mod local_cli;
 pub use local_cli::LocalCliCall;
+mod agent_program;
+pub use agent_program::{
+    AgentBrowserRecord, AgentProgramReceipt, AuthenticatedAgentBrowserReceipt,
+    AuthenticatedAgentProgramObservation,
+};
 mod agent_task;
 pub use agent_isolation::{
     AgentAssignmentOperation, AgentEnrollmentAuthority, AgentEnrollmentClaim, AgentEnrollmentGrant,
@@ -61,6 +66,7 @@ mod audit;
 mod cli_fallback;
 mod communication;
 mod team_agent;
+pub mod team_collaboration;
 mod team_completion;
 pub mod team_decision;
 #[cfg(test)]

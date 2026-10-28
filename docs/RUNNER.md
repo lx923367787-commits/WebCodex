@@ -123,7 +123,55 @@ Runner's `allowed_roots` policy.
 
 ## Local MCP providers
 
-The Runner can directly host persistent stdio MCP providers for WebCodex's built-in MCP gateway:
+The Runner connects to local stdio MCP programs or an HTTP MCP service at a supplied
+address. The HTTP service must already be running.
+Use `tool_connection` for ordinary setup; manual `runner.toml` configuration
+remains available.
+
+### Connect once and reuse
+
+Use the `client_id` of the Runner computer that owns the tool. “Connect this tool”
+maps to `connect`, “the tool moved” to `update`, “show connections” to `status`,
+“reconnect it” to `reconnect`, and “forget this connection” to `remove`.
+Example `tool_connection` arguments, with your actual Runner and paths:
+
+```jsonl
+{"client_id":"my-runner","action":"connect","kind":"mcp","id":"knowledge","entry":"/opt/tools/knowledge/server.py","args":["--read-only"],"cwd":"/opt/tools/knowledge"}
+{"client_id":"my-runner","action":"connect","kind":"plugin","id":"repo-tools","entry":"/opt/tools/repo/plugin.mjs"}
+{"client_id":"my-runner","action":"status"}
+{"client_id":"my-runner","action":"update","kind":"mcp","id":"knowledge","entry":"/opt/tools/knowledge-v2/server.py","args":["--read-only"],"cwd":"/opt/tools/knowledge-v2"}
+{"client_id":"my-runner","action":"reconnect","kind":"mcp","id":"knowledge"}
+{"client_id":"my-runner","action":"remove","kind":"mcp","id":"knowledge"}
+```
+
+`entry` accepts an absolute executable, Python/JavaScript script, existing MCP JSON
+configuration path, or an HTTP/HTTPS MCP endpoint such as `http://127.0.0.1:8123/mcp`.
+For a JSON `mcpServers` object with multiple entries, use the selected entry's name
+as `id`; a single entry may use a different connection name. Import is a snapshot:
+run `update` after changing the source file. There is no directory scan or automatic
+tracking of another application's settings. Optional inputs are `args`, `cwd`,
+`env`, and `headers`; check and update `cwd` when moving a tool's directory.
+Prefer credentials already stored in a Runner-local configuration file over putting
+secrets in chat.
+
+Successful setup validates the tool catalog, saves the connection in that Runner's
+`runner.toml`, and switches only that connection. An identical `connect` can reuse
+an existing connection; use its returned `id`. A different configuration under an
+existing id requires `update`. `remove`
+forgets the connection without deleting tool files. `status` reports current state,
+known tool counts, and available safe error codes
+without invoking business tools; it does not prove a business operation succeeded.
+Management requires `runner:manage`. Connected tools still use `mcp_tool` or
+`plugin_tool` and their existing invocation permissions. Inspect `status` after a
+lost management response; reconnecting never authorizes replay of an
+`outcome_unknown` business call.
+
+HTTP endpoints may be on this computer, the local network, or an explicitly supplied
+remote address. The service and script runtime must already be installed/running as
+applicable; setup does not install packages, start an HTTP service, or perform
+upstream OAuth login.
+
+### Manual configuration
 
 ```toml
 [mcp]
@@ -139,21 +187,34 @@ env_from_env = { GITHUB_TOKEN = "GITHUB_TOKEN", PATH = "PATH", HOME = "HOME" }
 timeout_secs = 30
 ```
 
-`executable` and optional `cwd` must be absolute host-local operator configuration. Invalid paths fail closed. `[mcp]` is restart-required configuration; changing a provider does not hot-reload it.
+`executable` and optional `cwd` must be absolute Runner-local paths. Invalid paths
+fail closed. Manual `[mcp]` edits remain restart-required for ordinary
+`runner_config_reload`; restart to apply those edits completely. The separate
+`tool_connection` workflow saves and switches the selected connection directly.
 
-Provider processes do not inherit the Runner environment wholesale. `env_from_env` copies only explicitly named variables, and WebCodex's own sensitive transport/account credential variables cannot be mapped. A missing configured source variable fails before provider start.
+Provider processes receive basic runtime variables such as PATH, system directories,
+temporary directories, and the user home, without inheriting the Runner environment
+wholesale. Use `env` for explicit values or `env_from_env` to copy named Runner
+variables. WebCodex's own transport/account credential variables cannot be mapped.
+A missing configured source variable fails before provider start.
 
 Mapping a credential delegates that credential to the configured provider process. The provider can use it according to its own implementation and can choose to return derived or raw values through normal tool results; WebCodex does not attempt to redact arbitrary provider output. Treat configured providers as credential recipients, use least-privilege provider credentials, and remember that any caller authorized for `mcp:local` can exercise the provider capabilities that those credentials enable.
 
-A provider starts on first real interaction and is then reused. The Server sees the logical provider `id`/`name`, not its executable path, environment values, PID, stderr, or Runner credential. `mcp_tool(action=list)` reports whether a provider id can be routed; `list(server=...)` and `describe` interact with the provider.
+A manually configured provider starts on first real interaction and is reused;
+`tool_connection connect/update` connects and reads its tools before saving.
+Runtime inventory and gateway responses omit executable paths, environment values,
+PIDs, and stderr. Explicit `tool_connection` management inputs pass through the
+Server. `mcp_tool(action=list)` reports routing resolvability; `list(server=...)`
+and `describe` interact with the provider.
 
 ### Provider-side gateway V1 compatibility
 
-The built-in Runner-to-provider gateway is intentionally a bounded stdio tool subset, not a transparent bridge to every MCP feature:
+The built-in Runner-to-provider gateway supports stdio and Streamable HTTP
+as a bounded tool subset:
 
 - provider-side tool behavior is based on MCP `2025-06-18`;
-- `tools/list` and `tools/call` are supported;
-- callbacks, list pagination, media/resources, and end-to-end progress forwarding are not supported;
+- `tools/list`, bounded list pagination, and `tools/call` are supported;
+- callbacks, media/resources, and end-to-end progress forwarding are not supported;
 - text tool results and bounded `structuredContent` are supported.
 
 Unsupported protocol/content shapes fail closed instead of being silently translated.

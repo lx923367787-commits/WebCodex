@@ -77,6 +77,107 @@ pub(crate) fn read_on_connection(
     .transpose()
 }
 
+// This only chooses the already authorized named-workspace identity. The
+// Runner still owns actual filesystem canonicalization, links and path policy.
+fn coding_path_key(path: &str) -> Option<String> {
+    webcodex_core::runtime_contract::validate_project_op_path(path).ok()?;
+    let mut path = path.replace('\\', "/");
+    if path.starts_with("//?/UNC/") {
+        path = format!("//{}", &path[8..]);
+    } else if path.starts_with("//?/") {
+        path = path[4..].to_owned();
+    }
+    let drive = path.len() >= 3
+        && path.as_bytes()[0].is_ascii_alphabetic()
+        && path.as_bytes()[1] == b':'
+        && path.as_bytes()[2] == b'/';
+    let windows = drive || path.starts_with("//");
+    let (prefix, tail, protected) = if drive {
+        (format!("{}/", &path[..2]), &path[3..], 0)
+    } else if path.starts_with("//") {
+        ("//".to_owned(), &path[2..], 2)
+    } else {
+        ("/".to_owned(), path.trim_start_matches('/'), 0)
+    };
+    let mut parts = Vec::new();
+    for part in tail.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.len() > protected => {
+                parts.pop();
+            }
+            ".." => return None,
+            part => parts.push(part),
+        }
+    }
+    let result = format!("{prefix}{}", parts.join("/"));
+    Some(if windows {
+        result.to_lowercase()
+    } else {
+        result
+    })
+}
+
+pub(crate) fn workspace_for_coding_source<'a>(
+    catalog: &'a NativeWorkspaceCatalog,
+    project: &str,
+    client_id: Option<&str>,
+    path: Option<&str>,
+) -> Result<&'a NativeWorkspace, AgentIsolationError> {
+    let mut matches = Vec::new();
+    if !project.is_empty() && client_id.is_none() && path.is_none() {
+        matches.extend(
+            catalog
+                .projects
+                .iter()
+                .filter(|workspace| {
+                    workspace.enabled
+                        && workspace
+                            .folders
+                            .iter()
+                            .any(|folder| folder.project == project)
+                })
+                .map(|workspace| (workspace, 0)),
+        );
+    } else if project.is_empty() {
+        let (Some(client), Some(path)) = (client_id, path) else {
+            return Err(error("workspace_invalid_input"));
+        };
+        let requested = coding_path_key(path).ok_or_else(|| error("workspace_invalid_input"))?;
+        let runner = format!("agent:{client}:");
+        for workspace in catalog
+            .projects
+            .iter()
+            .filter(|workspace| workspace.enabled)
+        {
+            let specificity = workspace
+                .folders
+                .iter()
+                .filter(|folder| folder.project.starts_with(&runner))
+                .filter_map(|folder| coding_path_key(&folder.path))
+                .filter(|root| {
+                    requested == *root
+                        || requested.starts_with(&format!("{}/", root.trim_end_matches('/')))
+                })
+                .map(|root| root.len())
+                .max();
+            if let Some(specificity) = specificity {
+                matches.push((workspace, specificity));
+            }
+        }
+        if let Some(deepest) = matches.iter().map(|(_, depth)| *depth).max() {
+            matches.retain(|(_, depth)| *depth == deepest);
+        }
+    } else {
+        return Err(error("workspace_invalid_input"));
+    }
+    match matches.as_slice() {
+        [(workspace, _)] => Ok(workspace),
+        [] => Err(error("workspace_not_authorized")),
+        _ => Err(error("workspace_selection_required")),
+    }
+}
+
 /// Only a new native chat may acquire this target. Existing assignments never
 /// gain delegation merely because a folder or its policy was subsequently edited.
 pub(crate) fn initial_team_on_connection(
@@ -95,29 +196,11 @@ pub(crate) fn initial_team_on_connection(
             _ => return Ok(None),
         },
     };
-    let policy = crate::team_task::policy_on(
-        conn,
-        &crate::agent_isolation::enrollment_principal_for_execution(owner),
-        &folder.project,
-    )
-    .map_err(|_| error("workspace_team_policy_unavailable"))?;
-    // A default display policy is not an operator's saved execution grant.
-    if policy.revision == 0 {
-        return Ok(None);
-    }
-    let max_cli_calls = policy
-        .settings
-        .subagents
-        .max
-        .checked_add(1)
-        .and_then(|members| members.checked_mul(policy.settings.cli_per_agent.max))
-        .ok_or_else(|| error("workspace_team_budget_invalid"))?
-        .min(32);
     Ok(Some((
         folder.clone(),
         crate::AgentEnrollmentPolicy {
-            max_subagents: policy.settings.subagents.max,
-            max_cli_calls,
+            max_subagents: u32::MAX,
+            max_cli_calls: u32::MAX,
         },
     )))
 }

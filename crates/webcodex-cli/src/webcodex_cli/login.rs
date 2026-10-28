@@ -297,6 +297,7 @@ pub(crate) struct LoginOptions {
     pub(crate) base_dir: PathBuf,
     pub(crate) transport: String,
     pub(crate) allowed_roots: Vec<PathBuf>,
+    pub(crate) no_default_root: bool,
     pub(crate) project: Option<PathBuf>,
     pub(crate) overwrite: bool,
     pub(crate) json: bool,
@@ -561,24 +562,27 @@ pub(crate) fn stage_connection(
         true,
     )?;
 
-    crate::runner_config::run_runner_init(crate::runner_config::RunnerInitOptions {
-        server_url: server_url.to_string(),
-        token: Some(identity.runner_token.clone()),
-        token_file: None,
-        client_id: device.to_string(),
-        owner: identity.username.clone(),
-        display_name: None,
-        transport: opts.transport.clone(),
-        poll_interval_ms: crate::runner_config::DEFAULT_POLL_INTERVAL_MS,
-        // The directory is created inside staging above so it is published
-        // atomically with the rest of the connection, but runner.toml must
-        // point at its final path after that staging directory is renamed.
-        project_registry_dir: published_project_registry_dir.to_path_buf(),
-        output: paths.runner_config.clone(),
-        allowed_roots: allowed_roots.to_vec(),
-        allow_cwd_anywhere: false,
-        overwrite: true,
-    })?;
+    webcodex_runner_config::run_runner_init_with_explicit_roots(
+        crate::runner_config::RunnerInitOptions {
+            server_url: server_url.to_string(),
+            token: Some(identity.runner_token.clone()),
+            token_file: None,
+            client_id: device.to_string(),
+            owner: identity.username.clone(),
+            display_name: None,
+            transport: opts.transport.clone(),
+            poll_interval_ms: crate::runner_config::DEFAULT_POLL_INTERVAL_MS,
+            // The directory is created inside staging above so it is published
+            // atomically with the rest of the connection, but runner.toml must
+            // point at its final path after that staging directory is renamed.
+            project_registry_dir: published_project_registry_dir.to_path_buf(),
+            output: paths.runner_config.clone(),
+            allowed_roots: allowed_roots.to_vec(),
+            allow_cwd_anywhere: false,
+            overwrite: true,
+        },
+        opts.no_default_root,
+    )?;
     harden_secret_file(&paths.runner_config)?;
 
     write_descriptor(&paths, server_url, &identity.username, device, now)
@@ -947,6 +951,12 @@ pub(crate) async fn redeem_pairing_code(
 
 /// Log this device into a server.
 pub(crate) async fn run_login(opts: LoginOptions) -> Result<String, String> {
+    if opts.no_default_root && (opts.project.is_some() || !opts.allowed_roots.is_empty()) {
+        return Err(
+            "--no-default-root is for project-free enrollment; add authorized folders afterward"
+                .into(),
+        );
+    }
     let effective_root = is_effective_root();
     // Reject a URL we could not turn into an identity *before* spending the
     // one-time code on it, and settle the directory it would be stored under
@@ -966,10 +976,14 @@ pub(crate) async fn run_login(opts: LoginOptions) -> Result<String, String> {
     let device = resolve_device_name(base, &opts)?;
     // Explicit project selection can supply an exact root even without HOME.
     // This only resolves defaults; the saved Runner policy remains restricted.
-    let mut output_allowed_roots = webcodex_runner_config::effective_allowed_roots(
-        &opts.allowed_roots,
-        opts.project.is_some(),
-    )?;
+    let mut output_allowed_roots = if opts.no_default_root {
+        opts.allowed_roots.clone()
+    } else {
+        webcodex_runner_config::effective_allowed_roots(
+            &opts.allowed_roots,
+            opts.project.is_some(),
+        )?
+    };
     // Preserve the historical generated-config behavior unless explicit project
     // selection adds exact project authority. In that case this becomes the persisted
     // Runner policy, including any effective HOME root that existed beforehand.
@@ -1201,6 +1215,7 @@ mod tests {
             // explicit project authority. Tests that need empty-root semantics
             // can override this field explicitly.
             allowed_roots: vec![base.to_path_buf()],
+            no_default_root: false,
             overwrite,
             project: None,
             json: false,
@@ -2276,6 +2291,7 @@ mod tests {
             base_dir: base.clone(),
             transport: "websocket".to_string(),
             allowed_roots: Vec::new(),
+            no_default_root: false,
             overwrite: false,
             project: None,
             json: false,
@@ -2356,6 +2372,7 @@ mod tests {
             base_dir: base.clone(),
             transport: "websocket".to_string(),
             allowed_roots: vec![allowed_root.clone()],
+            no_default_root: false,
             project: Some(project.clone()),
             overwrite: false,
             json: true,
@@ -2438,6 +2455,7 @@ mod tests {
             base_dir: base.clone(),
             transport: "websocket".to_string(),
             allowed_roots: vec![allowed_root],
+            no_default_root: false,
             project: Some(outside),
             overwrite: false,
             json: false,
@@ -2475,6 +2493,7 @@ mod tests {
             base_dir: base.clone(),
             transport: "websocket".to_string(),
             allowed_roots: vec![allowed_root],
+            no_default_root: false,
             project: Some(dangerous_project),
             overwrite: false,
             json: false,
@@ -2508,6 +2527,7 @@ mod tests {
             base_dir: base.clone(),
             transport: "websocket".to_string(),
             allowed_roots: vec![unc.clone()],
+            no_default_root: false,
             project: Some(unc),
             overwrite: false,
             json: false,

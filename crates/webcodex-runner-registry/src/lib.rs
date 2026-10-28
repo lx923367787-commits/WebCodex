@@ -8,6 +8,11 @@ mod access;
 mod access_control;
 mod agent_cli;
 mod agent_execution;
+mod agent_program;
+pub use agent_program::{
+    AgentBrowserStoreAdmission, AgentProgramStoreAdmission, VerifiedAgentBrowserReceipt,
+    VerifiedAgentProgramObservation,
+};
 mod capabilities;
 mod job_status;
 mod job_updates;
@@ -150,3 +155,19 @@ pub(crate) use registry::{
 pub use requests::EnqueueLspError;
 pub use state::{RunnerSemanticView, ShellJobVisibility};
 pub use telemetry::{NoopRunnerRegistryTelemetry, RunnerRegistryTelemetry};
+
+tokio::task_local! {
+    static AGENT_IDENTITY: webcodex_core::runner_protocol::AgentRunRef;
+}
+
+/// Trusted server scope, never an argument accepted by a model tool.
+pub async fn with_agent_identity<F: std::future::Future>(
+    actor: webcodex_core::runner_protocol::AgentRunRef,
+    future: F,
+) -> F::Output {
+    AGENT_IDENTITY.scope(actor, future).await
+}
+
+pub fn current_agent_identity() -> Option<webcodex_core::runner_protocol::AgentRunRef> {
+    AGENT_IDENTITY.try_with(Clone::clone).ok()
+}

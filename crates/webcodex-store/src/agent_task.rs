@@ -1706,17 +1706,6 @@ impl Database {
                 replayed: true,
             });
         }
-        let run_count: i64 = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM wc_agent_task_coding_runs WHERE task_id = ?1",
-                [task_id],
-                |row| row.get(0),
-            )
-            .map_err(store_error)?;
-        if run_count >= takeover::MAX_TASK_CODING_RUNS {
-            return Err(CommunicationStoreError::new("agent_task_run_budget_exhausted",
-                "AgentTask reached its durable eight-Run budget; preserve evidence and await coordinator action"));
-        }
         let conflicting_attempt = transaction
             .query_row(
                 "SELECT attempt_id FROM wc_agent_task_coding_runs WHERE run_id = ?1",

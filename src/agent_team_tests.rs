@@ -276,7 +276,7 @@ fn enrolled_manager_member_creation_replays_public_receipt_and_private_directory
 }
 
 #[test]
-fn enrolled_manager_member_creation_rejects_forged_scope_and_invalid_budget() {
+fn enrolled_manager_member_creation_rejects_forged_scope_but_not_legacy_count_limits() {
     let f = team_fixture();
     for field in [
         "owner_user",
@@ -295,18 +295,24 @@ fn enrolled_manager_member_creation_rejects_forged_scope_and_invalid_budget() {
     wrong_root["root_task_id"] = json!("another-task");
     assert!(!agent_team::call(&f.db, &f.run, "team_member_create", wrong_root).success);
     let mut invalid_budget = member_request(&f.task);
-    invalid_budget["max_cli_calls"] = json!(2);
-    assert!(!agent_team::call(&f.db, &f.run, "team_member_create", invalid_budget).success);
+    invalid_budget["max_cli_calls"] = json!(-1);
+    assert_eq!(
+        agent_team::call(&f.db, &f.run, "team_member_create", invalid_budget)
+            .error
+            .as_deref(),
+        Some("agent_team_invalid_input")
+    );
     assert_eq!(task_count(&f.db), 1);
-    let valid = member_request(&f.task);
+    let mut valid = member_request(&f.task);
+    valid["max_cli_calls"] = json!(2);
     assert!(agent_team::call(&f.db, &f.run, "team_member_create", valid.clone()).success);
     let mut changed_intent = valid.clone();
     changed_intent["brief"] = json!("A different task with the same key");
     assert!(!agent_team::call(&f.db, &f.run, "team_member_create", changed_intent).success);
     let mut beyond_member_cap = valid;
     beyond_member_cap["idempotency_key"] = json!("second-member");
-    assert!(!agent_team::call(&f.db, &f.run, "team_member_create", beyond_member_cap).success);
-    assert_eq!(task_count(&f.db), 2);
+    assert!(agent_team::call(&f.db, &f.run, "team_member_create", beyond_member_cap).success);
+    assert_eq!(task_count(&f.db), 3);
 }
 
 fn claimed_assignee(
@@ -509,13 +515,15 @@ fn member_cli_worker_cas_is_readable_by_the_exact_root_manager_with_a_fresh_perm
         "state":started.execution.state,
         "revision":started.execution.revision,
         "completion_expected_revision":started.execution.revision,
+        "result":started.execution.terminal_result,
+        "reason":started.execution.terminal_reason,
     });
     for current in [&caller, &f.run] {
         let projection = read_worker_task_projection(&f.db, current, &attempt)
             .unwrap()
             .unwrap();
         assert_eq!(projection, expected);
-        assert_eq!(projection.as_object().unwrap().len(), 4);
+        assert_eq!(projection.as_object().unwrap().len(), 6);
         for private in [
             "terminal_result",
             "terminal_reason",
@@ -647,7 +655,7 @@ fn enrolled_team_specs_separate_sync_lifecycle_from_async_execution() {
 }
 
 #[test]
-fn enrolled_member_dispatch_requires_exact_public_receipt_and_explicit_profile() {
+fn enrolled_member_dispatch_requires_exact_public_receipt_and_valid_selection() {
     let request = json!({
         "root_task_id":"root-task",
         "source_task_id":"child-task",
@@ -657,7 +665,7 @@ fn enrolled_member_dispatch_requires_exact_public_receipt_and_explicit_profile()
     });
     let parsed: agent_team::AgentStart = serde_json::from_value(request.clone()).unwrap();
     assert!(parsed.validate().is_ok());
-    for field in ["enrollment_id", "thinking_profile_id"] {
+    for field in ["enrollment_id"] {
         let mut missing = request.clone();
         missing.as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<agent_team::AgentStart>(missing).is_err());
@@ -695,4 +703,198 @@ fn enrolled_member_dispatch_requires_exact_public_receipt_and_explicit_profile()
         .as_array()
         .unwrap()
         .contains(&json!("enrollment_id")));
+}
+
+#[tokio::test]
+async fn enrolled_member_queues_and_replays_without_profile_catalog() {
+    member_queues_with_optional_profile(None).await;
+    member_queues_with_optional_profile(Some("expired-explicit")).await;
+}
+
+async fn member_queues_with_optional_profile(selection: Option<&str>) {
+    use crate::agent_team_execution::{AgentTeamAssets, AgentTeamCatalog, AssetFuture};
+    use std::sync::Arc;
+    use webcodex_store::{TeamAgentPlan, TeamPlanInput};
+    struct Assets(AgentTeamCatalog);
+    impl AgentTeamAssets for Assets {
+        fn host_catalog<'a>(
+            &'a self,
+            _: &'a VerifiedAgentRun,
+        ) -> AssetFuture<'a, AgentTeamCatalog> {
+            panic!("task dispatch must never query thinking profiles")
+        }
+
+        fn catalog<'a>(&'a self, _: &'a VerifiedAgentRun) -> AssetFuture<'a, AgentTeamCatalog> {
+            Box::pin(async { Ok(self.0.clone()) })
+        }
+        fn selected_catalog<'a>(
+            &'a self,
+            _: &'a VerifiedAgentRun,
+            _: webcodex_core::agent_cli::AgentCliProvider,
+            require_host: bool,
+            _configured_default: bool,
+        ) -> AssetFuture<'a, AgentTeamCatalog> {
+            assert!(!require_host, "default CLI must not query the Host catalog");
+            Box::pin(async { Ok(self.0.clone()) })
+        }
+    }
+    let f = team_fixture();
+    f.db.create_user(&crate::models::UserRecord {
+        id: "synthetic-owner".into(),
+        username: "synthetic-owner".into(),
+        created_at: chrono::Utc::now().timestamp(),
+        disabled: 0,
+        display_name: None,
+        role: "user".into(),
+        disabled_at: None,
+        updated_at: None,
+    })
+    .unwrap();
+    let created = agent_team::call(&f.db, &f.run, "team_member_create", member_request(&f.task));
+    assert!(created.success, "{:?}", created.error);
+    let child = created.output["task_id"].as_str().unwrap();
+    let revision =
+        f.db.agent_team_policy(&f.run, &f.task)
+            .unwrap()
+            .policy
+            .revision;
+    f.db.register_agent_team_plan(
+        &f.run,
+        &f.task,
+        revision,
+        TeamPlanInput {
+            manager: TeamAgentPlan {
+                task_id: f.task.clone(),
+                cli_calls: vec![webcodex_store::TeamCliCall {
+                    inputs: vec![],
+                    provider_id: "workbuddy".into(),
+                    model: "test-model".into(),
+                    effort: None,
+                    instruction: Some("Synthetic CLI task".into()),
+                }],
+            },
+            subagents: vec![TeamAgentPlan {
+                task_id: child.into(),
+                cli_calls: vec![],
+            }],
+        },
+        "default-plan",
+    )
+    .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let assets = Assets(AgentTeamCatalog {
+        project: f.run.project().into(),
+        target: webcodex_core::runner_protocol::AgentExecutionTarget {
+            client_id: "runner".into(),
+            runner_instance_id: "test-instance".into(),
+        },
+        observed_at_ms: now,
+        expires_at_ms: now + 60_000,
+        providers: vec![],
+        unavailable_providers: vec![],
+        host_profile_ids: vec![],
+        host_catalog_ref: "test-readback".into(),
+        host_profiles_expires_at_ms: 0,
+        host_profiles_error: Some("agent_team_host_profiles_expired".into()),
+        host_default_supported: true,
+    });
+    let db = Arc::new(f.db);
+    let runtime = crate::tool_runtime::ToolRuntime::new_for_tests()
+        .with_communication_database(db.clone())
+        .with_agent_team_assets(Arc::new(assets));
+    let mut auth = crate::auth::AuthContext::new(crate::auth::AuthKind::ModelAgent);
+    auth.agent_run = Some(f.run);
+    let mut request = json!({"root_task_id":f.task,"source_task_id":child,
+        "enrollment_id":created.output["enrollment_id"],"idempotency_key":"optional-start"});
+    if let Some(profile) = selection {
+        request["thinking_profile_id"] = json!(profile);
+    }
+    let first = runtime
+        .isolated_model_call_async("team_agent_start", request.clone(), Some(&auth))
+        .await;
+    assert!(first.success, "{:?}", first);
+    assert_eq!(
+        first.output["binding"]["thinking_profile_id"],
+        selection.unwrap_or("")
+    );
+    assert_eq!(first.output["direct_start_performed"], false);
+    let replay = runtime
+        .isolated_model_call_async("team_agent_start", request, Some(&auth))
+        .await;
+    assert!(replay.success);
+    assert_eq!(first.output["binding"], replay.output["binding"]);
+    let cli = runtime.isolated_model_call_async("team_cli_start", json!({
+        "root_task_id":f.task, "source_task_id":f.task, "call_index":0, "idempotency_key":"default-cli"
+    }), Some(&auth)).await;
+    // Default reaches the independent CLI prerequisites, never a Host expiry
+    // failure. No fake provider/controls or real process is supplied here.
+    assert_eq!(
+        cli.output["error_kind"],
+        "agent_cli_provider_not_discovered"
+    );
+    assert_eq!(cli.output["state_changed"], false);
+    assert_eq!(
+        db.list_agent_team_receipts(auth.agent_run.as_ref().unwrap(), &f.task, 0, 20)
+            .unwrap()
+            .total_count,
+        0
+    );
+    // Exercise the durable preparation contract with a synthetic, never
+    // dispatched carrier. The same default selection survives exact replay.
+    let request = webcodex_store::AgentCliPreparationRequest {
+        root_task_id: f.task.clone(),
+        source_task_id: f.task.clone(),
+        call_index: 0,
+        idempotency_key: "default-cli".into(),
+        fallback_thinking_profile_id: "default".into(),
+        timeout_secs: Some(900),
+        target: webcodex_core::runner_protocol::AgentExecutionTarget {
+            client_id: "runner".into(),
+            runner_instance_id: "test-instance".into(),
+        },
+        carrier: webcodex_core::runner_protocol::AgentExecutionCarrier::Job {
+            job_id: "test-job".into(),
+            start_request_id: "test-start".into(),
+        },
+    };
+    let prepared = db
+        .prepare_agent_cli_worker(auth.agent_run.as_ref().unwrap(), request.clone())
+        .unwrap();
+    assert_eq!(prepared.receipt.fallback_thinking_profile_id, "default");
+    let repeated = db
+        .prepare_agent_cli_worker(auth.agent_run.as_ref().unwrap(), request)
+        .unwrap();
+    assert_eq!(prepared.receipt.attempt_id, repeated.receipt.attempt_id);
+    assert_eq!(repeated.receipt.fallback_thinking_profile_id, "default");
+}
+
+#[test]
+fn enrolled_manager_cli_round_tool_appends_without_dispatching_old_or_new_slots() {
+    let f = team_fixture();
+    let base = json!({"root_task_id":f.task,"expected_policy_revision":0,"idempotency_key":"base",
+        "plan":{"manager":{"task_id":f.task,"cli_calls":[{"provider_id":"workbuddy","instruction":"Uncalled original task"}]},"subagents":[]}});
+    assert!(agent_team::call(&f.db, &f.run, "team_plan_register", base).success);
+    let args = json!({"root_task_id":f.task,"expected_round":0,"expected_policy_revision":0,"idempotency_key":"append",
+        "plan":{"manager":{"task_id":f.task,"cli_calls":[{"provider_id":"workbuddy","instruction":"Independent default-parameter task"}]},"subagents":[]}});
+    let result = agent_team::call(&f.db, &f.run, "team_cli_round_register", args.clone());
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.output["first_call_indices"][&f.task], 1);
+    assert_eq!(result.output["dispatched"], false);
+    assert!(result.output["plan"]["manager"]["cli_calls"][0]["model"].is_null());
+    let again = agent_team::call(&f.db, &f.run, "team_cli_round_register", args.clone());
+    assert_eq!(again.output, result.output);
+    let mut forged = args;
+    forged["owner_user"] = json!("other-owner");
+    assert!(!agent_team::call(&f.db, &f.run, "team_cli_round_register", forged).success);
+    let spec = agent_team::tool_specs()
+        .into_iter()
+        .find(|spec| spec["name"] == "team_cli_round_register")
+        .unwrap();
+    assert!(spec["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("expected_round")));
+    assert!(spec["inputSchema"]["properties"]
+        .get("owner_user")
+        .is_none());
 }

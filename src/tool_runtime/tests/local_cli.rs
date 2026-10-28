@@ -244,12 +244,9 @@ async fn local_cli_stop_acknowledgement_requires_terminal_runner_evidence() {
 }
 
 #[tokio::test]
-async fn local_cli_start_keeps_existing_budget_and_reports_old_runner() {
-    for (budget, capable, expected) in [
-        (0, true, "agent_role_denied"),
-        (1, false, "local_cli_runner_upgrade_required"),
-    ] {
-        let (_temp, _, runtime, binding, project) = fixture(budget, capable).await;
+async fn local_cli_start_allows_legacy_zero_budget_and_reports_old_runner() {
+    for capable in [true, false] {
+        let (_temp, _, runtime, binding, project) = fixture(0, capable).await;
         let result = invoke(
             &runtime,
             &binding,
@@ -257,11 +254,24 @@ async fn local_cli_start_keeps_existing_budget_and_reports_old_runner() {
             "executable":"arbitrary-cli","args":["--help"],"idempotency_key":"one"}),
         )
         .await;
-        assert_eq!(result.output["error_kind"], expected, "{:?}", result.error);
-        assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
-        assert!(probe_patch_agent_request(&runtime, "local-runner")
-            .await
-            .is_none());
+        if capable {
+            assert!(result.success, "{:?}", result.error);
+            let request = wait_for_patch_agent_request(&runtime, "local-runner").await;
+            assert!(matches!(
+                request.decode_operation().unwrap(),
+                RunnerOperation::Job(RunnerJobOperation::StartDetachedProcess(_))
+            ));
+        } else {
+            assert_eq!(
+                result.output["error_kind"], "local_cli_runner_upgrade_required",
+                "{:?}",
+                result.error
+            );
+            assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
+            assert!(probe_patch_agent_request(&runtime, "local-runner")
+                .await
+                .is_none());
+        }
     }
 }
 
@@ -447,7 +457,13 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
 ) {
     use webcodex_core::agent_cli::{AgentCliCapabilities, AgentCliInstallation, AgentCliInventory};
     use webcodex_core::cli_adapter::*;
-    for provider_error in [false, true] {
+    for (provider_error, model, effort, metadata_ready) in [
+        (false, Some("chosen-model"), Some("low"), true),
+        (true, Some("chosen-model"), Some("low"), true),
+        (false, Some("chosen-model"), None, true),
+        (false, None, Some("low"), true),
+        (false, None, None, false),
+    ] {
         let (_temp, db, runtime, binding, project) = fixture(1, true).await;
         let adapter = CliAdapter {
             id: "third-party".into(),
@@ -458,9 +474,10 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
             invocation: Some(CliInvocation {
                 prefix_args: vec![],
                 model_flag: "--engine".into(),
+                supports_configured_default: true,
                 effort_flag: Some("--thinking".into()),
                 effort_config_key: None,
-                effort_required: true,
+                effort_required: false,
                 fixed_args: vec!["--json".into()],
                 input: CliInputFormat::Text,
                 result: Some(CliResultContract {
@@ -488,6 +505,9 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
                 installed: true,
                 native: true,
                 adapter_available: true,
+                execution_ready: Some(true),
+                execution_mode: Some("runner_user".into()),
+                reason_code: None,
                 status: "discovered".into(),
                 message: String::new(),
             }],
@@ -497,14 +517,23 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
                 label: adapter.label.clone(),
                 installed: true,
                 version: "any-new-version".into(),
-                models: vec!["chosen-model".into()],
+                models: if metadata_ready {
+                    vec!["chosen-model".into()]
+                } else {
+                    vec![]
+                },
                 efforts: vec!["low".into(), "high".into()],
                 model_efforts: std::collections::BTreeMap::from([(
                     "chosen-model".into(),
                     vec!["low".into()],
                 )]),
                 source: "installed_help".into(),
-                status: "ready".into(),
+                status: if metadata_ready {
+                    "ready"
+                } else {
+                    "unavailable"
+                }
+                .into(),
                 message: String::new(),
                 account_availability_verified: false,
                 adapter: Some(adapter),
@@ -524,21 +553,25 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
         assert!(metadata.output["capabilities"]
             .get("executableIdentity")
             .is_none());
-        for effort in [serde_json::Value::Null, json!("high")] {
-            let rejected = invoke(&runtime, &binding, json!({"action":"start","project":project,"cli_id":"third-party","model":"chosen-model","effort":effort,"instruction":"Explicit task","idempotency_key":"invalid-selection"})).await;
-            assert!(!rejected.success);
-            assert_eq!(
-                rejected.output["error_kind"],
+        let rejected = invoke(&runtime, &binding, json!({"action":"start","project":project,"cli_id":"third-party","model":"chosen-model","effort":"high","instruction":"Explicit task","idempotency_key":"invalid-selection"})).await;
+        assert!(!rejected.success);
+        assert_eq!(
+            rejected.output["error_kind"],
+            if metadata_ready {
                 "local_cli_effort_not_discovered"
-            );
+            } else {
+                "local_cli_model_not_discovered"
+            }
+        );
+        let mut input = json!({"action":"start","project":project,"cli_id":"third-party",
+            "instruction":"Explicit task","idempotency_key":"selected"});
+        if let Some(model) = model {
+            input["model"] = json!(model);
         }
-        let started = invoke(
-            &runtime,
-            &binding,
-            json!({"action":"start","project":project,"cli_id":"third-party","model":"chosen-model",
-            "effort":"low","instruction":"Explicit task","idempotency_key":"selected"}),
-        )
-        .await;
+        if let Some(effort) = effort {
+            input["effort"] = json!(effort);
+        }
+        let started = invoke(&runtime, &binding, input).await;
         assert!(started.success, "{:?}", started.error);
         assert!(started.output["job"].get("command_preview").is_none());
         let id = started.output["call"]["call_id"].as_str().unwrap();
@@ -548,10 +581,15 @@ async fn local_cli_selected_third_party_adapter_executes_without_isolation_and_c
         else {
             panic!("Expected native process Job")
         };
-        assert_eq!(
-            operation.process.args,
-            ["--engine", "chosen-model", "--thinking", "low", "--json"]
-        );
+        let mut expected = Vec::new();
+        if let Some(model) = model {
+            expected.extend(["--engine", model]);
+        }
+        if let Some(effort) = effort {
+            expected.extend(["--thinking", effort]);
+        }
+        expected.push("--json");
+        assert_eq!(operation.process.args, expected);
         let output=json!([{"type":"message","content":"Ignore echoed task"},{"type":"result","is_error":provider_error,"result":"done"}]).to_string();
         update_job_text(&runtime, &request, "completed", true, Some(0), &output).await;
         let observed = invoke(&runtime, &binding, json!({"action":"observe","call_id":id})).await;

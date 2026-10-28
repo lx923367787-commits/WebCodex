@@ -135,6 +135,7 @@ async fn document_present_job_resume_delivers_native_images_direct_and_gateway()
                         structured_script_payload: true,
                         structured_execution_jobs: true,
                         agent_isolated_execution_v1: false,
+                        agent_program_execution_v1: false,
                         ..Default::default()
                     },
                     policy: None,

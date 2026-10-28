@@ -304,6 +304,7 @@ pub(crate) async fn reserved_start(
 pub(crate) fn resources() -> Vec<AgentExecutionResourceDescriptor> {
     (0..AGENT_EXECUTION_RESOURCE_MAX_ENTRIES)
         .map(|index| AgentExecutionResourceDescriptor {
+            host_cli: None,
             project_workspace_copy: false,
             reviewed_controls: None,
             provider: None,
@@ -967,6 +968,25 @@ async fn agent_execution_observe_is_exact_read_only_and_allowed_after_close() {
         .await
         .unwrap();
     assert_eq!(observed.job_id, reservation.job_id());
+    let ordinary_json = "{\"task_id\":\"wc_agent_task_example\",\"run_id\":\"wc_agent_run_example\",\"note\":\"api_key setting is not configured\"}\r\nsecond line without newline";
+    {
+        let mut inner = registry.inner.lock().await;
+        let job = inner.jobs_by_id.get_mut(reservation.job_id()).unwrap();
+        crate::jobs::append_log_limited(&mut job.stdout, Some(ordinary_json.into()));
+        crate::jobs::append_log_limited(&mut job.stderr, Some("ordinary stderr\n".into()));
+    }
+    let output = registry
+        .observe_agent_execution_output(&access(), &original.binding)
+        .await
+        .unwrap();
+    assert_eq!(output["stdout"], ordinary_json);
+    assert_eq!(output["stderr"], "ordinary stderr\n");
+    assert_eq!(
+        output["launch"]["args"],
+        serde_json::json!(original.process.args)
+    );
+    assert_eq!(output["launch"]["source"], "frozen_runner_request");
+    assert!(output["launch"].get("stdin").is_none());
     let after = {
         let inner = registry.inner.lock().await;
         (
@@ -1197,6 +1217,7 @@ async fn agent_execution_resource_registration_is_bounded_unique_strict_and_atom
     duplicate[1] = duplicate[0].clone();
     let mut excessive = resources();
     excessive.push(AgentExecutionResourceDescriptor {
+        host_cli: None,
         project_workspace_copy: false,
         resource_set_id: "extra".into(),
         ..original.clone()

@@ -36,6 +36,8 @@ pub(crate) trait AgentTeamAssets: Send + Sync {
         &'a self,
         caller: &'a VerifiedAgentRun,
         _provider: AgentCliProvider,
+        _require_host: bool,
+        _configured_default: bool,
     ) -> AssetFuture<'a, AgentTeamCatalog> {
         self.catalog(caller)
     }
@@ -63,6 +65,7 @@ pub(crate) trait AgentTeamAssets: Send + Sync {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ObservedCliProvider {
+    pub host_cli: Option<webcodex_core::host_cli::HostCliRegistration>,
     pub provider_id: String,
     pub version: String,
     pub executable_sha256: String,
@@ -89,6 +92,8 @@ pub(crate) struct AgentTeamCatalog {
     pub host_profile_ids: Vec<String>,
     pub host_catalog_ref: String,
     pub host_profiles_expires_at_ms: i64,
+    pub host_profiles_error: Option<String>,
+    pub host_default_supported: bool,
 }
 
 /// Fixed diagnostics only; no provider stderr, host paths or credentials.
@@ -157,6 +162,8 @@ fn catalog_unavailable(reason: &str) -> ToolResult {
         | "agent_team_host_profile_read_unavailable"
         | "agent_team_host_profiles_expired"
         | "agent_team_host_profiles_not_ready"
+        | "agent_team_host_default_unavailable"
+        | "agent_team_profile_not_discovered"
         | "agent_team_host_provider_unavailable"
         | "agent_team_owner_unavailable"
         | "workspace_team_new_chat_required"
@@ -208,49 +215,26 @@ fn bounded(value: &str, max: usize) -> bool {
 
 // Versioned, deterministic instructions are part of the frozen launch hash.
 // The Runner must never append to or rewrite an already committed stdin.
-const CLI_DELIVERY_V2: &str = r#"
-WebCodex explicit delivery contract v2
-Complete only the authorized task above. The process working directory is your
-independent workspace. Before exiting, explicitly publish the results intended
-for your task reviewer under publish/files/ as UTF-8 files. Include only the
-task deliverables; do not publish credentials, private session history or logs.
-
-After finishing the files, write publish/manifest.json as strict JSON:
-{"version":2,"summary":"Concrete result and checks performed","files":[{"path":"files/report.txt"}]}
-The only allowed, required fields are version, summary and files; each file entry contains
-only path. Do not add sha256, bytes, binding, identity, author, room or host path
-fields. After the process stops, the trusted collector reads these files and
-computes their actual byte lengths and SHA-256 hashes. File paths are relative
-to publish, start with files/, and cannot be absolute, contain .., or use links.
-An empty files array is allowed for a complete summary-only deliverable;
-summary must still contain nonempty text.
-
-Limits: manifest 32 KiB; summary 16 KiB; at most 16 files; each file 256 KiB;
-all file bytes plus summary at most 512 KiB; final delivery artifact at most
-1 MiB. Preserve the exact file bytes.
-Only UTF-8 text is supported for this delivery contract. Do not truncate a
-result or disguise binary data as an accepted text deliverable. Write the
-complete manifest last, after finishing all files.
-Terminal output is not a delivery. The reviewer, rather than process exit,
-decides whether the submitted work satisfies the original task.
-"#;
+const CLI_PRIVATE_DIRECTORIES: &str = "Only memory, execution objectives and acceptance criteria belong in your own three instance directories. Their absolute paths are in WEBCODEX_MEMORY_DIR, WEBCODEX_OBJECTIVES_DIR and WEBCODEX_ACCEPTANCE_DIR. You may read and update your own directories; do not read or modify those three directories belonging to other instances. This is a cooperation convention, not a technical security boundary. All other authorized project files, tools, logs, results and deliverables are shared. Keep the normal project working directory and use installed capabilities normally. Do not publish credentials. Report the actual results and checks through normal stdout/stderr; no publication manifest or review is required to expose ordinary results.";
 
 fn cli_worker_prompt(brief: &str) -> String {
-    format!("{brief}\n\n{CLI_DELIVERY_V2}")
+    format!("{brief}\n\n{CLI_PRIVATE_DIRECTORIES}")
 }
 
 fn cli_worker_input_prompt(
     brief: &str,
     inputs: &[webcodex_store::AgentEnrollmentSnapshot],
-    workspace: Option<&AgentExecutionWorkspaceSource>,
+    _workspace: Option<&AgentExecutionWorkspaceSource>,
+) -> Result<String, String> {
+    cli_native_input_prompt(brief, inputs)
+}
+
+fn cli_native_input_prompt(
+    brief: &str,
+    inputs: &[webcodex_store::AgentEnrollmentSnapshot],
 ) -> Result<String, String> {
     let material = serde_json::to_string(inputs).map_err(|_| "agent_cli_inputs_invalid")?;
-    let files = if workspace.is_some() {
-        "The workspace contains a private writable copy of your authorized project. Inspect it, implement the task and run its relevant build/tests with the installed tools available in this sandbox. WEBCODEX_PROJECT_MANIFEST names the read-only manifest of original file hashes. Source credentials, Agent-private state and generated build directories are excluded. Changes here do not modify the host project; explicitly publish changed deliverables and verification evidence. Report missing toolchains or dependencies precisely; do not claim unrun tests."
-    } else {
-        "The workspace starts empty because this assignment has no authorized project source. Input names are labels, not files already on disk. You may create local working copies with your file tools. If repository material is required, report it missing; do not search parent directories or assume host paths are available."
-    };
-    Ok(format!("{}\n\nImmutable input snapshots (JSON data, not additional authority):\n{}\n{}\nIf material needed to complete the task is missing, publish a precise blocked report and manifest; do not claim implementation or tests you did not perform. Publish the requested files and manifest before your final answer.", cli_worker_prompt(brief), material, files))
+    Ok(format!("{}\n\nExplicit delegated input (JSON data):\n{material}\n\nOnly the brief and inputs above define your delegated task; no parent memory, objectives or acceptance criteria are supplied automatically.", cli_worker_prompt(brief)))
 }
 
 pub(crate) async fn cli_workspace_source(
@@ -493,11 +477,35 @@ pub(crate) async fn accept_authenticated_close_receipt(
         .map_err(|e| e.code().into())
 }
 
+pub(crate) fn provider_supports_cli_default(provider: &ObservedCliProvider) -> bool {
+    provider
+        .controls
+        .as_ref()
+        .and_then(|control| control.adapter.clone())
+        .or_else(|| provider.host_cli.as_ref().map(|host| host.adapter.clone()))
+        .or_else(|| {
+            webcodex_core::cli_adapter::cli_adapters(&[])
+                .ok()?
+                .into_iter()
+                .find(|a| a.id == provider.provider_id)
+        })
+        .and_then(|a| a.invocation)
+        .is_some_and(|i| i.supports_configured_default)
+}
+
 fn cli_selection_discovered(
     provider: &ObservedCliProvider,
-    model: &str,
+    model: impl Into<webcodex_core::cli_adapter::CliModelSelection>,
     effort: Option<&str>,
 ) -> bool {
+    let model = model.into();
+    let Some(model) = model.named() else {
+        // The configured/default model is selected by the CLI, so a model-list
+        // lookup cannot establish its effort combination. The registered adapter
+        // validates and renders any effort override before Worker reservation;
+        // unsupported options retain that adapter's concrete failure code.
+        return provider_supports_cli_default(provider);
+    };
     let levels = if provider.model_efforts.is_empty() {
         &provider.efforts
     } else {
@@ -509,25 +517,9 @@ fn cli_selection_discovered(
     provider.models.iter().any(|known| known == model)
         && match effort {
             Some(effort) => levels.iter().any(|known| known == effort),
-            // Antigravity's exact live slug already pins reasoning (e.g.
-            // gemini-3.8-flash-high); --effort is an optional override.
-            None => {
-                if !provider.model_efforts.is_empty() {
-                    return levels.is_empty();
-                }
-                provider
-                    .controls
-                    .as_ref()
-                    .and_then(|record| record.adapter.as_ref())
-                    .and_then(|adapter| adapter.invocation.as_ref())
-                    .is_some_and(|invocation| !invocation.effort_required)
-                    || provider.efforts.is_empty()
-                    || (provider.provider_id == "antigravity"
-                        && provider
-                            .efforts
-                            .iter()
-                            .any(|known| model.ends_with(&format!("-{known}"))))
-            }
+            // Omission asks the selected CLI/model to use its own default.
+            // Available override levels do not make an override mandatory.
+            None => true,
         }
 }
 
@@ -549,8 +541,7 @@ fn validate_catalog(
         || catalog.providers.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS
         || catalog.unavailable_providers.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS
         || catalog.host_profile_ids.len() > 33
-        || !bounded(&catalog.host_catalog_ref, 256)
-        || catalog.host_profiles_expires_at_ms <= now
+        || (catalog.host_profiles_error.is_none() && !bounded(&catalog.host_catalog_ref, 256))
     {
         return Err("agent_team_catalog_unavailable".into());
     }
@@ -562,8 +553,11 @@ fn validate_catalog(
             || !digest(&provider.executable_sha256)
             || !digest(&provider.resource_manifest_hash)
             || !bounded(&provider.resource_set_id, 256)
-            || !matches!(provider.source.as_str(), "installed_help" | "live_catalog")
-            || provider.models.is_empty()
+            || !matches!(
+                provider.source.as_str(),
+                "installed_help" | "live_catalog" | "configured_default"
+            )
+            || (provider.models.is_empty() && !provider_supports_cli_default(provider))
             || provider.models.len() > 256
             || provider.efforts.len() > 32
             || provider.models.iter().any(|value| !bounded(value, 256))
@@ -616,7 +610,9 @@ fn require_provider_controls(
     Ok(controls)
 }
 
-fn inventory_projection(inventory: webcodex_core::agent_cli::AgentCliInventory) -> Value {
+pub(crate) fn inventory_projection(
+    inventory: webcodex_core::agent_cli::AgentCliInventory,
+) -> Value {
     let capabilities = inventory.capabilities.map(|capabilities| {
         let mut public = serde_json::to_value(capabilities).expect("typed CLI capability");
         public
@@ -635,11 +631,36 @@ fn inventory_projection(inventory: webcodex_core::agent_cli::AgentCliInventory) 
 
 fn catalog_projection(catalog: &AgentTeamCatalog) -> Value {
     json!({"project":catalog.project,"observed_at_ms":catalog.observed_at_ms,"expires_at_ms":catalog.expires_at_ms,
-        "providers":catalog.providers.iter().map(|p|json!({"provider_id":p.provider_id,"version":p.version,"models":p.models,"efforts":p.efforts,"model_efforts":p.model_efforts,"source":p.source,"execution_controls_verified":require_provider_controls(p).is_ok()})).collect::<Vec<_>>(),
+        "providers":catalog.providers.iter().map(|p|json!({"provider_id":p.provider_id,"version":p.version,"models":p.models,"efforts":p.efforts,"model_efforts":p.model_efforts,"source":p.source,"configured_default_supported":provider_supports_cli_default(p),"model_selection_required":!provider_supports_cli_default(p),"execution_controls_verified":p.host_cli.is_some() || require_provider_controls(p).is_ok(),"execution_mode":if p.host_cli.is_some(){"native_host"}else{"host_program"}})).collect::<Vec<_>>(),
         "unavailable_providers":catalog.unavailable_providers,
         "ordinary_local_cli_tool":"cli","ordinary_local_cli_requires_isolation_resources":false,
         "thinking_profile_ids":catalog.host_profile_ids,"host_profiles_expires_at_ms":catalog.host_profiles_expires_at_ms,
-        "selection_required":true,"account_availability_verified":false})
+        "host_profiles_error":catalog.host_profiles_error.as_ref().map(|reason| catalog_unavailable(reason).output["reason_code"].clone()),"host_default_supported":catalog.host_default_supported,
+        "default_selection":"default","host_selection_required":false,"selection_required":false,"account_availability_verified":false})
+}
+
+fn validate_host_selection(
+    catalog: &AgentTeamCatalog,
+    selection: &str,
+    require_host: bool,
+) -> Result<(), String> {
+    if selection == "default" {
+        return if !require_host || catalog.host_default_supported {
+            Ok(())
+        } else {
+            Err("agent_team_host_default_unavailable".into())
+        };
+    }
+    if let Some(reason) = &catalog.host_profiles_error {
+        return Err(reason.clone());
+    }
+    if catalog.host_profiles_expires_at_ms <= now_ms() {
+        return Err("agent_team_host_profiles_expired".into());
+    }
+    if !catalog.host_profile_ids.iter().any(|id| id == selection) {
+        return Err("agent_team_profile_not_discovered".into());
+    }
+    Ok(())
 }
 
 fn worker_task_projection(snapshot: &webcodex_store::AgentCliWorkerTaskSnapshot) -> Value {
@@ -649,7 +670,8 @@ fn worker_task_projection(snapshot: &webcodex_store::AgentCliWorkerTaskSnapshot)
         "task_id":snapshot.execution.task_id,
         "state":snapshot.execution.state,
         "revision":snapshot.execution.revision,
-        "completion_expected_revision":snapshot.completion_expected_revision
+        "completion_expected_revision":snapshot.completion_expected_revision,
+        "result":snapshot.execution.terminal_result,"reason":snapshot.execution.terminal_reason
     })
 }
 
@@ -683,11 +705,11 @@ struct CatalogRequest {
 pub(crate) fn tool_specs() -> Vec<Value> {
     let attempt = json!({"type":"object","properties":{"source_attempt_id":{"type":"string","minLength":1,"maxLength":128}},"required":["source_attempt_id"],"additionalProperties":false});
     vec![
-        json!({"description":"Discover and invoke CLIs installed on the assigned Runner. Default execution_mode=local uses its user login/environment and durable native jobs; it requires the authorized project and current task CLI budget, not fixed product/version/hash approval or a frozen plan. This trusted local mode is not an OS filesystem sandbox. discover request:{task_id} lists installed CLIs and stable commands; models request:{task_id,cli_id} reads native model/effort options. An arbitrary command uses discover request:{project,commands:[name_or_absolute_path]}. start request:{project,cli_id,model,effort?,instruction,idempotency_key,timeout_secs?} uses the discovered adapter, or {project,executable,args,stdin?,model?,effort?,idempotency_key,timeout_secs?} uses explicit native argv after inspecting actual CLI help. Select supported model/effort explicitly; metadata is not account entitlement. status/cancel request:{call_id} observes/stops your original Job; status request:{} lists this Agent task receipts after a lost response or update. Preserve keys on unknown outcomes; validate output, not only exit code. Explicit execution_mode=isolated retains frozen team slot start and source_attempt_id status/cancel through the existing isolated resource contract.","inputSchema":{"properties":{"request":{"type":"object"},"action":{"type":"string","enum":["discover","models","start","status","cancel"]},"execution_mode":{"enum":["local","isolated"]}},"required":["action","request"],"type":"object","additionalProperties":false},"name":"cli"}),
-        json!({"name":"team_cli_observe","description":"Purely read an authorized original CLI attempt, its worker task state/revision and exact executor Job. Use the current worker revision for an explicit delivery decision; terminal workers need no new decision, and completion_expected_revision is only for identical-key replay. This never starts, closes, reconciles or resends execution. Missing Runner state stays unknown even when a durable worker task is readable; task state is not physical-stop proof. No private completion text or logs are exposed.","inputSchema":attempt}),
+        json!({"description":"Discover and invoke CLIs installed on the assigned Runner. Default execution_mode=local uses its user login/environment and durable native jobs; it requires the authorized project, not a CLI count quota, fixed product/version/hash approval or a frozen plan. This trusted local mode is not an OS filesystem sandbox. discover request:{task_id} lists installed CLIs and stable commands; models request:{task_id,cli_id} reads native model/effort options. An arbitrary command uses discover request:{project,commands:[name_or_absolute_path]}. start request:{project,cli_id,model?,effort?,instruction,idempotency_key,timeout_secs?} uses the discovered adapter, or {project,executable,args,stdin?,model?,effort?,idempotency_key,timeout_secs?} uses explicit native argv after inspecting actual CLI help. Omit model/effort for adapter-supported native defaults; explicit selections must be supported. Metadata is not account entitlement. status/cancel request:{call_id} observes/stops your original Job; status request:{} lists this Agent task receipts after a lost response or update. Preserve keys on unknown outcomes; validate output, not only exit code. Explicit execution_mode=isolated retains frozen team slot start and source_attempt_id status/cancel through the existing team attempt contract; null/omitted planned model uses an adapter-supported default.","inputSchema":{"properties":{"request":{"type":"object"},"action":{"type":"string","enum":["discover","models","start","status","cancel"]},"execution_mode":{"enum":["local","isolated"]}},"required":["action","request"],"type":"object","additionalProperties":false},"name":"cli"}),
+        json!({"name":"team_cli_observe","description":"Purely read an authorized original CLI attempt, its worker task state/revision and exact executor Job. Use the current worker revision for an explicit delivery decision; terminal workers need no new decision, and completion_expected_revision is only for identical-key replay. This never starts, closes, reconciles or resends execution. Missing Runner state stays unknown even when a durable worker task is readable; task state is not physical-stop proof. Ordinary stdout/stderr, exit status and launch arguments are returned directly; no publication or review is required to read them.","inputSchema":attempt}),
         json!({"name":"team_cli_close","description":"Request a durable close of the original worker execution authorized by this attempt. A request or transport acknowledgment is not stopped proof. It does not refund the original caller slot or recreate a worker.","inputSchema":attempt}),
         json!({"name":"team_cli_delivery_collect","description":"Collect and persist the original stopped worker's explicitly published UTF-8 deliverables for review. Only the original caller or authorized root manager can request this effect. Existing published artifacts are reused; no private path, raw log or new CLI execution is accepted. This does not approve the work or complete any task. Use the original attempt ID to recover a missing delivery, then read and review its exact version; do not restart the CLI or change its key.","inputSchema":attempt}),
-        json!({"name":"team_cli_catalog","description":"Read trusted current Runner CLI models/efforts and Host thinking profile IDs for this exact assigned task. Omitted providers have fixed reason codes in unavailable_providers; missing Runner capabilities/resources need local setup, not a replacement task or guessed model. Select explicit discovered values; catalog visibility is not account entitlement or provider execution readiness.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"],"additionalProperties":false}}),
+        json!({"name":"team_cli_catalog","description":"Read current Runner CLI models/efforts and separate Host profile status for this exact task. Expired Host profiles do not suppress CLI entries. Use default for Host settings or select a fresh explicit profile. Omitted providers have fixed reason codes in unavailable_providers; missing Runner capabilities/resources need local setup, not a replacement task or guessed model. Select explicit discovered values, or omit the frozen call model for an adapter-supported CLI default; configured_default source means model discovery was not used, not account verification. Catalog visibility is not account entitlement or provider execution readiness.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"],"additionalProperties":false}}),
     ]
 }
 
@@ -892,22 +914,8 @@ pub(crate) async fn call(
             ) {
                 return denied(error.code());
             }
-            let Some(assets) = &runtime.agent_team_assets else {
-                return denied("agent_team_catalog_source_missing");
-            };
-            let catalog = match assets.host_catalog(binding).await {
-                Ok(value) => value,
-                Err(_) => return denied("agent_team_catalog_unavailable"),
-            };
-            if let Err(code) = validate_catalog(db, &catalog, binding, now_ms()) {
-                return denied(&code);
-            }
-            if !catalog
-                .host_profile_ids
-                .contains(&request.thinking_profile_id)
-            {
-                return denied("agent_team_profile_not_discovered");
-            }
+            // Host thinking options are optional UI settings. Assignment, plan,
+            // identity and budget checks below remain the dispatch authority.
             // This real B2 transaction revalidates the current manager, exact
             // independently created Member enrollment and original frozen plan.
             // It reserves the existing queue; no grant is returned to the parent.
@@ -961,7 +969,24 @@ pub(crate) async fn call(
             let permit = match db.agent_cli_observation_permit(binding, &request.source_attempt_id)
             {
                 Ok(v) => v,
-                Err(e) => return denied(e.code()),
+                Err(error) if name == "team_cli_observe" => {
+                    let receipt =
+                        match db.read_agent_cli_attempt(binding, &request.source_attempt_id) {
+                            Ok(receipt) => receipt,
+                            Err(error) => return denied(error.code()),
+                        };
+                    if receipt.dispatch_state == TeamCliDispatchState::Reserved
+                        && receipt.job_id.is_none()
+                        && receipt.execution_state.is_none()
+                    {
+                        return ToolResult::ok(json!({"attempt":receipt,"job":null,
+                            "preparation_state":"reserved_not_dispatched","execution_state":"not_started",
+                            "dispatched":false,"execution_started":false,"state_changed":false,
+                            "recovery":"Retry the original cli start request with the same task, call_index and idempotency_key. The original worker and attempt are retained."}));
+                    }
+                    return denied(error.code());
+                }
+                Err(error) => return denied(error.code()),
             };
             if name == "team_cli_close" {
                 match close_executor(
@@ -981,7 +1006,7 @@ pub(crate) async fn call(
             } else {
                 let job = runtime
                     .runner_registry
-                    .observe_agent_execution(&access, permit.binding())
+                    .observe_agent_execution_output(&access, permit.binding())
                     .await;
                 // Re-read through the current caller after the asynchronous
                 // Registry lookup; an earlier retained permit is not authority
@@ -997,7 +1022,7 @@ pub(crate) async fn call(
                     };
                 match job {
                     Ok(job) => ToolResult::ok(
-                        json!({"attempt":receipt,"job":job_projection(&job),"worker_task":worker_task,"worker_task_missing":worker_task.is_none(),"runner_observation":"available","state_changed":false,"dispatched":false}),
+                        json!({"attempt":receipt,"job":job,"worker_task":worker_task,"worker_task_missing":worker_task.is_none(),"runner_observation":"available","state_changed":false,"dispatched":false}),
                     ),
                     Err(code) => ToolResult::err_with_output(
                         &code,
@@ -1127,18 +1152,25 @@ async fn start(
         Ok(provider) => provider,
         Err(_) => return denied("agent_cli_invalid_provider_id"),
     };
-    let catalog = match assets.selected_catalog(caller, selected_provider).await {
+    let catalog = match assets
+        .selected_catalog(
+            caller,
+            selected_provider,
+            request.fallback_thinking_profile_id != "default",
+            slot.model.is_cli_default(),
+        )
+        .await
+    {
         Ok(value) => value,
-        Err(_) => return denied("agent_team_catalog_unavailable"),
+        Err(reason) => return catalog_unavailable(&reason),
     };
     if let Err(code) = validate_catalog(db, &catalog, caller, now_ms()) {
         return denied(&code);
     }
-    if !catalog
-        .host_profile_ids
-        .contains(&request.fallback_thinking_profile_id)
+    if let Err(reason) =
+        validate_host_selection(&catalog, &request.fallback_thinking_profile_id, false)
     {
-        return denied("agent_team_profile_not_discovered");
+        return catalog_unavailable(&reason);
     }
     let Some(provider) = catalog
         .providers
@@ -1159,11 +1191,32 @@ async fn start(
     if !cli_selection_discovered(provider, &slot.model, slot.effort.as_deref()) {
         return denied("agent_cli_selection_not_discovered");
     }
-    let controls = match require_provider_controls(provider) {
-        Ok(controls) => controls,
-        Err(code) => return denied(&code),
+    let controls = if let Some(host) = &provider.host_cli {
+        if host.validate().is_err()
+            || host.adapter.id != provider.provider_id
+            || host.executable_sha256 != provider.executable_sha256
+            || host.manifest(&provider.resource_set_id).ok().as_deref()
+                != Some(&provider.resource_manifest_hash)
+            || provider.controls.is_some()
+        {
+            return denied("native_cli_resource_binding_mismatch");
+        }
+        None
+    } else {
+        match require_provider_controls(provider) {
+            Ok(controls) => Some(controls),
+            Err(code) => return denied(&code),
+        }
     };
-    if check_installed_identity {
+    let selected_adapter = provider
+        .host_cli
+        .as_ref()
+        .map(|host| &host.adapter)
+        .or_else(|| controls.and_then(|control| control.adapter.as_ref()));
+    // A default selection needs no model-list round trip. The separately
+    // authenticated exact resource/controls below and Runner image pins still
+    // verify what will execute before any Worker/slot mutation.
+    if check_installed_identity && !slot.model.is_cli_default() {
         let selection = match AgentCliProvider::parse(&provider.provider_id) {
             Ok(selection) => selection,
             Err(_) => return denied("agent_cli_invalid_provider_id"),
@@ -1208,8 +1261,9 @@ async fn start(
         || resources.resource_set_id != provider.resource_set_id
         || resources.manifest_hash != provider.resource_manifest_hash
         || resources.executable_identity != format!("sha256:{}", provider.executable_sha256)
-        || resources.provider != Some(controls.provider)
-        || resources.reviewed_controls.as_ref() != Some(controls)
+        || resources.provider.as_ref().map(|p| p.id()) != Some(provider.provider_id.as_str())
+        || resources.host_cli != provider.host_cli
+        || resources.reviewed_controls.as_ref() != controls
     {
         return denied("agent_cli_resource_binding_mismatch");
     }
@@ -1219,7 +1273,10 @@ async fn start(
             Ok(source) => source,
             Err(code) => return denied(&code),
         };
-    if workspace_source.is_some() && !resources.project_workspace_copy {
+    if workspace_source.is_some()
+        && !resources.project_workspace_copy
+        && resources.host_cli.is_none()
+    {
         return denied("agent_workspace_copy_unavailable");
     }
     // Enrollment canonicalizes input labels; preview that same ordering.
@@ -1233,14 +1290,16 @@ async fn start(
         })
         .collect();
     input_preview.sort_by(|a, b| a.name.cmp(&b.name));
-    let preview =
-        match cli_worker_input_prompt(&slot.instruction, &input_preview, workspace_source.as_ref())
-        {
-            Ok(value) => value,
-            Err(code) => return denied(&code),
-        };
+    let preview = match if provider.host_cli.is_some() {
+        cli_native_input_prompt(&slot.instruction, &input_preview)
+    } else {
+        cli_worker_input_prompt(&slot.instruction, &input_preview, workspace_source.as_ref())
+    } {
+        Ok(value) => value,
+        Err(code) => return denied(&code),
+    };
     let (_, _, wire_input) = match crate::tool_runtime::cli_process_with_adapter(
-        controls.adapter.as_ref(),
+        selected_adapter,
         &slot.provider_id,
         &slot.model,
         slot.effort.as_deref(),
@@ -1329,11 +1388,15 @@ async fn start(
         Err(e) => return unresolved(e.code(), Some(&original_attempt)),
     };
     let (_, args, stdin) = match crate::tool_runtime::cli_process_with_adapter(
-        controls.adapter.as_ref(),
+        selected_adapter,
         &prepared.receipt.provider_id,
         &prepared.receipt.model,
         prepared.receipt.effort.as_deref(),
-        &match cli_worker_input_prompt(&worker.brief, &worker.inputs, workspace_source.as_ref()) {
+        &match if provider.host_cli.is_some() {
+            cli_native_input_prompt(&worker.brief, &worker.inputs)
+        } else {
+            cli_worker_input_prompt(&worker.brief, &worker.inputs, workspace_source.as_ref())
+        } {
             Ok(prompt) => prompt,
             Err(code) => return unresolved(&code, Some(&original_attempt)),
         },
@@ -1341,9 +1404,16 @@ async fn start(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let args = match compose_reviewed_cli_argv(controls, &args) {
-        Ok(args) => args,
-        Err(code) => return unresolved(&code, Some(&original_attempt)),
+    let args = if let Some(controls) = controls {
+        match compose_reviewed_cli_argv(controls, &args) {
+            Ok(args) => args,
+            Err(code) => return unresolved(&code, Some(&original_attempt)),
+        }
+    } else {
+        if let Err(code) = provider.host_cli.as_ref().unwrap().validate_args(&args) {
+            return unresolved(&code, Some(&original_attempt));
+        }
+        args
     };
     let process = AgentExecutionProcess {
         executable: resources.executable_identity,
@@ -1406,7 +1476,17 @@ async fn start(
                 .await
             {
                 Ok(value) => value,
-                Err(code) => return unresolved(&code, Some(&original_attempt)),
+                Err(code) => {
+                    return ToolResult::err_with_output(
+                        &code,
+                        json!({
+                            "error_kind":code,"source_attempt_id":original_attempt,"dispatched":false,
+                            "execution_started":false,"execution_state":"not_started",
+                            "dispatch_certainty":"not_started","preparation_persisted":true,
+                            "recovery":"Retry the original request and idempotency_key after fixing this preparation error; do not create another worker or attempt."
+                        }),
+                    )
+                }
             }
         }
     };
@@ -1456,7 +1536,10 @@ async fn start(
 }
 
 fn job_projection(job: &ShellJobInfo) -> Value {
-    json!({"job_id":job.job_id,"status":job.status,"execution_state":job.command_execution_state,"exit_code":job.exit_code,"business_verified":false})
+    json!({"job_id":job.job_id,"status":job.status,"execution_state":job.command_execution_state,
+        "exit_code":job.exit_code,"error":job.error,"cwd":job.cwd,"duration_ms":job.duration_ms,
+        "stdout_log_truncated":job.stdout_log_truncated,"stderr_log_truncated":job.stderr_log_truncated,
+        "business_verified":false})
 }
 
 async fn close_executor(
@@ -1589,8 +1672,10 @@ async fn observe(
             }
         })
     } else {
-        crate::tool_runtime::structured_failure_code(&attempt.provider_id, &stdout)
-            .or_else(|| (job.exit_code != Some(0)).then(|| "provider_failed".into()))
+        crate::tool_runtime::structured_failure_code(&attempt.provider_id, &stdout).or_else(|| {
+            (job.exit_code != Some(0) || job.status != "completed" || job.error.is_some())
+                .then(|| "provider_failed".into())
+        })
     };
     let reconciled = if attempt.dispatch_state == TeamCliDispatchState::Terminal {
         attempt
@@ -1613,7 +1698,7 @@ async fn observe(
                 },
                 error_code: code.clone(),
                 result_summary: Some(
-                    "Exact isolated executor observation; private logs were not published.".into(),
+                    "Exact CLI process observation; stdout/stderr are directly available through cli status.".into(),
                 ),
             },
         ) {
@@ -1622,10 +1707,12 @@ async fn observe(
         }
     };
     let successful_process = known
+        && job.status == "completed"
+        && job.error.is_none()
         && job.command_execution_state == Some(ShellCommandExecutionState::Completed)
         && job.exit_code == Some(0)
         && code.is_none();
-    let mut business_review_required = false;
+    let business_review_required = false;
     let worker_completion = if known {
         Some(match db.read_agent_cli_worker_task(permit) {
             Ok(Some(snapshot))
@@ -1638,17 +1725,11 @@ async fn observe(
                 // completing it again with a new revision or changed reason.
                 json!({"task_id":b.executor.task_id,"state":snapshot.execution.state,"replayed":true,"state_changed":false})
             }
-            Ok(Some(_)) if successful_process => {
-                // Exit zero proves process completion only. A reviewed
-                // deliverable and explicit business decision complete the Task.
-                business_review_required = true;
-                json!({"task_id":b.executor.task_id,"business_review_required":true,"state_changed":false,"business_verified":false})
-            }
             Ok(Some(snapshot)) => match db.complete_agent_cli_worker_task(
                 permit,
                 snapshot.completion_expected_revision,
-                AgentTaskState::Failed,
-                None,
+                if successful_process { AgentTaskState::Succeeded } else { AgentTaskState::Failed },
+                successful_process.then_some("CLI process and native result protocol completed successfully; task acceptance remains separate."),
                 code.as_deref(),
                 &format!("cli-worker-finish-{}", b.requester.cli_attempt_id),
             ) {
@@ -1681,20 +1762,8 @@ async fn observe(
                 Err(error) => json!({"success":false,"error_kind":error.code(),"dispatched":false}),
             }
         });
-    // Failure to collect a delivery is not a provider/network failure and must
-    // never reserve a free recovery slot. The original execution stays frozen.
-    let delivery_publication = if business_review_required {
-        Some(
-            match publish_delivery(db, &runtime.runner_registry, access, permit).await {
-                Ok(reference) => json!({"success":true,"delivery":reference}),
-                Err(code) => {
-                    json!({"success":false,"error_kind":code,"source_attempt_id":b.requester.cli_attempt_id})
-                }
-            },
-        )
-    } else {
-        None
-    };
+    // Optional archival delivery is independent of ordinary process results.
+    let delivery_publication: Option<Value> = None;
     let reconciliation_complete = known
         && worker_completion
             .as_ref()

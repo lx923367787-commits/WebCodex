@@ -1,5 +1,44 @@
 use super::*;
 
+#[test]
+fn project_free_runner_denies_file_tasks_until_the_exact_directory_is_authorized() {
+    let source = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    for dir in [&source, &other] {
+        std::fs::write(dir.path().join("read.txt"), "fixture-content").unwrap();
+    }
+    let mut policy = RunnerPolicy {
+        require_explicit_roots: true,
+        ..RunnerPolicy::default()
+    };
+    let denied = handle_file_request(
+        &policy,
+        &file_read_request(source.path(), "read.txt", None, None, Some(1024)),
+    );
+    assert!(denied.error.is_some());
+    assert!(!denied
+        .stdout
+        .unwrap_or_default()
+        .contains("fixture-content"));
+    policy
+        .allowed_roots
+        .push(source.path().canonicalize().unwrap());
+    let allowed = handle_file_request(
+        &policy,
+        &file_read_request(source.path(), "read.txt", None, None, Some(1024)),
+    );
+    assert_eq!(allowed.exit_code, Some(0));
+    let denied = handle_file_request(
+        &policy,
+        &file_read_request(other.path(), "read.txt", None, None, Some(1024)),
+    );
+    assert!(denied.error.is_some());
+    assert!(!denied
+        .stdout
+        .unwrap_or_default()
+        .contains("fixture-content"));
+}
+
 fn file_read_request(
     cwd: &Path,
     path: &str,

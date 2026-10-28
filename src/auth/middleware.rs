@@ -460,8 +460,54 @@ impl Handler for AuthMiddleware {
                 );
                 return;
             }
-            depot.inject(ctx);
-            ctrl.call_next(req, depot, res).await;
+            // These protocol adapters already enter the complete Agent broker.
+            // Keep own-resource authorization there; only thin runtime handlers
+            // need the shared owner authority and Runner actor installed here.
+            if matches!(
+                req.uri().path(),
+                "/mcp" | "/api/tools/call" | "/api/tools/list"
+            ) {
+                depot.inject(ctx);
+                ctrl.call_next(req, depot, res).await;
+                return;
+            }
+            let binding = ctx.agent_run.as_ref().expect("verified model run");
+            let Some(db) = db.as_ref() else {
+                reject(
+                    res,
+                    ctrl,
+                    StatusCode::UNAUTHORIZED,
+                    "agent_identity_required",
+                );
+                return;
+            };
+            let access = match crate::agent_isolation::shared_agent_auth(db, binding) {
+                Ok(access) => access,
+                Err(error) => {
+                    reject(
+                        res,
+                        ctrl,
+                        StatusCode::FORBIDDEN,
+                        error.error.as_deref().unwrap_or("agent_owner_unavailable"),
+                    );
+                    return;
+                }
+            };
+            if let Err((scope, description)) =
+                scopes::enforce_route_scope(&access, req.method().as_str(), req.uri().path())
+            {
+                render_scope_forbidden(res, Some(&access), scope, description);
+                ctrl.skip_rest();
+                return;
+            }
+            let actor = webcodex_core::runner_protocol::AgentRunRef {
+                agent_id: binding.agent_id().into(),
+                agent_run_id: binding.run_id().into(),
+                generation: binding.generation(),
+            };
+            depot.inject(access);
+            webcodex_runner_registry::with_agent_identity(actor, ctrl.call_next(req, depot, res))
+                .await;
             return;
         }
         if !config.is_auth_enabled() {

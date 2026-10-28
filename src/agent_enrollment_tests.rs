@@ -11,6 +11,7 @@ const CONTROL: &str = "synthetic-enrollment-bootstrap";
 const PROJECT: &str = "enrollment-project";
 
 mod auto_enrollment;
+mod collaboration;
 mod host_dispatch;
 
 struct Fixture {
@@ -643,14 +644,14 @@ async fn enrollment_http_identity_and_credential_audiences_fail_closed() {
     denied(&missing_meta);
     denied(&f.call("new", "agent_attach", json!({"enrollment_id":grant["enrollment_id"],"claim_grant":grant["claim_grant"],"purpose":"manager"})).await);
     f.attach("new", &grant).await;
-    for name in [
-        "run_process",
-        "run_shell",
-        "coding_agent_start",
-        "runtime_status",
-    ] {
+    for name in ["run_process", "run_shell", "coding_agent_start"] {
         denied(&f.call("new", name, json!({})).await);
     }
+    let status = success(
+        f.call("new", "runtime_status", json!({"compact":true}))
+            .await,
+    );
+    assert!(status.get("agents").is_some(), "{status}");
     let conn = f.db.conn_for_tests();
     let retained: i64 = conn
         .query_row(
@@ -921,6 +922,38 @@ async fn enrollment_http_goal_to_native_handoff_preserves_assignment_memory_and_
         .await,
     );
     let goal_id = started["goal"]["goal_id"].as_str().unwrap().to_owned();
+    let restored = success(
+        f.call(
+            "enrolled-source",
+            "goal_bootstrap",
+            json!({"activate":true}),
+        )
+        .await,
+    );
+    assert_eq!(restored["goal"]["goal_id"], goal_id);
+    let identity = success(f.call("enrolled-source", "agent_identity", json!({})).await);
+    assert_eq!(identity["assignment_goal_id"], goal_id);
+    let compatible=success(f.call("enrolled-source","bind_chat_task_goal",json!({"request_id":"old-tracking-label","project":"display-project","goal_id":goal_id})).await);
+    assert_eq!(compatible["goal_id"], goal_id);
+    assert_eq!(compatible["state_changed"], false);
+    assert_eq!(compatible["execution_permission_granted"], false);
+    denied(
+        &f.call(
+            "enrolled-source",
+            "bind_chat_task_goal",
+            json!({"goal_id":"other-goal"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        success(
+            f.call("enrolled-source", "bind_chat_task_goal", json!({}))
+                .await
+        )["goal_id"],
+        goal_id
+    );
+    // Initial run scope is intentionally distinct from Task/Goal association.
+    assert!(identity["task_goal_id"].is_null());
     assert_eq!(
         started["goal"]["task_directory"],
         "workspace/lifecycle-task"

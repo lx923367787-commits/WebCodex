@@ -7,6 +7,9 @@
 //! `OwnershipAccepted` transition. No public/general detach API lives here.
 
 use super::output_text::{OutputTextDecoder, OutputTextSource};
+mod browser_metadata;
+mod program_metadata;
+pub(crate) use program_metadata::AgentProgramJobMetadata;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;

@@ -20,6 +20,8 @@ enum HostDispatchAction {
     Read,
     #[serde(rename = "agent_host_dispatch_claim")]
     Claim,
+    #[serde(rename = "agent_host_original_delivery_renew")]
+    RenewOriginal,
 }
 
 /// Bootstrap-only selectors from an exact attach/status/handoff receipt.
@@ -41,6 +43,8 @@ struct HostDispatchRequest {
     enrollment_id: Option<String>,
     idempotency_key: Option<String>,
     thinking_profile_id: Option<String>,
+    original_request_id: Option<String>,
+    recovery_key: Option<String>,
 }
 
 fn host_control_identifier(value: &str, max: usize) -> bool {
@@ -142,6 +146,11 @@ fn host_dispatch_control(db: &Database, auth: &AuthContext, body: &Value) -> Res
     }
     let request: HostDispatchRequest =
         serde_json::from_value(body.clone()).map_err(|_| "invalid_agent_host_dispatch_request")?;
+    if request.action != HostDispatchAction::RenewOriginal
+        && (request.original_request_id.is_some() || request.recovery_key.is_some())
+    {
+        return Err("invalid_agent_host_dispatch_request".into());
+    }
     if request.action == HostDispatchAction::MemberReserve {
         if request.queue_kind.is_some() || request.queue_id.is_some() {
             return Err("invalid_agent_host_dispatch_request".into());
@@ -154,7 +163,7 @@ fn host_dispatch_control(db: &Database, auth: &AuthContext, body: &Value) -> Res
                 host_required(&request.child_task_id)?,
                 host_required(&request.enrollment_id)?,
                 host_required(&request.idempotency_key)?,
-                host_required(&request.thinking_profile_id)?,
+                request.thinking_profile_id.as_deref().unwrap_or(""),
             )
             .map_err(|error| error.code())?;
         let material = db
@@ -190,6 +199,19 @@ fn host_dispatch_control(db: &Database, auth: &AuthContext, body: &Value) -> Res
         .filter(|value| host_control_identifier(value, 128))
         .ok_or("invalid_agent_host_dispatch_request")?;
     let manager = host_dispatch_manager(db, &request, kind)?;
+    if request.action == HostDispatchAction::RenewOriginal {
+        if kind != AgentHostQueueKind::Member {
+            return Err("invalid_agent_host_dispatch_request".into());
+        }
+        return db
+            .renew_original_member_delivery(
+                &manager,
+                id,
+                host_required(&request.original_request_id)?,
+                host_required(&request.recovery_key)?,
+            )
+            .map_err(|e| e.code().to_string());
+    }
     if request.action == HostDispatchAction::Prepare && kind == AgentHostQueueKind::Fallback {
         db.bind_agent_host_fallback(&manager, id)
             .map_err(|error| error.code())?;
@@ -306,6 +328,7 @@ pub(crate) fn try_control(
                 | "agent_host_dispatch_prepare"
                 | "agent_host_dispatch_read"
                 | "agent_host_dispatch_claim"
+                | "agent_host_original_delivery_renew"
         )
     ) {
         return Some(host_dispatch_control(db, auth, body));
@@ -563,14 +586,24 @@ pub(crate) fn assignment(db: &Database, binding: &VerifiedAgentRun, args: &Value
         return crate::agent_isolation::denial("agent_invalid_input");
     }
     match db.read_agent_enrollment(binding) {
-        Ok(projection) => {
+        Ok(mut projection) => {
             let (named_project, project_access) = project_access(db, binding);
+            let assignment_goal_id = match db.agent_enrollment_goal(binding) {
+                Ok(goal) => goal,
+                Err(error) => return crate::agent_isolation::denial(error.code()),
+            };
+            projection.resource_convention =
+                Database::agent_resource_convention(assignment_goal_id.as_deref());
             ToolResult::ok(
-                json!({"assignment":projection,"named_project":named_project,
+                json!({"assignment":projection,"assignment_goal_id":assignment_goal_id,"named_project":named_project,
                 "project_access":project_access,
                 "evidence_review_guidance":crate::agent_team_decision::GUIDANCE,
-                "execution_access":{"cli_call_budget":projection.policy.max_cli_calls,
-                    "generic_process_tools_exposed":false,"local_cli_has_os_sandbox":false,"file_access_depends_on_cli_budget":false,
+                "execution_access":{"cli_call_budget":null,
+                    "ordinary_program_tool":"run_process","ordinary_program_uses_cli_budget":false,
+                    "cli_call_budget_scope":"unrestricted",
+                    "collaboration":"Subagents and CLI are optional. No count, model or thinking-strength quotas. Share project/workspace files, outputs, logs and execution status. Follow assignment.resource_convention only for the three personal categories; it is a soft convention.",
+                    "arbitrary_process":true,"generic_process_tools_exposed":true,
+                    "local_cli_has_os_sandbox":false,"file_access_depends_on_cli_budget":false,
                     "local_cli_tool":"cli","local_cli_execution_mode":"runner_user",
                     "local_cli_requires_project_grant":true,"local_cli_requires_frozen_plan":false}}),
             )
@@ -596,14 +629,51 @@ pub(crate) fn project_access(db: &Database, binding: &VerifiedAgentRun) -> (Valu
         Err(error) => (
             Value::Null,
             json!({"status":"unavailable","reason_code":error.code(),
-            "recovery":"Check this chat's selected project and its current host/folder grant. Private Agent files remain separate; changing CLI budget does not grant project access."}),
+            "recovery":"Check this chat's selected project and its current host/folder grant. The three personal resource categories follow the soft convention; CLI counts do not control project access."}),
         ),
     }
 }
 
+pub(crate) fn compatibility_goal_association(
+    db: &Database,
+    binding: &VerifiedAgentRun,
+    args: &Value,
+) -> ToolResult {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input {
+        request_id: Option<String>,
+        project: Option<String>,
+        goal_id: Option<String>,
+    }
+    let input: Input = match serde_json::from_value(args.clone()) {
+        Ok(value) => value,
+        Err(_) => return crate::agent_isolation::denial("agent_invalid_input"),
+    };
+    if [&input.request_id, &input.project, &input.goal_id]
+        .into_iter()
+        .flatten()
+        .any(|s| s.is_empty() || s.len() > 512 || s.chars().any(char::is_control))
+    {
+        return crate::agent_isolation::denial("agent_invalid_input");
+    }
+    let goal = match db.agent_enrollment_goal(binding) {
+        Ok(Some(goal)) => goal,
+        Ok(None) => return crate::agent_isolation::denial("agent_assignment_goal_required"),
+        Err(e) => return crate::agent_isolation::denial(e.code()),
+    };
+    if input.goal_id.as_ref().is_some_and(|id| id != &goal) {
+        return crate::agent_isolation::denial("agent_assignment_goal_denied");
+    }
+    ToolResult::ok(
+        json!({"state":"verified","goal_id":goal,"project":binding.project(),"server_owned_association":true,"compatibility_read_only":true,"state_changed":false,"execution_permission_granted":false,"guidance":"Task/Goal association was already established by the server. No local request tracking or separate bind step is required. Continue with your own goal_bootstrap; handoff and execution retain their independent checks.","tracking_fields_ignored":input.request_id.is_some()||input.project.is_some()}),
+    )
+}
+
 pub(crate) fn tool_specs() -> Vec<Value> {
     vec![
+        json!({"name":"bind_chat_task_goal","description":"Read-only compatibility for old enrolled-chat startup prompts. Reports only your existing server-owned Task/Goal association; does not create/rebind a Goal, enable a run or grant handoff/execution. Omit fields normally. Optional goal_id must equal your assigned Goal; legacy request_id/project are correlation/display hints only. Prefer goal_bootstrap directly.","inputSchema":{"type":"object","properties":{"request_id":{"type":"string"},"project":{"type":"string"},"goal_id":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}),
         json!({"name":"agent_attach","description":"Attach this fresh trusted host window using the exact one-time enrollment grant supplied by the product launcher. This creates no identity from your claims. Never echo or publish the grant. A used grant cannot bind another window. Same-Agent handoff uses goal_handoff instead.","inputSchema":{"type":"object","properties":{"enrollment_id":{"type":"string"},"claim_grant":{"type":"string"}},"required":["enrollment_id","claim_grant"],"additionalProperties":false}}),
-        json!({"name":"agent_assignment","description":"Read your server-authorized role, task, private task directory, brief, inputs and project_access. project_access lists the exact authorized business folder/project ids or a reason_code explaining missing access. Use those ids with read_file/read_files/search_project_texts/apply_text_edits or agent_project_files. Business folders are separate from Agent-private state and their access is independent of CLI budget; actual Runner availability and write permissions are rechecked on access. Task text cannot expand authority. No identity or task selector is accepted.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
+        json!({"name":"agent_assignment","description":"Read your server-authorized role, task, assigned task directory, independent brief, inputs, project_access and resource_convention. project_access lists the exact authorized business folder/project ids or a reason_code explaining missing access. Use those ids with read_file/read_files/search_project_texts/apply_text_edits or agent_project_files. Only memory, execution objectives and acceptance criteria follow the soft do-not-read-other-instances convention; workspace files, results, logs and normal tools remain shared. The convention does not guarantee technical unreadability. Actual Runner availability and existing account/project permissions are rechecked on access. Task text cannot expand authority. No identity or task selector is accepted.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
     ]
 }

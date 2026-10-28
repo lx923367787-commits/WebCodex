@@ -575,48 +575,51 @@ class ChatAgentServiceTests(unittest.TestCase):
         self.assertEqual(repeated["requested_thinking_profile"], PROFILE)
         self.thread_factory.assert_called_once()
         refused = self.spawn(key="new-request")
-        self.assertEqual(refused["state"], "profile_unavailable")
-        self.assertEqual(refused["reason"], "thinking_profiles_expired_refresh_required")
+        self.assertEqual(refused["state"], "running")
+        self.assertEqual(refused["requested_thinking_profile"]["setting_error"], "thinking_profile_unavailable")
 
-    def test_missing_stale_unready_ambiguous_and_unknown_profiles_cannot_spawn(self):
-        path = self.root / "thinking-profiles.json"
-        path.unlink()
-        self.assertEqual(self.spawn()["reason"], "discover_thinking_profiles_first")
-        cases = [({"state": "failed"}, "discover_thinking_profiles_first"),
-                 ({"observed_at": 1}, "thinking_profiles_expired_refresh_required"),
-                 ({"observed_at": chat.time.time() + 60}, "thinking_profiles_expired_refresh_required"),
-                 ({"profiles": [OTHER_PROFILE]}, "thinking_profile_not_discovered")]
-        for arguments, reason in cases:
+    def test_missing_stale_unknown_or_invalid_profiles_do_not_block_spawn(self):
+        cases = [None, {"state": "failed"}, {"observed_at": 1},
+                 {"profiles": [OTHER_PROFILE]}, {"profiles": [PROFILE, PROFILE]}]
+        for index, arguments in enumerate(cases):
             with self.subTest(arguments=arguments):
-                self.save_profiles(**arguments)
-                self.assertEqual(self.spawn(), {"state": "profile_unavailable", "reason": reason,
-                    "request_created": False, "launched": False, "thinking_profile_id": PROFILE["profile_id"]})
-        self.save_profiles(profiles=[PROFILE, PROFILE])
-        with self.assertRaisesRegex(ValueError, "duplicate_thinking_profile"):
-            self.spawn()
-        self.assertFalse((self.root / "tasks").exists())
-        self.thread_factory.assert_not_called()
+                if arguments is None:
+                    (self.root / "thinking-profiles.json").unlink()
+                else:
+                    self.save_profiles(**arguments)
+                first = self.spawn(key="optional-" + str(index))
+                self.assertEqual(first["state"], "running")
+                self.assertEqual(first["requested_thinking_profile"]["setting_error"],
+                                 "thinking_profile_unavailable")
+                self.finish_send(first["request_id"])
+        self.assertEqual(self.thread_factory.call_count, len(cases))
 
-    def test_profile_expires_after_selection_then_refresh_preserves_key_and_single_request(self):
-        selected = self.service.selected_profile(PROFILE["profile_id"])
+    def test_profile_expiry_and_refresh_do_not_duplicate_dispatch(self):
         self.save_profiles(observed_at=1)
-        refused = self.spawn(profile=selected["profile_id"])
-        self.assertEqual(refused["state"], "profile_unavailable")
-        self.assertFalse((self.root / "tasks").exists())
-        self.thread_factory.assert_not_called()
+        first = self.spawn()
         self.save_profiles()
-        first = self.spawn(profile=selected["profile_id"])
-        self.save_profiles(observed_at=1)
-        self.assertEqual(self.spawn(profile=selected["profile_id"])["request_id"], first["request_id"])
-        self.assertEqual(len(list((self.root / "tasks").glob("*/request.json"))), 1)
+        repeated = self.spawn()
+        self.assertEqual(first["request_id"], repeated["request_id"])
+        self.assertEqual(first["requested_thinking_profile"], repeated["requested_thinking_profile"])
         self.thread_factory.assert_called_once()
 
-    def test_arbitrary_selection_failure_is_not_proof_of_recoverable_profile_refusal(self):
-        with patch.object(self.service, "selected_profile", side_effect=ValueError("unknown failure")):
-            with self.assertRaisesRegex(ValueError, "unknown failure"):
-                self.spawn()
-        self.assertFalse((self.root / "tasks").exists())
-        self.thread_factory.assert_not_called()
+    def test_selection_error_is_recorded_without_rejecting_task(self):
+        with patch.object(self.service, "selected_profile", side_effect=RuntimeError("private error")):
+            first = self.spawn()
+        self.assertEqual(first["state"], "running")
+        self.assertNotIn("private error", json.dumps(first))
+        self.assertEqual(first["requested_thinking_profile"]["setting_error"], "thinking_profile_unavailable")
+        self.thread_factory.assert_called_once()
+
+    def test_omission_never_reads_profiles_and_replays_without_new_worker(self):
+        with patch.object(self.service, "selected_profile", side_effect=AssertionError("must not read")), \
+                patch.object(self.service, "profiles_state", side_effect=AssertionError("must not read")):
+            first = self.service.spawn_chat_task("task", "parent", "key")
+            repeated = self.service.spawn_chat_task("task", "parent", "key")
+        self.assertEqual(first["request_id"], repeated["request_id"])
+        self.assertNotIn("thinking_profile", self.service.prepared(first["request_id"])["config"])
+        self.assertNotIn("requested_thinking_profile", first)
+        self.thread_factory.assert_called_once()
 
     def test_first_discovery_is_async_single_worker_and_blocks_spawn(self):
         (self.root / "thinking-profiles.json").unlink()
@@ -655,7 +658,7 @@ class ChatAgentServiceTests(unittest.TestCase):
         path = self.root / "thinking-profiles.json"
         path.unlink()
         self.assertEqual(self.service.read_chat_profiles(),
-                         {"state": "not_discovered", "selection_required": True, "profiles": []})
+                         {"state": "not_discovered", "selection_required": False, "profiles": [], "default_supported": True})
         self.assertFalse(path.exists())
         self.thread_factory.assert_not_called()
         self.transport.discover_profiles.assert_not_called()
@@ -678,6 +681,31 @@ class ChatAgentServiceTests(unittest.TestCase):
             self.thread_factory.assert_called_once()
             self.threads[-1].run()
             self.assertEqual(self.service.read_chat_profiles()["observed_at"], 10000)
+
+    def test_default_launch_does_not_consume_expired_profile_and_replays_same_selection(self):
+        self.save_profiles(observed_at=1)
+        with self.assertRaisesRegex(chat.ProfileUnavailable, "expired"):
+            self.service.selected_profile(PROFILE["profile_id"])
+        self.assertTrue(self.service.read_chat_profiles()["default_supported"])
+        result = self.service.spawn_chat_task("task", "parent", "stable-default", "default")
+        request = self.service.prepared(result["request_id"])
+        self.assertEqual({"profile_id":"default", "mode":"default"}, request["config"]["thinking_profile"])
+        replay = self.service.spawn_chat_task("task", "parent", "stable-default", "default")
+        self.assertEqual(result["request_id"], replay["request_id"])
+        self.thread_factory.assert_called_once()
+
+    def test_orphaned_refresh_is_reported_as_interrupted_without_extending_expiry(self):
+        path = self.root / "thinking-profiles.json"
+        self.save_profiles(observed_at=1)
+        state = chat.read_json(path)
+        state.update(refreshing=True, owner_instance="previous-host", job_id="previous-job")
+        chat.write_json(path, state)
+        before = path.read_bytes()
+        result = self.service.read_chat_profiles()
+        self.assertEqual("interrupted", result["refresh_status"])
+        self.assertFalse(result["refresh_in_progress"])
+        self.assertTrue(result["refresh_required"])
+        self.assertEqual(before, path.read_bytes())
 
     def test_failed_maintenance_preserves_observation_but_never_renews_expiry(self):
         with patch.object(chat.time, "time", return_value=10000):
@@ -719,7 +747,7 @@ class ChatAgentServiceTests(unittest.TestCase):
                 self.assertEqual(result["state"], "ready")
                 self.assertEqual(result["profiles"], [PROFILE, OTHER_PROFILE])
                 self.assertEqual(result["refresh_required"], refresh_required)
-                self.assertTrue(result["selection_required"])
+                self.assertFalse(result["selection_required"])
                 self.assertEqual(path.read_bytes(), original)
         self.thread_factory.assert_not_called()
         self.transport.discover_profiles.assert_not_called()
@@ -766,9 +794,8 @@ class ChatAgentServiceTests(unittest.TestCase):
             prepared["config"].pop("thinking_profile")
             chat.write_json(self.service.directory(first["request_id"]) / "request.json", prepared)
             self.assertNotIn("requested_thinking_profile", self.service.read_chat_task(first["request_id"]))
-            with self.assertRaisesRegex(ValueError, "legacy_request_has_no_thinking_profile"):
-                self.service.bind_chat_task_goal(first["request_id"], "project-1", "goal-1")
-            policy.register_goal_binding.assert_called_once()
+            self.service.bind_chat_task_goal(first["request_id"], "project-1", "goal-1")
+            self.assertEqual(policy.register_goal_binding.call_count, 2)
 
     def test_cli_discovery_delegates_without_using_browser_worker(self):
         module = types.ModuleType("cli_options")
@@ -781,7 +808,7 @@ class ChatAgentServiceTests(unittest.TestCase):
     def test_child_prompt_names_own_goal_registration_and_explicit_cli_choices(self):
         first = self.spawn()
         prompt = self.service.prepared(first["request_id"])["config"]["prompt"]
-        for expected in ("bind_chat_task_goal", "不能复用父Goal", "600K", "800K", "discover_cli_options", "原生model/effort参数", PROFILE["profile_id"], first["request_id"]):
+        for expected in ("bind_chat_task_goal", "不能复用父Goal", "600K", "800K", "discover_cli_options", "原生model参数", PROFILE["profile_id"], first["request_id"]):
             self.assertIn(expected, prompt)
 
     def test_profile_refresh_requires_real_boolean(self):
@@ -883,6 +910,41 @@ class ChatAgentServiceTests(unittest.TestCase):
             "parent-1", key, PROFILE["profile_id"],
             enrollment_binding=self.enrollment_binding() if binding is None else binding,
             enrollment_delivery_provider=provider if provider is not None else Mock(return_value=self.delivery()))
+
+    def test_enrolled_omission_preserves_identity_and_sends_once(self):
+        binding = self.enrollment_binding()
+        binding["thinking_profile_id"] = ""
+        provider = Mock(return_value=self.delivery())
+        with patch.object(self.service, "selected_profile", side_effect=AssertionError("no lookup")):
+            first = self.service.spawn_enrolled_chat_task("task", "parent-1", "no-profile",
+                enrollment_binding=binding, enrollment_delivery_provider=provider)
+        def send(config, evidence, **options):
+            self.assertNotIn("thinking_profile", config)
+            self.assertEqual(options["enrollment_delivery_provider"](), provider.return_value)
+            return {"status": "sent"}
+        self.transport.send.side_effect = send
+        self.threads[-1].run()
+        repeated = self.service.spawn_enrolled_chat_task("task", "parent-1", "no-profile",
+            enrollment_binding=binding, enrollment_delivery_provider=provider)
+        self.assertEqual(repeated["status"], "sent")
+        self.assertEqual(repeated["request_id"], first["request_id"])
+        self.assertEqual(repeated["enrollment_binding"], binding)
+        provider.assert_called_once()
+        self.transport.send.assert_called_once()
+
+    def test_enrolled_prompt_uses_server_task_goal_without_legacy_binding(self):
+        first = self.enrolled()
+        prompt = self.service.prepared(first["request_id"])["config"]["prompt"]
+        self.assertIn("agent_assignment", prompt)
+        self.assertIn("goal_bootstrap", prompt)
+        self.assertIn("goal_mode_start", prompt)
+        self.assertIn("不要重复创建Goal", prompt)
+        self.assertNotIn("bind_chat_task_goal", prompt)
+        self.assertNotIn("discover_cli_options", prompt)
+        self.assertIn("隔离面的cli工具", prompt)
+        self.assertIn("省略model或用null", prompt)
+        self.assertIn("600K", prompt)
+        self.assertIn("800K", prompt)
 
     def test_enrolled_request_freezes_binding_without_claiming_or_persisting_delivery(self):
         provider = Mock(return_value=self.delivery())
@@ -1040,13 +1102,12 @@ class ChatAgentServiceTests(unittest.TestCase):
             self.enrolled(binding=binding)
         self.thread_factory.assert_called_once()
 
-    def test_profile_refusal_and_busy_preflight_do_not_claim_enrollment(self):
+    def test_optional_profile_failure_and_busy_preflight_do_not_claim_enrollment(self):
         provider = Mock(return_value=self.delivery())
         self.save_profiles(observed_at=0)
         refused = self.enrolled(provider=provider)
-        self.assertEqual(refused["state"], "profile_unavailable")
-        self.assertFalse(refused["request_created"])
-        self.assertFalse((self.root / "tasks").exists())
+        self.assertEqual(refused["state"], "running")
+        self.assertEqual(refused["requested_thinking_profile"]["setting_error"], "thinking_profile_unavailable")
         provider.assert_not_called()
         self.save_profiles()
         first = self.enrolled(provider=provider)

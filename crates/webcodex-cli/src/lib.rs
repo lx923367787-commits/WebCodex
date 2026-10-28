@@ -871,6 +871,7 @@ fn parse_login(args: &[String]) -> CliAction {
     let mut base_dir: Option<PathBuf> = None;
     let mut transport = TRANSPORT_WEBSOCKET.to_string();
     let mut allowed_roots: Vec<PathBuf> = Vec::new();
+    let mut no_default_root = false;
     let mut project: Option<PathBuf> = None;
     let mut overwrite = false;
     let mut json = false;
@@ -893,6 +894,7 @@ fn parse_login(args: &[String]) -> CliAction {
                 None => return cli_parse_error(format!("{arg} requires a value")),
             },
             "--code-stdin" => code_stdin = true,
+            "--no-default-root" => no_default_root = true,
             "--device" | "--device-name" => match take(&mut index) {
                 Some(value) => {
                     device = Some(value);
@@ -974,6 +976,7 @@ fn parse_login(args: &[String]) -> CliAction {
         base_dir,
         transport,
         allowed_roots,
+        no_default_root,
         project,
         overwrite,
         json,

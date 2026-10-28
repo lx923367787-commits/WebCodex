@@ -131,7 +131,9 @@ def build_enrollment_message(base_prompt, delivery, *, now_ms=None):
         raise ValueError("enrollment_delivery_expired")
     return (
         "这是仅交付给本目标新对话所属Agent的短期单用接入授权。"
-        "先仅调用 agent_attach，将下列 enrollment_id 和 claim_grant 原样传入；"
+        "先只通过本启动消息所选中的应用 webcodex 调用 agent_attach，将下列 enrollment_id 和 claim_grant 原样传入；"
+        "不得改用其它应用的同名工具（例如 webcodex-Hom）。若 webcodex 缓存的目录只有 call_runtime_tool，"
+        "使用这个同一应用的入口，tool=agent_attach，arguments={enrollment_id,claim_grant}，填入下方原值；"
         "确认 attached=true，并核对返回的本任务assignment、Agent和run后，才执行下方任务。"
         "接入失败或结果未知时停止业务操作，不更换身份、不猜测其他任务。"
         "grant只用于本次首次接入；禁止回显、写入文件或日志、放入会议厅、转发给父任务或其他Agent。"

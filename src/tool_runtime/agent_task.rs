@@ -43,7 +43,6 @@ fn agent_task_recovery_kind(
 ) -> RecoveryKind {
     match error_kind {
         "communication_store_unavailable" => store_failure_recovery,
-        "agent_task_run_budget_exhausted" => RecoveryKind::UserAction,
         "agent_task_attempt_stale"
         | "agent_task_execution_active"
         | "agent_task_execution_outcome_unknown"

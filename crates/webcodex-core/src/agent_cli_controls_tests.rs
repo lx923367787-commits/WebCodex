@@ -126,6 +126,7 @@ fn base(provider: AgentCliProvider) -> Vec<String> {
     match provider {
         AgentCliProvider::WorkBuddy => args.extend([
             "--print",
+            "-y",
             "--input-format",
             "text",
             "--output-format",
@@ -144,6 +145,7 @@ fn base(provider: AgentCliProvider) -> Vec<String> {
 
 fn descriptor(record: &ReviewedAgentCliControls) -> AgentExecutionResourceDescriptor {
     AgentExecutionResourceDescriptor {
+        host_cli: None,
         project_workspace_copy: false,
         resource_set_id: record.resource_set_id.clone(),
         manifest_hash: record.execution_manifest_sha256().unwrap(),
@@ -162,6 +164,32 @@ fn codebuddy_files_record() -> ReviewedAgentCliControls {
     value.control_files = codebuddy_file_worker_control_files();
     value.fixed_args = codebuddy_file_worker_args();
     value
+}
+
+#[test]
+fn codebuddy_v2_uses_explicit_no_external_settings_and_preserves_v1_record() {
+    let old = codebuddy_files_record();
+    let old_hash = old.review_sha256().unwrap();
+    let mut value = old.clone();
+    value.loading_method = CODEBUDDY_FILES_LOADING_V2.into();
+    value.fixed_args = codebuddy_file_worker_args_v2();
+    value.require_supported_loading().unwrap();
+    let argv = compose_reviewed_cli_argv(&value, &base(value.provider)).unwrap();
+    let index = argv
+        .iter()
+        .position(|arg| arg == "--setting-sources")
+        .unwrap();
+    assert_eq!(argv[index + 1], "none");
+    validate_reviewed_cli_argv(&value, &argv).unwrap();
+    assert_ne!(old_hash, value.review_sha256().unwrap());
+    old.require_supported_loading().unwrap();
+    assert_eq!(old.review_sha256().unwrap(), old_hash);
+    let mut changed = value.clone();
+    changed.fixed_args = codebuddy_file_worker_args();
+    assert!(changed.require_supported_loading().is_err());
+    let mut wrong_binary = value;
+    wrong_binary.executable_sha256 = "a".repeat(64);
+    assert!(wrong_binary.require_supported_loading().is_err());
 }
 
 #[test]
@@ -281,8 +309,9 @@ fn reviewed_controls_empty_argument_is_distinct_from_flag_only() {
     absent.fixed_args[0].value = None;
     let empty_argv = compose_shape(&empty, &base(empty.provider)).unwrap();
     let absent_argv = compose_shape(&absent, &base(absent.provider)).unwrap();
-    assert_eq!(&empty_argv[9..], &["--tools", ""]);
-    assert_eq!(&absent_argv[9..], &["--tools"]);
+    let base_count = base(empty.provider).len();
+    assert_eq!(&empty_argv[base_count..], &["--tools", ""]);
+    assert_eq!(&absent_argv[base_count..], &["--tools"]);
     assert_ne!(
         empty.review_sha256().unwrap(),
         absent.review_sha256().unwrap()
@@ -390,6 +419,14 @@ fn reviewed_controls_business_argv_is_exact_and_cannot_be_appended_twice() {
         }
         let composed = compose_shape(&value, &base(provider)).unwrap();
         assert!(compose_shape(&value, &composed).is_err());
+        if provider == AgentCliProvider::WorkBuddy {
+            let mut missing_fixed_arg = base(provider);
+            missing_fixed_arg.retain(|arg| arg != "-y");
+            assert!(compose_shape(&value, &missing_fixed_arg).is_err());
+            let mut repeated_fixed_arg = base(provider);
+            repeated_fixed_arg.push("-y".into());
+            assert!(compose_shape(&value, &repeated_fixed_arg).is_err());
+        }
         let mut appended = composed;
         appended.extend(["--model".into(), "override".into()]);
         assert_eq!(
@@ -505,4 +542,45 @@ fn reviewed_controls_are_bounded_sorted_and_strictly_typed() {
     assert!(value.validate_shape().is_err());
     assert!(resource_payload_sha256(&[]).is_err());
     assert!(resource_payload_sha256(&vec![0; RESOURCE_PAYLOAD_MAX_BYTES + 1]).is_err());
+}
+
+#[test]
+fn configured_default_keeps_reviewed_controls_and_rejects_extra_argv() {
+    let record = codebuddy_files_record();
+    let adapter = selected_adapter(&record).unwrap();
+    let (base, _) = adapter.invocation_selected(None, None, "fixture").unwrap();
+    let args = compose_reviewed_cli_argv(&record, &base).unwrap();
+    validate_reviewed_cli_argv(&record, &args).unwrap();
+    assert!(!args.iter().any(|a| a == "--model"));
+    let mut injected = args;
+    injected.push("--model".into());
+    injected.push("unfrozen-model".into());
+    assert!(validate_reviewed_cli_argv(&record, &injected).is_err());
+}
+
+#[test]
+fn antigravity_148_mapping_is_additive_and_cannot_mix_version_binary_or_loader() {
+    let mut value = record(AgentCliProvider::Antigravity);
+    value.cli_version = ANTIGRAVITY_148_FILES_VERSION.into();
+    value.executable_sha256 = ANTIGRAVITY_148_FILES_EXE_SHA256.into();
+    value.loading_method = ANTIGRAVITY_148_FILES_LOADING.into();
+    value.fixed_args = antigravity_file_worker_args();
+    value.control_files = antigravity_file_worker_control_files();
+    value.require_supported_loading().unwrap();
+    let adapter = selected_adapter(&value).unwrap();
+    let (base, _) = adapter
+        .invocation_selected(None, None, "framework fixture")
+        .unwrap();
+    let args = compose_reviewed_cli_argv(&value, &base).unwrap();
+    validate_reviewed_cli_argv(&value, &args).unwrap();
+    assert!(!args.iter().any(|v| v == "--model" || v == "--effort"));
+    let mut wrong = value.clone();
+    wrong.loading_method = ANTIGRAVITY_FILES_LOADING.into();
+    assert!(wrong.require_supported_loading().is_err());
+    wrong = value.clone();
+    wrong.executable_sha256 = ANTIGRAVITY_FILES_EXE_SHA256.into();
+    assert!(wrong.require_supported_loading().is_err());
+    wrong = value;
+    wrong.cli_version = ANTIGRAVITY_FILES_VERSION.into();
+    assert!(wrong.require_supported_loading().is_err());
 }

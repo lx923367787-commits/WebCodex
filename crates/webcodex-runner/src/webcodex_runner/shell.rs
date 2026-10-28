@@ -1275,6 +1275,19 @@ impl PreparedExecutionEnvironment {
         Ok(Self { env_snapshot })
     }
 
+    /// Per-connector literals override the prepared profile without changing it.
+    /// Keep the same sensitive-name and Windows case-folding rules as profiles.
+    pub(crate) fn apply_env_overrides(
+        &mut self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) {
+        for (key, value) in overrides {
+            if should_inherit_env_key(key) {
+                env_insert(&mut self.env_snapshot, key, value.clone());
+            }
+        }
+    }
+
     pub(crate) fn native_command(
         &self,
         program: &str,

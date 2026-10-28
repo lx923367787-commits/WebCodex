@@ -31,6 +31,7 @@ mod skills;
 mod ssh_resources;
 mod team_task;
 mod testing;
+mod tool_connection;
 
 use super::metadata::{
     metadata as make_tool_metadata, ToolApprovalPolicy, ToolAuthorityPolicy, ToolEffect,
@@ -1004,6 +1005,7 @@ const TOOL_DEFINITION_GROUPS: &[&[ToolDefinition]] = &[
     diagnostics::DEFINITIONS,
     discovery::DEFINITIONS,
     runner_config::DEFINITIONS,
+    tool_connection::DEFINITIONS,
     ssh_resources::DEFINITIONS,
     plugins::DEFINITIONS,
     documents::DEFINITIONS,

@@ -370,7 +370,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 false,
                 super::ToolSessionEvidencePolicy::NONE,
             ),
-            "Commit terminal success or failure only from the exact latest unexpired AgentTaskAttempt with matching assignee, fence, and controller generation. Completion is independently keyed: exact retry replays once, changed reuse conflicts, and stale Attempts cannot write Task truth. A registered custom team also requires confirmed dispatch/call minimums before success; planned slots and unknown outcomes do not satisfy them. Inspect team_plan_read.completion. Failure remains reportable without meeting minimums; autonomous plans impose no custom minimums.",
+            "Commit terminal success or failure only from the exact latest unexpired AgentTaskAttempt with matching assignee, fence, and controller generation. Completion is independently keyed: exact retry replays once, changed reuse conflicts, and stale Attempts cannot write Task truth. Subagents and CLI calls are optional; their counts never satisfy or gate success. Inspect team_plan_read.completion for already-started work that still needs reconciliation. Preserve active-execution and unknown-outcome checks; success requires the actual task acceptance, while failure remains reportable.",
             complete_agent_task_attempt_input_schema,
             ),
             PERMISSION_RISK_WRITE,

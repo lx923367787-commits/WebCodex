@@ -114,7 +114,7 @@ impl WebCodexAdapter {
 
     pub(crate) async fn local_file_bridge_token(
         &self,
-        identity: &ProjectRuntimeIdentity,
+        identity: &RuntimeConnection,
         env_file: &Path,
         cancellation: &CancellationContext,
     ) -> DesktopResult<crate::bundled_tools::BridgeToken> {
@@ -416,6 +416,56 @@ impl WebCodexAdapter {
         project: &ProjectSelection,
         cancellation: &CancellationContext,
     ) -> DesktopResult<ProjectRuntimeIdentity> {
+        let output = self
+            .login_connection_output(
+                server_url,
+                pairing_code,
+                connections_dir,
+                Some(project),
+                cancellation,
+            )
+            .await?;
+        validate_login_output(&output, project)
+    }
+
+    pub async fn login_connection(
+        &mut self,
+        server_url: &str,
+        pairing_code: &str,
+        connections_dir: &Path,
+        cancellation: &CancellationContext,
+    ) -> DesktopResult<RuntimeConnection> {
+        let output = self
+            .login_connection_output(
+                server_url,
+                pairing_code,
+                connections_dir,
+                None,
+                cancellation,
+            )
+            .await?;
+        if output.server_url.trim().is_empty()
+            || output.runner_config.trim().is_empty()
+            || output.user_token_file.trim().is_empty()
+            || !output.registered_projects.is_empty()
+        {
+            return Err(invalid_contract("project-free login"));
+        }
+        Ok(RuntimeConnection {
+            server_url: output.server_url,
+            runner_config: output.runner_config.into(),
+            user_token_file: output.user_token_file.into(),
+        })
+    }
+
+    async fn login_connection_output(
+        &mut self,
+        server_url: &str,
+        pairing_code: &str,
+        connections_dir: &Path,
+        project: Option<&ProjectSelection>,
+        cancellation: &CancellationContext,
+    ) -> DesktopResult<LoginOutput> {
         validate_server_url(server_url)?;
         if pairing_code.trim().is_empty() {
             return Err(DesktopError::new(
@@ -447,12 +497,18 @@ impl WebCodexAdapter {
             // replacement. The one-shot pairing code remains the authority for
             // a true replacement; --overwrite never broadens Server authority.
             "--overwrite".into(),
-            "--allowed-root".into(),
-            project.allowed_root.clone(),
-            "--project".into(),
-            project.path.clone(),
             "--json".into(),
         ];
+        if let Some(project) = project {
+            args.extend([
+                "--allowed-root".into(),
+                project.allowed_root.clone(),
+                "--project".into(),
+                project.path.clone(),
+            ]);
+        } else {
+            args.push("--no-default-root".into());
+        }
         if server_url_is_loopback(server_url) {
             args.push("--no-system-proxy".into());
         }
@@ -464,7 +520,7 @@ impl WebCodexAdapter {
             cancellation,
         )
         .await?;
-        validate_login_output(&output, project)
+        Ok(output)
     }
 
     pub async fn runner_ready(

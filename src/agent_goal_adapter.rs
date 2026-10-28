@@ -227,12 +227,12 @@ fn call_inner(
     db: &Database,
     binding: &VerifiedAgentRun,
     name: &str,
-    arguments: Value,
+    mut arguments: Value,
 ) -> Result<Value, ToolResult> {
     db.validate_agent_run(binding)
         .map_err(|error| denied(error.code()))?;
     if !supports(name) {
-        return Err(denied("execution_isolation_unavailable"));
+        return Err(denied("unknown_goal_tool"));
     }
     for field in [
         "agent_id",
@@ -245,6 +245,11 @@ fn call_inner(
     ] {
         if arguments.get(field).is_some_and(|value| !value.is_null()) {
             return Err(denied("agent_goal_identity_server_owned"));
+        }
+    }
+    if name == "goal_mode_start" && arguments.get("project").is_none_or(Value::is_null) {
+        if let Some(object) = arguments.as_object_mut() {
+            object.insert("project".into(), json!(binding.project()));
         }
     }
     let request = ToolCall::from_tool_name(name, arguments.clone())
@@ -397,7 +402,13 @@ fn call_inner(
             activate,
             ..
         } => {
-            let id = goal_id.ok_or_else(|| denied("explicit_goal_id_required"))?;
+            let id = match goal_id {
+                Some(id) => id,
+                None => db
+                    .agent_enrollment_goal(binding)
+                    .map_err(|error| denied(error.code()))?
+                    .ok_or_else(|| denied("explicit_goal_id_required"))?,
+            };
             if project
                 .as_deref()
                 .is_some_and(|project| project != binding.project())
@@ -529,7 +540,7 @@ fn call_inner(
             let patch: CheckpointPatch =
                 serde_json::from_value(patch).map_err(|_| denied("invalid_goal_checkpoint"))?;
             if !patch.operation_resolutions.is_empty() {
-                return Err(denied("execution_isolation_unavailable"));
+                return Err(denied("goal_operation_resolution_unsupported"));
             }
             let action = match patch.action.as_str() {
                 "checkpoint" => HostGoalCheckpointAction::Progress,
@@ -583,6 +594,6 @@ fn call_inner(
             .map_err(|_| partial("goal_checkpoint_materialization_incomplete", &goal_id))?;
             Ok(json!({"goal":result.goal,"replayed":result.replayed,"checkpoint_path":path}))
         }
-        _ => Err(denied("execution_isolation_unavailable")),
+        _ => Err(denied("unknown_goal_tool")),
     }
 }

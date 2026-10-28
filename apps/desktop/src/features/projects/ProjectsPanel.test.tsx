@@ -141,20 +141,26 @@ describe("Desktop project registry", () => {
     expect(api.mutateProject).not.toHaveBeenCalled();
   });
 
-  it("opens a disabled idle folder's own team policy and saves with its observed revision", async () => {
+  it("opens a disabled idle folder's own collaboration tools without changing the selected project", async () => {
     const office = officeFixture();
-    renderPanel(state, office);
+    const view = renderPanel(state, office);
     fireEvent.click((await row("Beta")).getByRole("button", { name: "团队设置" }));
-    expect(await screen.findByRole("heading", { name: "项目团队设置" })).toBeVisible();
-    expect(await screen.findByRole("button", { name: /总经理自主安排/ })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByRole("heading", { name: "项目协作与工具" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Beta" })).toBeVisible();
+    expect(screen.getByText(projects[1].path)).toBeVisible();
     expect(office.snapshot).toHaveBeenCalledWith(projects[1].id);
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最多数量"), { target: { value: "6" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    await waitFor(() => expect(office.savePolicy).toHaveBeenCalledWith(projects[1].id, 7, expect.objectContaining({ mode: "custom", subagents: { min: 0, max: 6 } })));
+    const rescan = await screen.findByRole("button", { name: "重新扫描本机 CLI" });
+    expect(office.discoverCli).toHaveBeenCalledWith(projects[1].id);
+    fireEvent.click(rescan);
+    await waitFor(() => expect(office.discoverCli).toHaveBeenCalledTimes(2));
+    expect(office.discoverCli).toHaveBeenLastCalledWith(projects[1].id);
+    expect(office.savePolicy).not.toHaveBeenCalled();
     expect(api.switchProject).not.toHaveBeenCalled();
+    expect(api.mutateProject).not.toHaveBeenCalled();
+    expect(view.onState).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /返回项目列表/ }));
     expect(await screen.findByRole("article", { name: "Beta" })).toBeVisible();
+    expect((await row("Alpha")).getByRole("button", { name: "Current project" })).toBeDisabled();
   });
 
   it("opens the verified newly registered folder's team settings without switching workspaces", async () => {
@@ -165,9 +171,10 @@ describe("Desktop project registry", () => {
     await row("Alpha");
     dialog.open.mockResolvedValue("C:\\work\\New");
     fireEvent.click(screen.getByRole("button", { name: "Add project" }));
-    expect(await screen.findByRole("heading", { name: "项目团队设置" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "项目协作与工具" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "New" })).toBeVisible();
     await waitFor(() => expect(office.snapshot).toHaveBeenCalledWith(added.id));
+    await waitFor(() => expect(office.discoverCli).toHaveBeenCalledWith(added.id));
     expect(api.switchProject).not.toHaveBeenCalled();
   });
 
@@ -180,7 +187,7 @@ describe("Desktop project registry", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add project" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("outcome is unconfirmed");
     expect(office.snapshot).not.toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "项目团队设置" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "项目协作与工具" })).not.toBeInTheDocument();
   });
 
   it("matches the inspected canonical folder when the chosen path is a junction", async () => {
@@ -193,11 +200,14 @@ describe("Desktop project registry", () => {
     await row("Alpha");
     dialog.open.mockResolvedValue(selectedPath);
     fireEvent.click(screen.getByRole("button", { name: "Add project" }));
-    expect(await screen.findByRole("heading", { name: "项目团队设置" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "项目协作与工具" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Canonical" })).toBeVisible();
+    expect(screen.getByText(added.path)).toBeVisible();
     expect(api.inspectProject).toHaveBeenCalledWith(selectedPath);
     expect(api.addProject).toHaveBeenCalledWith(selectedPath);
     expect(api.inspectProject.mock.invocationCallOrder[0]).toBeLessThan(api.addProject.mock.invocationCallOrder[0]);
     await waitFor(() => expect(office.snapshot).toHaveBeenCalledWith(added.id));
+    await waitFor(() => expect(office.discoverCli).toHaveBeenCalledWith(added.id));
     expect(api.switchProject).not.toHaveBeenCalled();
   });
 
@@ -211,20 +221,27 @@ describe("Desktop project registry", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add project" }));
     expect(await screen.findByRole("article", { name: "Other" })).toBeVisible();
     expect(office.snapshot).not.toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "项目团队设置" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "项目协作与工具" })).not.toBeInTheDocument();
     expect(api.switchProject).not.toHaveBeenCalled();
   });
 
-  it("lets a preview configure teams while all folder mutations remain disabled", async () => {
+  it("lets a preview inspect collaboration tools while all folder mutations remain disabled", async () => {
     const office = officeFixture();
-    renderPanel(state, office, true);
+    const view = renderPanel(state, office, true);
     expect((await row("Gamma")).getByRole("button", { name: "Use this project" })).toBeDisabled();
     expect((await row("Gamma")).getByRole("button", { name: "Disable" })).toBeDisabled();
     expect((await row("Gamma")).getByRole("button", { name: "Remove" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Add project" })).toBeDisabled();
     fireEvent.click((await row("Gamma")).getByRole("button", { name: "团队设置" }));
-    expect(await screen.findByRole("button", { name: /总经理自主安排/ })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "项目协作与工具" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Gamma" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "重新扫描本机 CLI" })).toBeEnabled();
     expect(office.snapshot).toHaveBeenCalledWith(projects[2].id);
+    expect(office.discoverCli).toHaveBeenCalledWith(projects[2].id);
+    expect(office.savePolicy).not.toHaveBeenCalled();
     expect(api.mutateProject).not.toHaveBeenCalled();
+    expect(api.addProject).not.toHaveBeenCalled();
+    expect(api.switchProject).not.toHaveBeenCalled();
+    expect(view.onState).not.toHaveBeenCalled();
   });
 });

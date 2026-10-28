@@ -16,6 +16,38 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+#[test]
+fn verified_agent_workflow_authority_matches_owner_without_trusting_claimed_identity() {
+    use super::super::session_context::workflow_session_authority_fingerprint as fingerprint;
+    use crate::auth::AuthKind;
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::Database::open(&temp.path().join("authority.db")).unwrap();
+    let alice = crate::test_support::seed_user(&db, "workflow-agent-owner");
+    let bob = crate::test_support::seed_user(&db, "workflow-other-owner");
+    let mut owner = AuthContext::new(AuthKind::ApiToken);
+    owner.user_id = Some(alice.id.clone());
+    let expected = fingerprint(Some(&owner)).unwrap();
+    for project in ["first-project", "second-project"] {
+        let issued = db.create_isolated_agent(&alice.id, project, None).unwrap();
+        let binding = db.authenticate_agent_run(&issued.token).unwrap();
+        let mut agent = crate::agent_isolation::shared_agent_auth(&db, &binding).unwrap();
+        assert_eq!(fingerprint(Some(&agent)).unwrap(), expected);
+        assert!(!agent.is_admin());
+        agent.user_id = None;
+        assert_eq!(fingerprint(Some(&agent)).unwrap(), expected);
+        agent.user_id = Some(bob.id.clone());
+        assert!(fingerprint(Some(&agent)).is_err());
+    }
+    let mut other_owner = owner.clone();
+    other_owner.user_id = Some(bob.id);
+    assert_ne!(fingerprint(Some(&other_owner)).unwrap(), expected);
+    for kind in [AuthKind::ModelAgent, AuthKind::NativeHost] {
+        let mut unbound = AuthContext::new(kind);
+        unbound.user_id = owner.user_id.clone();
+        assert!(fingerprint(Some(&unbound)).is_err());
+    }
+}
+
 async fn call_with_recorder(
     runtime: &ToolRuntime,
     tool_name: &str,

@@ -169,9 +169,9 @@ fn factory_member_is_atomic_bounded_and_grant_starts_at_delivery() {
     assert!(f
         .db
         .create_agent_member(&f.manager, Fixture::member(), "over-cap")
-        .is_err());
+        .is_ok());
     assert_eq!(
-        before,
+        before + 1,
         f.db.conn_for_tests()
             .query_row("SELECT COUNT(*) FROM wc_agent_tasks", [], |r| r
                 .get::<_, i64>(0))

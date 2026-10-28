@@ -11,10 +11,211 @@ const BOOTSTRAP: &str = "synthetic-isolation-bootstrap";
 const OWNER: &str = "synthetic-owner";
 const PROJECT: &str = "synthetic-project";
 
+#[test]
+fn agent_runtime_rest_routes_follow_canonical_metadata_without_operator_authority() {
+    for route in crate::route_metadata::iter_routes() {
+        if route.surface == crate::route_metadata::RouteSurface::RuntimeApi {
+            assert!(
+                crate::agent_isolation::run_route(route.path),
+                "{}",
+                route.path
+            );
+        }
+    }
+    for path in [
+        "/api/users/me",
+        "/api/tokens/list",
+        "/api/admin/agent-isolation",
+        "/api/office/control",
+        "/api/shell/agent/register",
+    ] {
+        assert!(!crate::agent_isolation::run_route(path), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn agent_runtime_rest_does_not_add_owner_lookup_to_existing_resource_broker() {
+    let fixture = Fixture::new(true);
+    let agent = fixture.create(PROJECT, None).await;
+    assert!(fixture.db.get_user_by_id(OWNER).unwrap().is_none());
+    let written = fixture
+        .api(
+            token(&agent),
+            "agent_private",
+            json!({
+                "action":"write", "path":"memory/rest-regression.txt", "content":"own-memory",
+            }),
+        )
+        .await;
+    assert_eq!(written["success"], true, "{written}");
+    let read = fixture
+        .api(
+            token(&agent),
+            "agent_private",
+            json!({
+                "action":"read", "path":"memory/rest-regression.txt",
+            }),
+        )
+        .await;
+    assert_eq!(read["success"], true, "{read}");
+    assert_eq!(read["output"]["content"], "own-memory");
+}
+
+#[tokio::test]
+async fn agent_runtime_rest_shell_preserves_arguments_actor_owner_and_real_result_fields() {
+    use crate::runner_protocol::{
+        RunnerCapabilities, RunnerProjectSummary, RunnerRegisterRequest, RunnerResultPayload,
+        RunnerResultRequest, ShellCommandExecutionState,
+    };
+    let fixture = Fixture::new(true);
+    fixture
+        .db
+        .create_user(&crate::models::UserRecord {
+            id: OWNER.into(),
+            username: OWNER.into(),
+            created_at: 1,
+            disabled: 0,
+            display_name: None,
+            role: "user".into(),
+            disabled_at: None,
+            updated_at: Some(1),
+        })
+        .unwrap();
+    let project = "agent:rest-runner:demo";
+    let agent = fixture.create(project, None).await;
+    let registry = &fixture.runtime.runner_registry;
+    registry
+        .register(crate::test_support::current_runner_registration(
+            RunnerRegisterRequest {
+                client_id: "rest-runner".into(),
+                runner_instance_id: "rest-instance".into(),
+                runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
+                display_name: None,
+                owner: Some(OWNER.into()),
+                hostname: None,
+                host_context: None,
+                capabilities: RunnerCapabilities {
+                    shell: true,
+                    ..Default::default()
+                },
+                policy: None,
+                agent_execution_resources: Vec::new(),
+                process_started_at: None,
+                build: None,
+                job_concurrency_limit: None,
+                job_inventory: None,
+                coding_agent_providers: None,
+                coding_agent_inventory: None,
+            },
+        ))
+        .await
+        .unwrap();
+    crate::test_support::apply_project_inventory_snapshot(
+        registry,
+        "rest-runner",
+        "rest-instance",
+        vec![RunnerProjectSummary {
+            id: "demo".into(),
+            name: Some("demo".into()),
+            path: fixture.temp.path().to_string_lossy().into_owned(),
+            allow_patch: true,
+            kind: Some("repo".into()),
+            registration_source: None,
+            description: None,
+            hooks: Vec::new(),
+            disabled: false,
+            revision: None,
+            git_branch: None,
+            git_head: None,
+            git_dirty: None,
+            updated_at: 1,
+            shell_profile: None,
+        }],
+    )
+    .await;
+    for exit_code in [0, 19] {
+        let command = "printf 'rest-owned-output\\n'";
+        let invoke = fixture.post(
+            "/api/projects/run_shell",
+            Some(token(&agent)),
+            json!({
+                "project":project, "command":command, "cwd":".", "timeout_secs":10,
+            }),
+        );
+        let complete = async {
+            // Reaching this queue also proves the middleware propagated the
+            // actor required by the typed dispatch pipeline, with no lost args.
+            let request = crate::test_support::runner_project_files::next_business_request(
+                &fixture.runtime,
+                "rest-runner",
+                "rest-instance",
+                fixture.temp.path(),
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await;
+            assert_eq!(request.command, command);
+            assert_eq!(
+                request.cwd.as_deref(),
+                Some(fixture.temp.path().to_string_lossy().as_ref())
+            );
+            assert_eq!(request.timeout_secs, 10);
+            registry
+                .complete(RunnerResultPayload {
+                    result: RunnerResultRequest {
+                        client_id: "rest-runner".into(),
+                        runner_instance_id: "rest-instance".into(),
+                        request_id: request.request_id,
+                        exit_code: Some(exit_code),
+                        stdout: Some("rest-owned-output\n".into()),
+                        stderr: Some("rest-stderr\n".into()),
+                        duration_ms: Some(12),
+                        error: None,
+                    },
+                    command_execution_state: Some(ShellCommandExecutionState::Completed),
+                    mcp_gateway: None,
+                    plugin_gateway: None,
+                    coding_agent: None,
+                })
+                .await
+                .unwrap();
+        };
+        let ((_, result), _) = tokio::join!(invoke, complete);
+        assert_eq!(result["success"], exit_code == 0, "{result}");
+        assert_eq!(result["output"]["exit_code"], exit_code);
+        assert_eq!(result["output"]["stdout_tail"], "rest-owned-output\n");
+        assert_eq!(result["output"]["stderr_tail"], "rest-stderr\n");
+    }
+    let other = seed_user(&fixture.db, "rest-other-owner");
+    let other_agent = fixture
+        .db
+        .create_isolated_agent(&other.id, project, None)
+        .unwrap();
+    let (_, refused) = fixture
+        .post(
+            "/api/projects/run_shell",
+            Some(&other_agent.token),
+            json!({"project":project,"command":"should-not-run"}),
+        )
+        .await;
+    assert_eq!(refused["success"], false);
+    assert!(!refused
+        .to_string()
+        .contains("agent_credential_audience_denied"));
+    let (status, _) = fixture
+        .post(
+            "/api/admin/agent-isolation",
+            Some(token(&agent)),
+            json!({"action":"create","owner_user":OWNER,"project":project}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 struct Fixture {
     service: Service,
     db: Arc<crate::Database>,
     temp: tempfile::TempDir,
+    runtime: Arc<ToolRuntime>,
 }
 
 impl Fixture {
@@ -28,7 +229,7 @@ impl Fixture {
         let router = Router::new()
             .hoop(affix_state::inject(config))
             .hoop(affix_state::inject(db.clone()))
-            .hoop(affix_state::inject(runtime))
+            .hoop(affix_state::inject(runtime.clone()))
             .hoop(affix_state::inject(
                 crate::connector_runtime::ConnectorRuntimeSlot::default(),
             ))
@@ -69,6 +270,7 @@ impl Fixture {
             service: Service::new(router),
             db,
             temp,
+            runtime,
         }
     }
 
@@ -384,53 +586,43 @@ async fn agent_isolation_http_private_files_bind_to_authenticated_identity() {
 }
 
 #[tokio::test]
-async fn agent_isolation_http_blocked_execution_never_reaches_legacy_dispatch() {
+async fn agent_shared_tools_use_normal_validation_instead_of_identity_denial() {
     let fixture = Fixture::new(true);
-    let a = fixture.create(PROJECT, None).await;
-    let sentinel = fixture.temp.path().join("must-not-execute.txt");
-    let arguments = json!({"project":PROJECT,"command":format!("echo forbidden > {}",sentinel.display()),
-        "script":"raise RuntimeError('must not execute')","path":sentinel,"action":"run"});
-    for (tool, code) in [
-        ("run_shell", "execution_isolation_unavailable"),
-        ("run_script", "execution_isolation_unavailable"),
-        ("process_start", "execution_isolation_unavailable"),
-        ("plugin_tool", "execution_isolation_unavailable"),
-        ("mcp_tool", "execution_isolation_unavailable"),
-        ("coding_agent_start", "execution_isolation_unavailable"),
-        ("coding_agent_resume", "execution_isolation_unavailable"),
-        ("goal_start", "execution_isolation_unavailable"),
-        ("workspace_checkpoint_list", "agent_tool_not_isolated"),
-        ("checkpoint", "agent_tool_not_isolated"),
-        ("cli_resume", "agent_tool_not_isolated"),
-        ("export_session", "agent_tool_not_isolated"),
-        // The file adapter is now admitted, but still rejects arbitrary legacy
-        // shell arguments before any project or filesystem dispatch.
-        ("read_file", "workspace_invalid_input"),
+    let owner = seed_user(&fixture.db, "shared-tool-owner");
+    let a = fixture
+        .control(json!({"action":"create", "owner_user":owner.id, "project":PROJECT}))
+        .await;
+    // There is deliberately no registered Runner in this fixture. An invalid
+    // call must reach the tool's own parser/availability check, not a blanket
+    // Agent/CLI isolation gate.
+    for tool in [
+        "run_shell",
+        "run_script",
+        "run_process",
+        "plugin_tool",
+        "mcp_tool",
+        "coding_agent_start",
+        "read_file",
     ] {
-        denied(fixture.api(token(&a), tool, arguments.clone()).await, code);
-        denied(fixture.mcp(token(&a), tool, arguments.clone()).await, code);
+        for value in [
+            fixture.api(token(&a), tool, json!({})).await,
+            fixture.mcp(token(&a), tool, json!({})).await,
+        ] {
+            let encoded = value.to_string();
+            assert!(
+                !encoded.contains("agent_tool_not_isolated"),
+                "{tool}: {encoded}"
+            );
+            assert!(
+                !encoded.contains("execution_isolation_unavailable"),
+                "{tool}: {encoded}"
+            );
+            assert!(
+                !encoded.contains("agent_owner_unavailable"),
+                "{tool}: {encoded}"
+            );
+        }
     }
-    assert!(!sentinel.exists());
-    for route in [
-        "/api/projects/run_shell",
-        "/api/projects/run_job",
-        "/api/jobs/log",
-        "/api/runtime/status",
-        "/api/admin/dashboard",
-        "/api/admin/agent-isolation",
-        "/api/audit/sessions",
-    ] {
-        let (status, body) = fixture
-            .post(
-                route,
-                Some(token(&a)),
-                json!({"action":"create","owner_user":OWNER,"project":PROJECT}),
-            )
-            .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{route}: {body}");
-        assert_eq!(body["error"], "agent_credential_audience_denied");
-    }
-    assert!(!sentinel.exists());
 }
 
 #[tokio::test]
@@ -529,8 +721,10 @@ async fn agent_isolation_http_inventory_exposes_only_broker_tools() {
                 "agent_identity",
                 "agent_meeting",
                 "agent_private",
+                "agent_process",
                 "agent_project_files",
                 "apply_text_edits",
+                "bind_chat_task_goal",
                 "cli",
                 "goal_bootstrap",
                 "goal_checkpoint",
@@ -552,6 +746,7 @@ async fn agent_isolation_http_inventory_exposes_only_broker_tools() {
                 "team_cli_delivery_review",
                 "team_cli_observe",
                 "team_cli_start",
+                "team_collaboration",
                 "team_decision",
                 "team_member_create",
                 "team_plan_list",

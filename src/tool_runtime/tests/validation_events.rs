@@ -201,6 +201,7 @@ async fn promoted_run_process_cargo_test_materializes_canonical_validation_evide
             structured_process_argv: true,
             structured_execution_jobs: true,
             agent_isolated_execution_v1: false,
+            agent_program_execution_v1: false,
             ..Default::default()
         },
         vec![registered_project("demo", &tmp.path().to_string_lossy())],

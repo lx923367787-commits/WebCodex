@@ -1,3 +1,4 @@
+import { servicesReady } from "../../models/topology";
 import { useEffect, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { desktopApi } from "../../lib/desktop-api";
@@ -88,13 +89,13 @@ export function ConnectionPanel({
   }
 
   const tunnelEstablished = state.regular_tunnel?.status === "ready";
-  const tunnelLocallyReady = tunnelEstablished && Boolean(state.regular_tunnel?.ready_for_chatgpt);
+  const tunnelLocallyReady = servicesReady(state.readiness) && tunnelEstablished && Boolean(state.regular_tunnel?.ready_for_chatgpt);
   const tunnelError = state.regular_tunnel?.status === "error";
-  const chatgptObserved = state.readiness.runtime_ready &&
+  const chatgptObserved = servicesReady(state.readiness) &&
     Boolean(state.chatgpt_activity?.observed) &&
     !tunnelError;
-  const servicesReady = state.readiness.server === "ready" && state.readiness.runner === "ready";
-  const canStart = servicesReady && state.openai_tunnel_configured && provider === "openai";
+  const ready = servicesReady(state.readiness);
+  const canStart = ready && state.openai_tunnel_configured && provider === "openai";
 
   return (
     <section
@@ -109,9 +110,9 @@ export function ConnectionPanel({
         <h2 id="connection-current-title" className="section-title">{t("connection.current")}</h2>
         <div className="status-value">
           <i className={`status-dot ${chatgptObserved ? "ready" : tunnelLocallyReady ? "ready" : tunnelError ? "error" : state.regular_tunnel ? "pending" : "unknown"}`} aria-hidden="true" />
-          <strong>{!state.readiness.runtime_ready ? runtimeLabel(state, t) : chatgptObserved ? t("connection.observed") : tunnelLocallyReady ? t("connection.tunnelReady") : currentConnection(state, t)}</strong>
+          <strong>{!servicesReady(state.readiness) ? runtimeLabel(state, t) : chatgptObserved ? t("connection.observed") : tunnelLocallyReady ? t("connection.tunnelReady") : currentConnection(state, t)}</strong>
         </div>
-        <p>{!servicesReady ? t("workspace.afterStart") : chatgptObserved ? t("connection.observedDescription") : tunnelLocallyReady ? t("connection.waitingForChatGpt") : tunnelEstablished ? t("connection.tunnelHandoffNeedsAction") : t("connection.notVerified")}</p>
+        <p>{!ready ? t("workspace.afterStart") : chatgptObserved ? t("connection.observedDescription") : tunnelLocallyReady ? t("connection.waitingForChatGpt") : tunnelEstablished ? t("connection.tunnelHandoffNeedsAction") : t("connection.notVerified")}</p>
       </article>
 
       {error && <LocalizedError error={error} />}
@@ -157,7 +158,7 @@ export function ConnectionPanel({
             />
           </fieldset>
 
-          {!servicesReady && <p className="inline-note">{t("connection.runtimeRequired")}</p>}
+          {!ready && <p className="inline-note">{t("connection.runtimeRequired")}</p>}
 
           {provider === "openai" && (
             <button className="primary-button" disabled={mutationBusy || !canStart} onClick={() => void run(desktopApi.startRegularTunnel)} data-webcodex-action="start-regular-tunnel">

@@ -8,6 +8,9 @@ use webcodex_core::build_info;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RunnerCliAction {
+    ConfigureNativeClis {
+        config_path: PathBuf,
+    },
     Run {
         config_path: PathBuf,
         once: bool,
@@ -27,6 +30,7 @@ pub(crate) fn usage() -> &'static str {
        -V, --version              Print version and exit\n\
        -c, --config PATH          Runner config path for normal runtime\n\
        --profile NAME             Client config profile for default config path\n\
+       --configure-native-clis    Configure discovered CLIs for native execution; explicit local operator action\n\
        --once                     Complete one successful poll, then exit (polling transport)\n\
        --stop-on-stdin-eof        Stop when the invoking parent closes stdin\n\n\
      With --profile, the default config path is derived under\n\
@@ -88,6 +92,7 @@ where
     let legacy_agent_config_env = std::env::var("WEBCODEX_AGENT_CONFIG").ok();
     let mut config_path: Option<PathBuf> = None;
     let mut profile: Option<String> = None;
+    let mut configure_native_clis = false;
     let mut once = false;
     let mut stop_on_stdin_eof = false;
     let mut args = args.into_iter();
@@ -107,6 +112,7 @@ where
                     stderr: String::new(),
                 });
             }
+            "--configure-native-clis" => configure_native_clis = true,
             "--once" => once = true,
             "--stop-on-stdin-eof" => stop_on_stdin_eof = true,
             "--config" | "-c" => {
@@ -147,6 +153,12 @@ where
                 .unwrap_or_else(default_config_path)?
         }
     };
+    if configure_native_clis {
+        if once || stop_on_stdin_eof {
+            return Err("native CLI setup cannot run with transport flags".into());
+        }
+        return Ok(RunnerCliAction::ConfigureNativeClis { config_path });
+    }
     Ok(RunnerCliAction::Run {
         config_path,
         once,

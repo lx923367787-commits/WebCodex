@@ -36,6 +36,8 @@ mod unix;
 mod windows;
 
 #[cfg(windows)]
+pub mod windows_local_service;
+#[cfg(windows)]
 pub mod windows_lpac;
 
 #[cfg(unix)]
@@ -43,6 +45,8 @@ pub use unix::ManagedChild;
 
 #[cfg(windows)]
 pub use windows::ManagedChild;
+
+pub type ManagedChildIo = std::process::Child;
 
 /// Outcome of a graceful tree-termination request
 /// ([`ManagedChild::request_terminate_tree`]).

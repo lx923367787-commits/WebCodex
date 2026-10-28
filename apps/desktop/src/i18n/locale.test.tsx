@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { activityMessage, desktopErrorPresentation } from "./presentation";
 import {
   LOCALE_STORAGE_KEY,
   LANGUAGES,
@@ -26,6 +27,13 @@ function LocaleProbe() {
 }
 
 describe("LocaleProvider", () => {
+  it("preserves the safe Runner startup reason in both errors and Activity", () => {
+    const message = "Runner startup failed before connection (exit code 1): agent_resources_reparse_or_link_rejected";
+    const error = { code: "runner_start_failed", message, next_action: "Retry after fixing configuration" };
+    const translate = (key: string) => key;
+    expect(desktopErrorPresentation(error, translate).action).toBe(message);
+    expect(activityMessage({ sequence: 1, timestamp_ms: 1, source: "runner", level: "error", event_kind: "operation_failed", message }, translate)).toContain(message);
+  });
   it.each(LANGUAGES)("persists and restores $value", async ({ value }) => {
     const first = render(<LocaleProvider><LocaleProbe /></LocaleProvider>);
     fireEvent.change(screen.getByRole("combobox"), { target: { value } });

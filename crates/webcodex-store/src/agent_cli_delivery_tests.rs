@@ -1919,3 +1919,58 @@ fn cli_delivery_observer_failed_without_unpublished_marker_can_publish_phase_res
     assert_eq!(f.counts(), (1, 1, 0, 1));
     f.assert_other_tasks_active();
 }
+
+#[test]
+fn cli_observer_success_requires_stopped_completed_execution_without_publication() {
+    let f = Fixture::new();
+    f.observe(ShellCommandExecutionState::Completed, None);
+    let complete = || {
+        f.db.complete_agent_cli_worker_task(
+            &f.permit,
+            f.started.execution.revision,
+            AgentTaskState::Succeeded,
+            Some("CLI execution completed; parent Goal acceptance remains independent"),
+            None,
+            "observer-success",
+        )
+    };
+    assert_eq!(
+        complete().unwrap_err().code(),
+        "public_task_execution_stop_proof_required"
+    );
+    f.prove_stop();
+    let completed = complete().unwrap();
+    assert_eq!(completed.execution.state, AgentTaskState::Succeeded);
+    assert_eq!(f.counts(), (0, 0, 0, 0));
+    assert!(complete().unwrap().replayed);
+    f.assert_other_tasks_active();
+}
+
+#[test]
+fn cli_observer_success_rejects_failed_or_uncompleted_execution() {
+    for (state, code) in [
+        (
+            ShellCommandExecutionState::Completed,
+            Some("provider_failed"),
+        ),
+        (ShellCommandExecutionState::TimedOut, None),
+    ] {
+        let f = Fixture::new();
+        f.observe(state, code);
+        f.prove_stop();
+        let error =
+            f.db.complete_agent_cli_worker_task(
+                &f.permit,
+                f.started.execution.revision,
+                AgentTaskState::Succeeded,
+                None,
+                None,
+                "unproven-success",
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "public_task_success_not_proven");
+        assert_eq!(f.execution().state, AgentTaskState::Active);
+        assert_eq!(f.counts(), (0, 0, 0, 0));
+        f.assert_other_tasks_active();
+    }
+}

@@ -114,7 +114,12 @@ fn main() -> io::Result<()> {
                         &mut writer,
                         &format!(
                             r#"{{"jsonrpc":"2.0","id":{id},"result":{{"padding":"{}","tools":[]}}}}"#,
-                            "x".repeat(1024 * 1024)
+                            "x".repeat(
+                                option_env!("WEBCODEX_TEST_MCP_FRAME_LIMIT")
+                                    .and_then(|s| s.parse::<usize>().ok())
+                                    .unwrap_or(1024 * 1024)
+                                    + 1
+                            )
                         ),
                     )?;
                     continue;
@@ -164,9 +169,7 @@ fn main() -> io::Result<()> {
                 if scenario == "duplicate_id" {
                     send(
                         &mut writer,
-                        &format!(
-                            r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[]}}}}"#
-                        ),
+                        &format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[]}}}}"#),
                     )?;
                 }
             }
@@ -238,7 +241,12 @@ fn main() -> io::Result<()> {
                         &mut writer,
                         &format!(
                             r#"{{"jsonrpc":"2.0","id":{id},"result":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
-                            "x".repeat(70 * 1024)
+                            "x".repeat(
+                                option_env!("WEBCODEX_TEST_MCP_TEXT_LIMIT")
+                                    .and_then(|s| s.parse::<usize>().ok())
+                                    .unwrap_or(64 * 1024)
+                                    + 1
+                            )
                         ),
                     )?,
                     _ => send(

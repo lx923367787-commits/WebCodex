@@ -2828,6 +2828,12 @@ mod computer_privacy_tests {
 impl ToolCall {
     pub fn session_log_arguments(&self) -> Value {
         match self {
+            Self::ToolConnection {
+                client_id,
+                connection,
+            } => {
+                serde_json::json!({"client_id":client_id,"action":connection.action,"kind":connection.kind,"id":connection.id})
+            }
             Self::TeamPolicyGet { project } => serde_json::json!({"project":project}),
             Self::TeamPolicySave {
                 project,

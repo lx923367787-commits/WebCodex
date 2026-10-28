@@ -49,6 +49,9 @@ static NEXT_STATE_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 #[path = "project_management.rs"]
 mod project_management;
 
+#[path = "service_setup.rs"]
+mod service_setup;
+
 #[path = "ai_office.rs"]
 pub(crate) mod ai_office;
 
@@ -612,7 +615,6 @@ fn can_refresh_legacy_runner(snapshot: Option<crate::process::ProcessSnapshot>) 
 
 pub struct DesktopCore {
     data_dir: PathBuf,
-    default_project_dir: PathBuf,
     config_path: PathBuf,
     config: StoredDesktopConfig,
     tunnel_config: TunnelConfig,
@@ -628,7 +630,6 @@ pub struct DesktopCore {
 impl DesktopCore {
     fn new(data_dir: PathBuf, resource_dir: PathBuf) -> DesktopResult<Self> {
         let activity = ActivityLog::default();
-        let default_project_dir = default_management_project_dir(&data_dir, &resource_dir);
         let config_path = data_dir.join("desktop-state.json");
         let config = load_config(&config_path, &activity)?;
         let tunnel_config =
@@ -656,7 +657,6 @@ impl DesktopCore {
         let supervisor = Arc::new(Mutex::new(ProcessSupervisor::new(activity.clone())));
         Ok(Self {
             data_dir,
-            default_project_dir,
             config_path,
             config,
             tunnel_config,
@@ -1058,29 +1058,10 @@ impl DesktopCore {
         if topology.experience != Experience::Full {
             return self.get_state().await;
         }
-        if self.config.project.is_none() && self.config.runtime.is_some() {
-            return self.resume_unselected_runtime(cancellation).await;
-        }
-        let project_path = self
-            .config
-            .project
-            .as_ref()
-            .map(|project| project.path.clone());
         match topology.server {
-            ServerTopology::Local => {
-                self.configure_local_setup(project_path.as_deref(), cancellation)
-                    .await
-            }
+            ServerTopology::Local => self.configure_services(None, "", cancellation).await,
             ServerTopology::Remote { url } => {
-                let project_path = project_path.ok_or_else(|| {
-                    DesktopError::new(
-                        "project_not_ready",
-                        "The saved remote Desktop runtime no longer has a project selection",
-                        "Choose a project or change the Desktop runtime setup.",
-                    )
-                })?;
-                self.configure_remote_setup(&url, "", &project_path, cancellation)
-                    .await
+                self.configure_services(Some(&url), "", cancellation).await
             }
         }
     }
@@ -1243,35 +1224,11 @@ impl DesktopCore {
         cancellation: &CancellationContext,
     ) -> DesktopResult<DesktopStateSnapshot> {
         cancellation.check()?;
-        let project = match project_path.map(str::trim).filter(|path| !path.is_empty()) {
-            Some(path) => self.adapter.inspect_project(path).await?,
-            None => {
-                tokio::fs::create_dir_all(&self.default_project_dir)
-                    .await
-                    .map_err(|error| {
-                        DesktopError::new(
-                            "default_project_unavailable",
-                            "Desktop could not prepare its default management project",
-                            "Check that the WebCodex Desktop install directory is writable, or choose another project from Change runtime mode.",
-                        )
-                        .with_details(serde_json::json!({ "io_kind": format!("{:?}", error.kind()) }))
-                    })?;
-                let mut project = self
-                    .adapter
-                    .inspect_project(&self.default_project_dir.to_string_lossy())
-                    .await?;
-                // The automatically registered management project should not
-                // also grant authority to register sibling installation folders.
-                // Equality is a valid allowed-root boundary, so keep this
-                // implicit setup scoped to the installation directory itself.
-                project.allowed_root = project.path.clone();
-                project
-            }
+        let Some(requested_path) = project_path.map(str::trim).filter(|path| !path.is_empty())
+        else {
+            return self.configure_services(None, "", cancellation).await;
         };
-        let requested_path = project_path
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .unwrap_or(&project.path);
+        let project = self.adapter.inspect_project(requested_path).await?;
         cancellation.check()?;
         let binaries = self.adapter.ensure_binaries(cancellation).await?.clone();
         self.snapshot.binaries = Some(binaries.info());
@@ -1345,7 +1302,10 @@ impl DesktopCore {
                 server_deadline,
             )
             .await
-            .is_ok_and(|status| status.http_reachable);
+            .is_ok_and(|status| {
+                status.http_reachable
+                    || (readiness_token_file.is_none() && status.responding_for_enrollment())
+            });
         cancellation.check()?;
         let server_started = if !running {
             if server_deadline.is_elapsed() {
@@ -1427,7 +1387,7 @@ impl DesktopCore {
             }
             let bridge = self
                 .adapter
-                .local_file_bridge_token(&identity, &env_file, cancellation)
+                .local_file_bridge_token(&identity.connection(), &env_file, cancellation)
                 .await?;
             crate::bundled_tools::install_file_bridge(&env_file, &bridge)?;
             drop(bridge);
@@ -1702,6 +1662,11 @@ impl DesktopCore {
         cancellation: &CancellationContext,
     ) -> DesktopResult<DesktopStateSnapshot> {
         cancellation.check()?;
+        if project_path.trim().is_empty() {
+            return self
+                .configure_services(Some(server_url), pairing_code, cancellation)
+                .await;
+        }
         let server_url = crate::webcodex::validate_server_url(server_url)?;
         let project = self.adapter.inspect_project(project_path).await?;
         cancellation.check()?;
@@ -2515,18 +2480,18 @@ impl DesktopCore {
         cancellation: &CancellationContext,
     ) -> DesktopResult<Option<MachineEventReceiver>> {
         cancellation.check()?;
+        // Keep publication custody through Runner startup, so an active owner
+        // cannot be mistaken for a crash-left carrier between recovery and spawn.
+        let mut _host_control_owner = None;
         let config_change = if kind == ProcessKind::LocalRunner {
             self.host_control.lock().await.revoke();
             let control = host_control::carrier_path(&self.data_dir);
-            let directory = control.parent().expect("private control parent");
-            crate::bundled_tools::prepare_host_control_directory(directory)?;
-            if control.exists() {
-                return Err(DesktopError::new(
-                    "host_control_carrier_conflict",
-                    "An unconfirmed Host control carrier already exists",
-                    "Recover the previous Desktop owner before starting this Runner.",
-                ));
-            }
+            let runtime = self.config.runtime.as_ref();
+            _host_control_owner = Some(host_control::prepare_owner(
+                &control,
+                runtime.map(|runtime| runtime.server_url.as_str()),
+                runtime.and_then(|runtime| runtime.server_env_file.as_deref()),
+            )?);
             let arguments: Vec<_> = command.get_args().collect();
             let configs: Vec<_> = arguments
                 .windows(2)
@@ -2622,7 +2587,12 @@ impl DesktopCore {
                     deadline,
                 )
                 .await
-                .is_ok_and(|status| status.http_reachable)
+                .is_ok_and(|status| {
+                    status.http_reachable
+                        || (env_file.is_some()
+                            && token_file.is_none()
+                            && status.responding_for_enrollment())
+                })
             {
                 return Ok(());
             }
@@ -2671,6 +2641,27 @@ impl DesktopCore {
     ) -> DesktopResult<()> {
         loop {
             cancellation.check()?;
+            if let Some(process) = self.process_snapshot(ProcessKind::LocalRunner).await {
+                if matches!(process.phase, ProcessPhase::Exited | ProcessPhase::Failed) {
+                    let error = runner_startup_error(
+                        &process,
+                        &self.process_logs(ProcessKind::LocalRunner).await,
+                    );
+                    self.activity.push(
+                        ActivityEventKind::OperationFailed,
+                        "runner",
+                        ActivityLevel::Error,
+                        &error.message,
+                    );
+                    self.cleanup_readiness_process(
+                        ProcessKind::LocalRunner,
+                        deadline,
+                        cleanup_owned_process,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            }
             if deadline.is_elapsed() {
                 self.cleanup_readiness_process(
                     ProcessKind::LocalRunner,
@@ -2683,21 +2674,6 @@ impl DesktopCore {
                     "Runner did not become connected",
                     "Check Server reachability and Runner diagnostics, then retry.",
                 ));
-            }
-            if let Some(process) = self.process_snapshot(ProcessKind::LocalRunner).await {
-                if matches!(process.phase, ProcessPhase::Exited | ProcessPhase::Failed) {
-                    self.cleanup_readiness_process(
-                        ProcessKind::LocalRunner,
-                        deadline,
-                        cleanup_owned_process,
-                    )
-                    .await;
-                    return Err(DesktopError::new(
-                        "runner_offline",
-                        "The Desktop-owned Runner exited while connecting",
-                        "Open Activity for safe diagnostics and retry.",
-                    ));
-                }
             }
             if self
                 .adapter
@@ -2713,19 +2689,6 @@ impl DesktopCore {
                 return Ok(());
             }
             cancellation.check()?;
-            if deadline.is_elapsed() {
-                self.cleanup_readiness_process(
-                    ProcessKind::LocalRunner,
-                    deadline,
-                    cleanup_owned_process,
-                )
-                .await;
-                return Err(readiness_timeout_error(
-                    "runner_offline",
-                    "Runner did not become connected",
-                    "Check Server reachability and Runner diagnostics, then retry.",
-                ));
-            }
             sleep_or_cancel_until(POLL_INTERVAL, cancellation, deadline).await?;
         }
     }
@@ -2850,6 +2813,49 @@ fn readiness_timeout_error(
 ) -> DesktopError {
     DesktopError::new(code, message, action)
         .with_details(serde_json::json!({ "category": "readiness_timeout" }))
+}
+
+fn runner_startup_error(
+    process: &crate::process::ProcessSnapshot,
+    logs: &[String],
+) -> DesktopError {
+    // Surface only a bounded error identifier from retained, already-redacted
+    // diagnostics. Arbitrary config values, paths and provider output stay out
+    // of the readiness error and activity message.
+    let diagnostic_code = logs.iter().rev().find_map(|line| {
+        let safe = crate::activity::sanitize_message(line);
+        let text = safe
+            .trim()
+            .strip_prefix("Error: ")
+            .or_else(|| safe.trim().strip_prefix("error: "))?;
+        let code = text
+            .split_whitespace()
+            .next()?
+            .trim_matches(['\"', '\'', ':', ',']);
+        (code.len() <= 128
+            && code.contains('_')
+            && !code.starts_with("wc_")
+            && code
+                .bytes()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'_'))
+        .then(|| code.to_owned())
+    });
+    let exit = process
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    let mut message = format!("Runner startup failed before connection (exit code {exit})");
+    if let Some(code) = diagnostic_code.as_deref() {
+        message.push_str(": ");
+        message.push_str(code);
+    }
+    DesktopError::new(
+        "runner_start_failed", message,
+        "Fix the reported Runner startup error, then start the services again. A project is not required to start services.",
+    ).with_details(serde_json::json!({
+        "category":"runner_startup", "failure_stage":"runner_startup", "exit_code":process.exit_code,
+        "diagnostic_code":diagnostic_code,
+    }))
 }
 
 // These are Desktop packaging defaults, not process-environment overrides.
@@ -3493,28 +3499,6 @@ fn runtime_autostart(config: &StoredDesktopConfig) -> bool {
     })
 }
 
-fn default_management_project_dir(data_dir: &Path, resource_dir: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let _ = data_dir;
-        // The NSIS package is current-user scoped. Use the actual installation
-        // directory as the default management Project so a fresh Desktop is
-        // immediately manageable without asking the user to choose an unrelated
-        // source checkout first. This intentionally grants the Project the same
-        // install-directory authority the user has requested for Desktop
-        // configuration and maintenance.
-        return resource_dir.to_path_buf();
-    }
-    #[cfg(not(windows))]
-    {
-        // A macOS resource directory lives inside the signed app bundle and is
-        // not a mutable workspace. Keep the same management-project semantics
-        // in the per-user Desktop data directory there.
-        let _ = resource_dir;
-        data_dir.join("workspace")
-    }
-}
-
 fn preferred_connection(config: &StoredDesktopConfig) -> RegularConnectionPreference {
     config.preferred_connection.unwrap_or_default()
 }
@@ -3564,6 +3548,45 @@ fn same_project(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_startup_error_keeps_safe_load_code_and_exit_stage() {
+        let process = crate::process::ProcessSnapshot {
+            kind: ProcessKind::LocalRunner,
+            phase: ProcessPhase::Failed,
+            pid: Some(7),
+            exit_code: Some(1),
+            owned_by_desktop: true,
+        };
+        let error = runner_startup_error(
+            &process,
+            &[
+                "untrusted log wc_pat_secret".into(),
+                "Error: agent_resources_reparse_or_link_rejected".into(),
+            ],
+        );
+        assert_eq!(error.code, "runner_start_failed");
+        assert!(error
+            .message
+            .contains("agent_resources_reparse_or_link_rejected"));
+        assert!(error.message.contains("exit code 1"));
+        assert_eq!(
+            error.details.as_ref().unwrap()["failure_stage"],
+            "runner_startup"
+        );
+        assert!(!serde_json::to_string(&error).unwrap().contains("secret"));
+        let safe = runner_startup_error(
+            &process,
+            &[
+                "Error: wc_pat_secret".into(),
+                "Error: password=do-not-expose".into(),
+            ],
+        );
+        assert!(safe.details.as_ref().unwrap()["diagnostic_code"].is_null());
+        assert!(!serde_json::to_string(&safe)
+            .unwrap()
+            .contains("do-not-expose"));
+    }
 
     #[tokio::test]
     #[ignore = "requires WEBCODEX_DESKTOP_BUNDLE_RESOURCES pointing to a complete installer payload"]
@@ -3711,17 +3734,6 @@ mod tests {
             );
         }
         outcome.expect("native bundled-tools automatic setup and real MCP acceptance");
-    }
-
-    #[test]
-    fn default_management_project_uses_safe_platform_location() {
-        let data = PathBuf::from(r"C:\Users\test\AppData\Local\WebCodex");
-        let resources = PathBuf::from(r"D:\Apps\WebCodex Desktop");
-        let project = default_management_project_dir(&data, &resources);
-        #[cfg(windows)]
-        assert_eq!(project, resources);
-        #[cfg(not(windows))]
-        assert_eq!(project, data.join("workspace"));
     }
 
     #[test]

@@ -163,30 +163,13 @@ class AutomaticDispatchTests(unittest.TestCase):
         self.assertEqual(self.fallback.finished, 0)
         self.profile_maintenance.assert_not_called()
 
-    def test_profile_maintenance_uses_current_control_and_bounded_retry(self):
-        now = [0]
-        self.profile_maintenance.return_value = True
-        pump = self.dispatcher(clock=lambda: now[0])
-        pump._tick(self.context)
-        self.profile_maintenance.assert_called_once()
-        now[0] = 299
-        pump._tick(self.context)
-        self.profile_maintenance.assert_called_once()
-        now[0] = 300
-        pump._tick(self.context)
-        self.assertEqual(self.profile_maintenance.call_count, 2)
-        self.assertEqual(self.fallback.finished, 3)
-
-    def test_profile_maintenance_failure_cannot_retry_on_every_tick(self):
-        now = [0]
-        pump = self.dispatcher(clock=lambda: now[0])
-        self.profile_maintenance.side_effect = ValueError("fixture-failure")
-        with self.assertRaises(ValueError):
+    def test_dispatch_never_discovers_or_refreshes_profiles(self):
+        self.profile_maintenance.side_effect = AssertionError("no automatic discovery")
+        pump = self.dispatcher()
+        for _ in range(3):
             pump._tick(self.context)
-        now[0] = 5
-        pump._tick(self.context)
-        self.profile_maintenance.assert_called_once()
-        self.assertEqual(self.fallback.finished, 2)
+        self.profile_maintenance.assert_not_called()
+        self.assertEqual(self.fallback.finished, 3)
 
     def test_profile_maintenance_never_runs_after_control_generation_changes(self):
         self.state_reader.side_effect = [
@@ -203,6 +186,15 @@ class AutomaticDispatchTests(unittest.TestCase):
         self.dispatcher(state_reader=state_reader)._run()
         self.assertEqual(self.fallback.discovered, [])
         self.assertEqual(self.member.discovered, [])
+
+    def test_event_queue_is_integrated_in_existing_worker_and_failure_keeps_enrollment_recovery(self):
+        self.context["manager_bindings"]=types.SimpleNamespace(host_id_provider=lambda:"fixture-host")
+        advance=Mock()
+        with patch("team_continuation.schedule",side_effect=ValueError("synthetic unavailable")) as schedule:
+            self.dispatcher(advance_fn=advance)._tick(self.context)
+        schedule.assert_called_once()
+        self.assertEqual(schedule.call_args.args[0],self.service)
+        advance.assert_called_once()
 
     def test_context_loss_retries_while_retaining_existing_lock(self):
         self.service._stopping = StepStop(3)

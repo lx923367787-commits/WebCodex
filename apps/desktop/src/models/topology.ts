@@ -80,6 +80,7 @@ export interface ReadinessSnapshot {
   runner: RunnerReadiness;
   exposure: ExposureReadiness;
   project: ProjectReadiness;
+  /** Server + Runner readiness; does not authorize any project task. */
   runtime_ready: boolean;
   ready_for_chatgpt: boolean;
   summary: string;
@@ -248,4 +249,9 @@ export interface ActivityEntry {
     | "operation_cancelled"
     | "operation_failed";
   message: string;
+}
+
+/** Service readiness never implies that a particular project task is authorized. */
+export function servicesReady(readiness: DesktopState["readiness"]): boolean {
+  return readiness.server === "ready" && readiness.runner === "ready";
 }

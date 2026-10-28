@@ -770,3 +770,10 @@ fn login_print_mcp_config_and_json_are_mutually_exclusive() {
         other => panic!("expected Login dispatch, got {other:?}"),
     }
 }
+
+#[test]
+fn login_can_enroll_without_a_project_or_default_directory_authority() {
+    assert!(
+        matches!(cli_action(["login", "https://example.test", "--code", "wc_pair_fixture", "--no-default-root"]), CliAction::Login(opts) if opts.no_default_root && opts.project.is_none() && opts.allowed_roots.is_empty())
+    );
+}

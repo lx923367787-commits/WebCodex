@@ -363,3 +363,100 @@ async fn native_auto_enrollment_discovery_and_invalid_calls_never_create_an_agen
         .1,
     );
 }
+
+#[tokio::test]
+async fn canonical_work_on_project_initializes_fresh_native_window_after_validation() {
+    let f = Fixture::new();
+    let host =
+        f.db.register_native_agent_host(&format!("tunnel_{}", "c".repeat(32)), &"d".repeat(64))
+            .unwrap();
+    let a = format!("wc_workspace_{}", "a".repeat(32));
+    let b = format!("wc_workspace_{}", "b".repeat(32));
+    let control = json!({"action":"native_workspaces_save","host_id":host.host_id,"owner_user":f.user.id,"expected_revision":0,
+    "projects":[
+        {"id":a,"name":"A","enabled":true,"folders":[{"project":"agent:runner:a","name":"A","path":"D:/a"}]},
+        {"id":b,"name":"B","enabled":true,"folders":[{"project":"agent:runner:b","name":"B","path":"D:/b"}]}
+    ]});
+    assert_eq!(f.control(CONTROL, control).await.0, StatusCode::OK);
+    let token = host.into_secret();
+    let native = f.db.authenticate_native_agent_host(&token).unwrap();
+    let count = || {
+        f.db.conn_for_tests()
+            .query_row("SELECT COUNT(*) FROM wc_agent_tasks", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    for arguments in [
+        json!({"project":"agent:runner:a","instruction":"x","unknown":true}),
+        json!({"project":"agent:runner:a","instruction":"x","path":"D:/a","client_id":"runner"}),
+        json!({"project":"agent:runner:a","instruction":"   "}),
+        json!({"project":"agent:runner:a","instruction":"x".repeat(4001)}),
+        json!({"project":"agent:runner:a","instruction":"x","mode":"unsupported"}),
+        json!({"project":"agent:runner:a","instruction":"x","mode":"worktree"}),
+        json!({"project":"agent:runner:a","instruction":"x","base_ref":"main"}),
+        json!({"project":"agent:runner:a","instruction":"x","session_id":"invalid"}),
+        json!({"project":"agent:runner:a","instruction":"x","include_project_instructions":"wrong-type"}),
+        json!({"project":"agent:runner:unlisted","instruction":"x"}),
+    ] {
+        denied(&native_call(&f, &token, "invalid-coding", "work_on_project", arguments).await);
+        assert_eq!(count(), 0, "invalid input must not create an Agent/task");
+    }
+    let first = native_call(
+        &f,
+        &token,
+        "fresh-coding",
+        "work_on_project",
+        json!({"project":"agent:runner:a","instruction":"Inspect the authorized project"}),
+    )
+    .await;
+    assert!(!first.to_string().contains("agent_host_window_not_active"));
+    assert_eq!(count(), 1);
+    let window = Fixture::source_window("fresh-coding");
+    let Some(webcodex_store::AgentHostWindowBinding::Active(binding)) =
+        f.db.resolve_agent_host_window(
+            native.principal_key(),
+            &window,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap()
+    else {
+        panic!("canonical entry did not initialize its own Agent");
+    };
+    assert_eq!(binding.project(), a);
+    let _ = native_call(&f, &token, "fresh-coding", "work_on_project", json!({"project":"agent:runner:b","instruction":"Inspect another authorized shared project"})).await;
+    assert_eq!(
+        f.db.resolve_agent_host_window(
+            native.principal_key(),
+            &window,
+            chrono::Utc::now().timestamp_millis()
+        )
+        .unwrap(),
+        Some(webcodex_store::AgentHostWindowBinding::Active(
+            binding.clone()
+        ))
+    );
+    let path_result = native_call(&f, &token, "fresh-path", "call_runtime_tool", json!({"tool":"work_on_project","arguments":{"client_id":"runner","path":"D:/a/sub","instruction":"Inspect the authorized path"}})).await;
+    assert!(!path_result
+        .to_string()
+        .contains("agent_host_window_not_active"));
+    assert_eq!(count(), 2);
+    f.db.revoke_agent_run(
+        binding.owner_user(),
+        binding.project(),
+        binding.agent_id(),
+        binding.run_id(),
+    )
+    .unwrap();
+    denied(
+        &native_call(
+            &f,
+            &token,
+            "fresh-coding",
+            "work_on_project",
+            json!({"project":"agent:runner:a","instruction":"Do not reactivate the old window"}),
+        )
+        .await,
+    );
+    assert_eq!(count(), 2);
+}

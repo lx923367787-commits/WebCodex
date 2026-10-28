@@ -543,6 +543,9 @@ async fn cli_inventory_does_not_require_an_execution_profile_and_remains_owner_s
             capabilities: None,
             installations: vec![AgentCliInstallation {
                 command: "third-party-cli".into(),
+                execution_ready: Some(false),
+                execution_mode: None,
+                reason_code: Some("cli_resource_not_registered".into()),
                 provider_id: "third-party-cli".into(),
                 label: "Installed CLI".into(),
                 installed: true,
@@ -994,6 +997,49 @@ async fn agent_cli_delivery_returns_only_allowlisted_errors_from_exact_runner() 
                 )
                 .await
         });
+        let request = next(&registry).await;
+        let instance = registry.inner.lock().await.runners["runner"]
+            .runner_instance_id
+            .clone();
+        registry
+            .complete(RunnerResultRequest {
+                client_id: "runner".into(),
+                runner_instance_id: instance,
+                request_id: request.request_id,
+                exit_code: None,
+                stdout: None,
+                stderr: None,
+                duration_ms: Some(0),
+                error: Some(error.into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().unwrap_err(), expected);
+    }
+}
+
+#[tokio::test]
+async fn agent_cli_load_error_preserves_stage_and_cause_without_returning_private_text() {
+    for (error, expected) in [
+        (
+            "cli_resource_configuration_failed:agent_execution_metadata_invalid",
+            "cli_resource_configuration_failed:agent_execution_metadata_invalid",
+        ),
+        (
+            "agent_cli_provider_unconfigured",
+            "agent_cli_provider_unconfigured",
+        ),
+        (
+            "cli_resource_configuration_failed:secret=hidden",
+            "agent_cli_query_response_invalid",
+        ),
+        (
+            "cli_resource_configuration_failed:wc_ar_private",
+            "agent_cli_query_response_invalid",
+        ),
+    ] {
+        let registry = fixture().await;
+        let task = catalog_task(&registry);
         let request = next(&registry).await;
         let instance = registry.inner.lock().await.runners["runner"]
             .runner_instance_id

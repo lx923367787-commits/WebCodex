@@ -41,6 +41,15 @@ class ThinkingHandoffTests(unittest.TestCase):
         self.assertEqual(self.child["request_id"],second["chat_task_request_id"])
         self.assertIs(second,flow.validate_request(second))
 
+    def test_child_without_override_never_reads_or_selects_page_strength(self):
+        import edge_handoff
+        child = dict(self.child, thinking_profile=None)
+        request = self.request(child)
+        self.assertIs(request, flow.validate_request(request))
+        with patch("thinking_profiles.select_profile", side_effect=AssertionError("no setting lookup")):
+            result = edge_handoff.configure_chat(None, request, None)
+        self.assertEqual(result["thinking_adjustment"]["status"], "not_requested")
+
     def test_binding_error_does_not_fall_back_to_main(self):
         def fail(*_):raise ValueError("cancelled")
         with self.assertRaises(ValueError):

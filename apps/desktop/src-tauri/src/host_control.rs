@@ -3,7 +3,7 @@
 use super::*;
 use crate::bundled_tools::{bootstrap_credential_file, BootstrapCredentialFile};
 use crate::webcodex::RuntimeConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
@@ -39,7 +39,8 @@ struct Source {
     owned_runner: (u32, u64),
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Carrier {
     schema_version: u32,
     server_url: String,
@@ -62,17 +63,11 @@ struct Publication {
 
 impl Publication {
     fn create(source: Source, owner_user: String, projects: Vec<String>) -> DesktopResult<Self> {
-        let directory = source
-            .control_path
-            .parent()
-            .ok_or_else(|| error("host_control_path_invalid"))?;
-        crate::bundled_tools::prepare_host_control_directory(directory)?;
-        let lock = lock_owner(&directory.join("control.lock"))?;
-        // Never overwrite a carrier left by an unrelated or unconfirmed owner.
-        // Graceful teardown removes ours; a stale file requires explicit recovery.
-        if source.control_path.exists() {
-            return Err(error("host_control_carrier_conflict"));
-        }
+        let lock = prepare_owner(
+            &source.control_path,
+            Some(&source.connection.server_url),
+            Some(&source.env_file),
+        )?;
         let credential = bootstrap_credential_file(&source.env_file)?;
         let carrier = Carrier {
             schema_version: 2,
@@ -170,11 +165,82 @@ fn lock_owner(path: &Path) -> DesktopResult<File> {
     Ok(file)
 }
 
+/// Reserve this Desktop's publication slot before starting its Runner or
+/// publishing control material. An available OS lock proves the former
+/// cooperating publisher has released ownership; no PID/liveness guess is used.
+/// A crash-left carrier is preserved only when its source matches the saved
+/// runtime. Its credential is neither opened, reused, nor deleted.
+pub(super) fn prepare_owner(
+    control_path: &Path,
+    expected_server_url: Option<&str>,
+    expected_env_file: Option<&Path>,
+) -> DesktopResult<File> {
+    let directory = control_path
+        .parent()
+        .ok_or_else(|| error("host_control_path_invalid"))?;
+    crate::bundled_tools::prepare_host_control_directory(directory)?;
+    let lock = lock_owner(&directory.join("control.lock"))?;
+    match std::fs::symlink_metadata(control_path) {
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(lock),
+        Err(_) => return Err(error("host_control_source_unavailable")),
+        Ok(_) => {}
+    }
+
+    let original = read_bounded(control_path, MAX_CONTROL_BYTES)?;
+    let carrier: Carrier =
+        serde_json::from_slice(&original).map_err(|_| error("host_control_carrier_conflict"))?;
+    let source_env = carrier
+        .source_ref
+        .strip_prefix("desktop-local-bootstrap:")
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .and_then(|path| path.canonicalize().ok());
+    let expected_env = expected_env_file.and_then(|path| path.canonicalize().ok());
+    if carrier.schema_version != 2
+        || expected_server_url != Some(carrier.server_url.as_str())
+        || source_env.is_none()
+        || expected_env.is_none()
+        || source_env != expected_env
+    {
+        return Err(error("host_control_carrier_conflict"));
+    }
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| error("host_control_recovery_failed"))?
+        .as_nanos();
+    let backup = directory.join(format!("control.stale-{}-{nonce}.json", std::process::id()));
+    if backup
+        .try_exists()
+        .map_err(|_| error("host_control_recovery_failed"))?
+    {
+        return Err(error("host_control_recovery_failed"));
+    }
+    // Match the ordinary publication write guard: preserve an operator change
+    // instead of moving bytes that were not validated above.
+    if read_bounded(control_path, MAX_CONTROL_BYTES)? != original {
+        return Err(error("host_control_carrier_changed"));
+    }
+    std::fs::rename(control_path, &backup).map_err(|_| error("host_control_recovery_failed"))?;
+    sync_state_directory(directory).map_err(|_| error("host_control_recovery_failed"))?;
+    Ok(lock)
+}
+
 fn read_bounded(path: &Path, limit: u64) -> DesktopResult<Vec<u8>> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|_| error("host_control_source_unavailable"))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
         return Err(error("host_control_source_invalid"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return Err(error("host_control_source_invalid"));
+        }
     }
     let mut bytes = Vec::new();
     File::open(path)
@@ -569,7 +635,7 @@ mod tests {
         assert!(rejected.is_empty());
     }
 
-    fn fixture() -> (PathBuf, Source) {
+    pub(super) fn fixture() -> (PathBuf, Source) {
         let root = std::env::temp_dir().join(format!(
             "webcodex-host-control-{}-{}",
             std::process::id(),
@@ -685,3 +751,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "host_control_recovery_tests.rs"]
+mod recovery_tests;

@@ -25,6 +25,114 @@ fn main() {
     let mode = args.get(1).map(String::as_str).unwrap_or("sleep");
 
     match mode {
+        #[cfg(windows)]
+        "lpac-policy-status" => {
+            let identity = args.get(2).expect("exact policy identity");
+            println!(
+                "{}",
+                webcodex_process::windows_local_service::LocalServiceNetwork::cleanup_complete(
+                    identity
+                )
+                .expect("read exact policy")
+            );
+        }
+        #[cfg(windows)]
+        "lpac-policy-cleanup" => {
+            // Test-only operator entry. The caller must have confirmed its
+            // original fixture/controller has exited; this is not stop proof.
+            let identity = args.get(2).expect("exact stopped fixture policy identity");
+            webcodex_process::windows_local_service::LocalServiceNetwork::remove_stopped(identity)
+                .expect("remove exact stopped fixture policy");
+            println!(
+                "{}",
+                webcodex_process::windows_local_service::LocalServiceNetwork::cleanup_complete(
+                    identity
+                )
+                .unwrap()
+            );
+        }
+        "lpac-local-service" => {
+            use std::net::{Ipv4Addr, TcpListener, TcpStream};
+            use std::time::{Duration, Instant};
+            let port: u16 = args[2].parse().unwrap();
+            let denied_port: u16 = args[3].parse().unwrap();
+            let listener =
+                TcpListener::bind((Ipv4Addr::LOCALHOST, port)).expect("bind isolated service");
+            listener.set_nonblocking(true).unwrap();
+            let denied = TcpStream::connect_timeout(
+                &(Ipv4Addr::LOCALHOST, denied_port).into(),
+                Duration::from_millis(500),
+            )
+            .is_err();
+            std::fs::write(&args[4], format!("port={port};other_port_denied={denied}")).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline && !std::path::Path::new(&args[5]).exists() {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let mut request = [0u8; 512];
+                        let _ = stream.read(&mut request);
+                        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK").unwrap();
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(e) => panic!("local service accept: {e}"),
+                }
+            }
+            assert!(denied, "another host service must remain inaccessible");
+        }
+        "lpac-loopback-probe" => {
+            use std::net::{TcpListener, TcpStream};
+            use std::time::{Duration, Instant};
+            let result = (|| -> std::io::Result<()> {
+                let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+                listener.set_nonblocking(true)?;
+                let address = listener.local_addr()?;
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let server = std::thread::spawn(move || loop {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.write_all(b"local-ok")?;
+                            return Ok::<_, std::io::Error>(());
+                        }
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(e) => return Err(e),
+                    }
+                });
+                let client = TcpStream::connect_timeout(&address, Duration::from_secs(2));
+                let result = client.and_then(|mut stream| {
+                    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                    let mut bytes = [0u8; 8];
+                    stream.read_exact(&mut bytes)?;
+                    if &bytes == b"local-ok" {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other("loopback payload mismatch"))
+                    }
+                });
+                let server = server.join().unwrap();
+                result?;
+                server
+            })();
+            let report = match result {
+                Ok(()) => "loopback_self=true".to_owned(),
+                Err(e) => format!(
+                    "loopback_self=false;os_code={:?};kind={:?}",
+                    e.raw_os_error(),
+                    e.kind()
+                ),
+            };
+            println!("{report}");
+            std::fs::write(args.get(2).expect("explicit probe output"), report).unwrap();
+        }
         "--version" => println!("synthetic-metadata-cli 1.2.3"),
         "--help" => {
             println!("--model <model> Currently supported: (synthetic-model-a, synthetic-model-b)");

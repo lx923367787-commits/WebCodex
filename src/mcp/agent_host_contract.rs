@@ -1,14 +1,22 @@
-//! Data-free contract projection from the current isolated catalog.
+//! Data-free contract projection from the current Agent runtime catalog.
 //! The caller must first authenticate the native host; this grants no run.
 use serde_json::{json, Value};
 
 pub(super) fn native_catalog() -> Value {
     let mut catalog = crate::agent_isolation::tool_specs();
+    // These host-aware contracts replace the corresponding runtime projection.
+    // A duplicate name makes exact discovery ambiguous even when it is callable.
+    catalog["tools"].as_array_mut().unwrap().retain(|spec| {
+        !matches!(
+            spec["name"].as_str(),
+            Some("agent_projects" | "agent_select_project" | "runtime_status" | "tool_manifest")
+        )
+    });
     catalog["tools"].as_array_mut().unwrap().extend([
         json!({"name":"agent_projects","description":"List only operator-authorized named projects and their folders on this connected computer. Creates no Agent. Match the user's project name to this list. If several projects are available and the user has not chosen one, ask before selecting; never infer the target from the Desktop's current folder.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
-        json!({"name":"agent_select_project","description":"Select an exact project id returned by agent_projects for this chat. Use only the project the user chose. Creates the chat's independent Agent automatically. Repeating the same selection preserves identity. An already-bound chat cannot silently move to another project; start a new chat for a different project. Does not grant arbitrary CLI execution.","inputSchema":{"type":"object","properties":{"project":{"type":"string"}},"required":["project"],"additionalProperties":false}}),
-        json!({"name":"runtime_status","description":"Check this trusted chat's connection and own isolated Agent only. First use selects the sole enabled named project, or reports project_selection_required when a choice is needed. If the user named a project, call agent_projects and agent_select_project first. Never treat a connection check as permission to guess among projects.","inputSchema":{"type":"object","properties":{"compact":{"type":"boolean"},"summary_only":{"type":"boolean"}},"additionalProperties":false}}),
-        json!({"name":"tool_manifest","description":"Read current isolated tool contracts. Omit tool_name to discover this connection's tools, or supply one exact name. Discovery creates no Agent and grants no execution. For a named project, use agent_projects then agent_select_project; use agent_assignment for its authorized folders.","inputSchema":{"type":"object","properties":{"tool_name":{"type":"string"},"include_recommended_flows":{"type":"boolean"},"include_risk_summary":{"type":"boolean"}},"additionalProperties":false}}),
+        json!({"name":"agent_select_project","description":"Select an exact project id returned by agent_projects for this chat. Use only the project the user chose. Creates the chat's independent Agent automatically. Repeating the same selection preserves identity. An already-bound chat cannot silently move to another project; start a new chat for a different project. The selected project uses the account-authorized runtime capabilities; private state stays bound to this Agent.","inputSchema":{"type":"object","properties":{"project":{"type":"string"}},"required":["project"],"additionalProperties":false}}),
+        json!({"name":"runtime_status","description":"Check the actual Runner, build and Job status together with this chat's Agent connection. Privacy is a three-folder soft convention, not an OS access guarantee. First use selects the sole enabled named project, or reports project_selection_required when a choice is needed. A canonical work_on_project call with an explicit authorized runtime project or client_id + path initializes a fresh chat directly; a separate identity/select call is optional. Never guess among projects.","inputSchema":{"type":"object","properties":{"client_id":{"type":"string"},"compact":{"type":"boolean"},"summary_only":{"type":"boolean"}},"additionalProperties":false}}),
+        json!({"name":"tool_manifest","description":"Read current Agent and shared-runtime tool contracts. Omit tool_name to discover this connection's tools, or supply one exact name. Discovery creates no Agent and grants no execution. work_on_project can initialize a fresh chat directly from an explicit authorized runtime project or client_id + path. agent_projects/agent_select_project remain optional explicit selection tools; agent_assignment shows authorized folders.","inputSchema":{"type":"object","properties":{"tool_name":{"type":"string"},"include_recommended_flows":{"type":"boolean"},"include_risk_summary":{"type":"boolean"}},"additionalProperties":false}}),
     ]);
     catalog
 }
@@ -39,7 +47,7 @@ pub(super) fn discover(catalog: &Value, arguments: &Value) -> Result<Value, &'st
         .ok_or("agent_contract_unavailable")?;
     if let Some(name) = name {
         let mut matches = specs.iter().filter(|spec| spec["name"] == name);
-        let spec = matches.next().ok_or("agent_tool_not_isolated")?;
+        let spec = matches.next().ok_or("unknown_tool")?;
         if matches.next().is_some() {
             return Err("agent_contract_unavailable");
         }
@@ -53,7 +61,7 @@ pub(super) fn discover(catalog: &Value, arguments: &Value) -> Result<Value, &'st
     Ok(
         json!({"schema_version":1,"count":contracts.len(),"returned_count":contracts.len(),
         "filtered_count":contracts.len(),"truncated":false,"contracts":contracts,
-        "next_action":"Call runtime_status, then agent_assignment, to start this chat's independent Agent.",
+        "next_action":"Call work_on_project with the user's explicit authorized project or client_id + path; it initializes this chat automatically. runtime_status, agent_projects and agent_select_project remain optional discovery/selection paths.",
         "execution_granted":false,"state_changed":false}),
     )
 }
@@ -82,6 +90,30 @@ fn project(spec: &Value) -> Result<Value, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_catalog_keeps_shared_gateways_and_unique_host_contracts() {
+        let catalog = native_catalog();
+        let specs = catalog["tools"].as_array().unwrap();
+        for name in [
+            "runtime_status",
+            "tool_manifest",
+            "run_shell",
+            "run_process",
+            "plugin_tool",
+            "mcp_tool",
+        ] {
+            assert_eq!(
+                specs.iter().filter(|spec| spec["name"] == name).count(),
+                1,
+                "{name}"
+            );
+            assert_eq!(
+                discover(&catalog, &json!({"tool_name":name})).unwrap()["contract"]["name"],
+                name
+            );
+        }
+    }
 
     fn catalog() -> Value {
         json!({"tools":[

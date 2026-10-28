@@ -89,6 +89,7 @@ async fn register_script_job_agent(
         structured_script_payload: true,
         structured_execution_jobs: true,
         agent_isolated_execution_v1: false,
+        agent_program_execution_v1: false,
         ..Default::default()
     };
     register_agent_with_projects(
@@ -222,7 +223,7 @@ async fn run_script_wire_is_typed_body_free_command_and_supports_more_than_32_ki
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.output["language"], "bash");
     assert_eq!(result.output["stdout_tail"], "done\n");
-    for omitted in [
+    for retained in [
         "execution_source",
         "script_summary",
         "execution_state",
@@ -236,11 +237,24 @@ async fn run_script_wire_is_typed_body_free_command_and_supports_more_than_32_ki
         "executor",
     ] {
         assert!(
-            result.output.get(omitted).is_none(),
-            "{omitted}: {}",
+            result.output.get(retained).is_some(),
+            "terminal execution field {retained} must remain available: {}",
             result.output
         );
     }
+    assert_eq!(result.output["execution_state"], "completed");
+    assert_eq!(result.output["command_started"], true);
+    assert_eq!(result.output["command_completed"], true);
+    assert_eq!(result.output["command_ok"], true);
+    assert_eq!(result.output["exit_code"], 0);
+    assert_eq!(result.output["duration_ms"], 9);
+    assert_eq!(result.output["purpose"], "operation");
+    assert_eq!(result.output["cwd"], ".");
+    assert_eq!(result.output["executor"], "agent");
+    assert_eq!(result.output["execution_source"], "run_script");
+    assert_eq!(result.output["stderr_tail"], "");
+    assert_eq!(result.output["stdout_truncated"], false);
+    assert_eq!(result.output["stderr_truncated"], false);
 }
 
 #[tokio::test]
@@ -298,7 +312,7 @@ async fn run_script_fast_success_projects_back_and_removes_the_hidden_job() {
     .await;
     let result = task.await.unwrap();
     assert!(result.success, "{:?}", result.error);
-    for omitted in [
+    for retained in [
         "execution_state",
         "command_started",
         "command_completed",
@@ -312,7 +326,6 @@ async fn run_script_fast_success_projects_back_and_removes_the_hidden_job() {
         "terminal",
         "job_id",
         "job_status",
-        "observation_token",
         "effective_timeout_secs",
         "sync_wait_secs",
         "async_handoff_available",
@@ -326,17 +339,28 @@ async fn run_script_fast_success_projects_back_and_removes_the_hidden_job() {
         "execution_source",
     ] {
         assert!(
-            result.output.get(omitted).is_none(),
-            "boring terminal success field {omitted} should be omitted: {}",
+            result.output.get(retained).is_some(),
+            "terminal execution field {retained} must remain available: {}",
             result.output
         );
     }
-    let sparse_bytes = serde_json::to_vec(&result.output).unwrap().len();
-    assert!(
-        sparse_bytes <= 460,
-        "boring run_script success regressed above the model-facing context budget: {sparse_bytes} bytes"
-    );
-    eprintln!("run_script_sparse_terminal_success_bytes={sparse_bytes}");
+    assert_eq!(result.output["execution_state"], "completed");
+    assert_eq!(result.output["command_started"], true);
+    assert_eq!(result.output["command_completed"], true);
+    assert_eq!(result.output["command_ok"], true);
+    assert_eq!(result.output["exit_code"], 0);
+    assert_eq!(result.output["stdout_tail"], "fast\n");
+    assert_eq!(result.output["stderr_tail"], "");
+    assert_eq!(result.output["stderr_lines"], 0);
+    assert_eq!(result.output["stdout_truncated"], false);
+    assert_eq!(result.output["stderr_truncated"], false);
+    assert_eq!(result.output["execution_source"], "run_script");
+    assert_eq!(result.output["cwd"], ".");
+    assert_eq!(result.output["executor"], "agent");
+    assert_eq!(result.output["promoted_to_job"], false);
+    assert_eq!(result.output["terminal"], true);
+    assert!(result.output["job_id"].is_null());
+    assert!(result.output["job_status"].is_null());
     let schema = crate::tool_runtime::registry::output_schema_for_tool("run_script");
     let instance = json!({
         "success": true,
@@ -345,7 +369,7 @@ async fn run_script_fast_success_projects_back_and_removes_the_hidden_job() {
     });
     crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&instance, &schema)
         .unwrap_or_else(|error| {
-            panic!("sparse terminal success must match run_script schema: {error}")
+            panic!("complete terminal success must match run_script schema: {error}")
         });
 
     assert!(runtime
@@ -416,10 +440,10 @@ async fn run_script_explicit_sync_wait_captures_terminal_after_old_ten_second_th
     .await;
     let result = task.await.unwrap();
     assert!(result.success, "{:?}", result.error);
-    assert!(result.output.get("execution_state").is_none());
-    assert!(result.output.get("command_completed").is_none());
-    assert!(result.output.get("job_id").is_none());
-    assert!(result.output.get("promoted_to_job").is_none());
+    assert_eq!(result.output["execution_state"], "completed");
+    assert_eq!(result.output["command_completed"], true);
+    assert!(result.output["job_id"].is_null());
+    assert_eq!(result.output["promoted_to_job"], false);
     assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
     assert!(
         probe_patch_agent_request(&runtime, "script-extended-sync-wait")
@@ -714,6 +738,14 @@ async fn run_script_nonzero_timeout_uncertainty_and_interpreter_absence_are_trut
     assert_eq!(nonzero.output["command_completed"], true);
     assert_eq!(nonzero.output["exit_code"], 19);
     assert_eq!(nonzero.output["failure_kind"], "command_exit_nonzero");
+    assert_eq!(nonzero.output["execution_source"], "run_script");
+    assert_eq!(nonzero.output["purpose"], "operation");
+    assert_eq!(nonzero.output["cwd"], ".");
+    assert_eq!(nonzero.output["executor"], "agent");
+    assert_eq!(nonzero.output["duration_ms"], 9);
+    assert!(nonzero.output["script_summary"].as_str().is_some());
+    assert_eq!(nonzero.output["stdout_tail"], "");
+    assert_eq!(nonzero.output["stderr_tail"], "");
 
     let timeout_task = tokio::spawn({
         let runtime = runtime.clone();
@@ -897,7 +929,7 @@ async fn run_script_session_defaults_and_evidence_are_body_and_stdin_free() {
     .await;
     let result = task.await.unwrap();
     assert!(result.success);
-    assert!(result.output.get("cwd").is_none());
+    assert_eq!(result.output["cwd"], "frontend");
 
     let summary = runtime
         .sessions

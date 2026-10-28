@@ -77,6 +77,13 @@ impl ToolRuntime {
                     .await
             }
 
+            ToolCall::ToolConnection {
+                client_id,
+                connection,
+            } => {
+                self.dispatch_tool_connection(&client_id, connection, auth)
+                    .await
+            }
             call @ (ToolCall::RunnerConfigCheck { .. } | ToolCall::RunnerConfigReload { .. }) => {
                 self.dispatch_runner_config_tool(call, auth).await
             }

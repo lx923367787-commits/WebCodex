@@ -1296,6 +1296,9 @@ fn stable_principal(auth: Option<&AuthContext>) -> Result<String, String> {
     let Some(auth) = auth else {
         return Ok("local-dev:local-dev".to_string());
     };
+    if let Some(binding) = auth.agent_run.as_ref() {
+        return Ok(format!("agent:{}", binding.agent_id()));
+    }
     if auth.kind == AuthKind::Bootstrap || auth.is_bootstrap {
         return Ok("bootstrap:server-bootstrap".to_string());
     }

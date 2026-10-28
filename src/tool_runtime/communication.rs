@@ -33,9 +33,19 @@ pub(super) fn communication_principal(
             })?,
         ),
         Some(auth) => match auth.kind {
-            AuthKind::ModelAgent | AuthKind::NativeHost => {
+            AuthKind::ModelAgent => (
+                "logical-agent",
+                auth.agent_run
+                    .as_ref()
+                    .ok_or_else(|| {
+                        communication_principal_unavailable("Agent identity is missing")
+                    })?
+                    .agent_id()
+                    .to_owned(),
+            ),
+            AuthKind::NativeHost => {
                 return Err(communication_principal_unavailable(
-                    "Agent collaboration requires its authorized meeting room",
+                    "Native relay is not a communication principal",
                 ))
             }
             AuthKind::Bootstrap => (

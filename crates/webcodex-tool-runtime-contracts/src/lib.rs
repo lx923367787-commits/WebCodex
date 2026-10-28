@@ -19,3 +19,5 @@ mod goal_contract_tests;
 mod tool_call_test_support;
 #[cfg(test)]
 mod tool_call_tests;
+#[cfg(test)]
+mod tool_connection_tests;

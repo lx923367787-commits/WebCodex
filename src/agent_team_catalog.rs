@@ -217,6 +217,7 @@ impl RunnerAgentTeamAssets {
         caller: &VerifiedAgentRun,
         scope: &CatalogScope,
         selected: Option<AgentCliProvider>,
+        configured_default: bool,
     ) -> Result<(Vec<ReadyCliCatalog>, Vec<UnavailableCliProvider>), String> {
         let started = Instant::now();
         let deadline = started
@@ -240,6 +241,38 @@ impl RunnerAgentTeamAssets {
         )
         .await
         .map_err(|_| "agent_team_catalog_timeout")??;
+        if configured_default {
+            let selected = selected.ok_or("agent_cli_default_provider_required")?;
+            let matching = resources
+                .iter()
+                .filter(|r| r.provider == Some(selected))
+                .collect::<Vec<_>>();
+            timeout_at(deadline, self.validate_scope(caller, scope))
+                .await
+                .map_err(|_| "agent_team_catalog_timeout")??;
+            if matching.len() != 1 {
+                return Ok((
+                    vec![],
+                    vec![cli_unavailable(
+                        selected,
+                        "agent_cli_provider_resource_unavailable",
+                    )],
+                ));
+            }
+            return match configured_default_resource(
+                matching[0],
+                chrono::Utc::now().timestamp_millis(),
+            )? {
+                Some(provider) => Ok((vec![provider], vec![])),
+                None => Ok((
+                    vec![],
+                    vec![cli_unavailable(
+                        selected,
+                        "agent_cli_default_model_unavailable",
+                    )],
+                )),
+            };
+        }
         let providers: BTreeSet<_> = resources
             .iter()
             .filter_map(|resource| resource.provider)
@@ -297,6 +330,34 @@ impl RunnerAgentTeamAssets {
             let catalog = match result {
                 Ok(catalog) => catalog,
                 Err(reason) => {
+                    let matching = resources
+                        .iter()
+                        .filter(|r| r.provider == Some(expected_provider))
+                        .collect::<Vec<_>>();
+                    if matching.len() == 1 {
+                        let fresh = timeout_at(
+                            deadline,
+                            self.registry.read_agent_execution_resource(
+                                &scope.access,
+                                &scope.target,
+                                &matching[0].resource_set_id,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| "agent_team_catalog_timeout")?;
+                        timeout_at(deadline, self.validate_scope(caller, scope))
+                            .await
+                            .map_err(|_| "agent_team_catalog_timeout")??;
+                        if let Ok(fresh) = fresh {
+                            if let Some(default) = configured_default_resource(
+                                &fresh,
+                                chrono::Utc::now().timestamp_millis(),
+                            )? {
+                                catalogs.push(default);
+                                continue;
+                            }
+                        }
+                    }
                     unavailable.push(cli_unavailable(expected_provider, &reason));
                     continue;
                 }
@@ -306,38 +367,39 @@ impl RunnerAgentTeamAssets {
             } else {
                 "agent_cli_metadata_probe_failed"
             };
-            if let Some(mut ready) = map_cli_catalog(
-                catalog,
+            let mapped = map_cli_catalog(
+                catalog.clone(),
                 &scope.target,
                 expected_provider,
                 chrono::Utc::now().timestamp_millis(),
-            )? {
-                timeout_at(deadline, self.validate_scope(caller, scope))
-                    .await
-                    .map_err(|_| "agent_team_catalog_timeout")??;
-                let resource = timeout_at(
-                    deadline,
-                    self.registry.read_agent_execution_resource(
-                        &scope.access,
-                        &scope.target,
-                        &ready.provider.resource_set_id,
-                    ),
-                )
-                .await;
-                // Consume neither a resource nor its error after a run, owner
-                // or exact Runner change. The original deadline is unchanged.
-                timeout_at(deadline, self.validate_scope(caller, scope))
-                    .await
-                    .map_err(|_| "agent_team_catalog_timeout")??;
-                let Ok(resource) = resource.map_err(|_| "agent_team_catalog_timeout")? else {
-                    // This provider may have been withdrawn. A current scope
-                    // does not make that absence invalidate another provider.
-                    unavailable.push(cli_unavailable(
-                        expected_provider,
-                        "agent_execution_resource_unavailable",
-                    ));
-                    continue;
-                };
+            )?;
+            timeout_at(deadline, self.validate_scope(caller, scope))
+                .await
+                .map_err(|_| "agent_team_catalog_timeout")??;
+            let resource = timeout_at(
+                deadline,
+                self.registry.read_agent_execution_resource(
+                    &scope.access,
+                    &scope.target,
+                    &catalog.resource_set_id,
+                ),
+            )
+            .await;
+            timeout_at(deadline, self.validate_scope(caller, scope))
+                .await
+                .map_err(|_| "agent_team_catalog_timeout")??;
+            let Ok(resource) = resource.map_err(|_| "agent_team_catalog_timeout")? else {
+                unavailable.push(cli_unavailable(
+                    expected_provider,
+                    "agent_execution_resource_unavailable",
+                ));
+                continue;
+            };
+            let ready = match mapped {
+                Some(ready) => Some(ready),
+                None => map_configured_default(&catalog, &resource)?,
+            };
+            if let Some(mut ready) = ready {
                 bind_reviewed_controls(&mut ready.provider, resource)?;
                 catalogs.push(ready);
             } else {
@@ -352,6 +414,8 @@ impl RunnerAgentTeamAssets {
         caller: &VerifiedAgentRun,
         include_cli: bool,
         selected: Option<AgentCliProvider>,
+        include_host: bool,
+        configured_default: bool,
     ) -> Result<AgentTeamCatalog, String> {
         // One deadline covers all three fixed reads; progress cannot extend it.
         let deadline = Instant::now() + CATALOG_DEADLINE;
@@ -360,6 +424,68 @@ impl RunnerAgentTeamAssets {
             .await
             .map_err(|_| "agent_team_catalog_timeout")??;
         let scope = CatalogScope { access, target };
+        let host = if include_host {
+            self.read_host_profiles(caller, &scope, deadline).await
+        } else {
+            Err("agent_team_host_profiles_not_queried".into())
+        };
+        // Host observations and CLI capabilities have independent leases. A
+        // stale/missing Host must not suppress an otherwise usable CLI catalog.
+        // Scope/identity failures still abort the entire read.
+        let (profiles, host_catalog_ref, host_default_supported, host_profiles_error) = match host {
+            Ok((value, reference)) => {
+                let default_supported =
+                    value.get("default_supported").and_then(Value::as_bool) == Some(true);
+                match parse_host_profiles(&value, chrono::Utc::now().timestamp_millis()) {
+                    Ok(profiles) => (Some(profiles), reference, default_supported, None),
+                    Err(reason) => (None, reference, default_supported, Some(reason)),
+                }
+            }
+            Err(reason) if reason.starts_with("agent_team_host_") => {
+                (None, String::new(), false, Some(reason))
+            }
+            Err(reason) => return Err(reason),
+        };
+        timeout_at(deadline, self.validate_scope(caller, &scope))
+            .await
+            .map_err(|_| "agent_team_catalog_timeout")??;
+        let (cli_catalogs, unavailable_providers) = if include_cli {
+            self.read_cli_catalogs(caller, &scope, selected, configured_default)
+                .await?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let observed_at_ms = chrono::Utc::now().timestamp_millis();
+        let mut expires_at_ms = observed_at_ms + HOST_PROFILE_MAX_AGE_MS;
+        let mut providers = Vec::with_capacity(cli_catalogs.len());
+        for cli in cli_catalogs {
+            expires_at_ms = expires_at_ms.min(cli.expires_at_ms);
+            providers.push(cli.provider);
+        }
+        if expires_at_ms <= chrono::Utc::now().timestamp_millis() {
+            return Err("agent_team_catalog_expired".into());
+        }
+        Ok(AgentTeamCatalog {
+            project: caller.project().into(),
+            target: scope.target,
+            observed_at_ms,
+            expires_at_ms,
+            providers,
+            unavailable_providers,
+            host_profiles_expires_at_ms: profiles.as_ref().map_or(0, |p| p.expires_at_ms),
+            host_profile_ids: profiles.map_or_else(Vec::new, |p| p.ids),
+            host_catalog_ref,
+            host_default_supported,
+            host_profiles_error,
+        })
+    }
+
+    async fn read_host_profiles(
+        &self,
+        caller: &VerifiedAgentRun,
+        scope: &CatalogScope,
+        deadline: Instant,
+    ) -> Result<(Value, String), String> {
         let PluginGatewayResponsePayload::Providers { providers } = self
             .read_plugin(
                 caller,
@@ -435,7 +561,6 @@ impl RunnerAgentTeamAssets {
             validate_plugin_structured_output(schema, &value)
                 .map_err(|_| "agent_team_host_catalog_invalid")?;
         }
-        let profiles = parse_host_profiles(&value, chrono::Utc::now().timestamp_millis())?;
         let identity = serde_json::to_vec(&json!({
             "kind": "webcodex_agent_host_profiles_v1",
             "project": caller.project(),
@@ -446,37 +571,7 @@ impl RunnerAgentTeamAssets {
         }))
         .map_err(|_| "agent_team_host_catalog_invalid")?;
         let host_catalog_ref = format!("sha256:{:x}", Sha256::digest(identity));
-        // Ordinary GPT starts need only the Host's cached profile directory.
-        // Do not construct or dispatch a CLI metadata query on that path.
-        let (cli_catalogs, unavailable_providers) = if include_cli {
-            self.read_cli_catalogs(caller, &scope, selected).await?
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        let mut observed_at_ms = profiles.observed_at_ms;
-        let mut expires_at_ms = profiles.expires_at_ms;
-        let mut providers = Vec::with_capacity(cli_catalogs.len());
-        for cli in cli_catalogs {
-            observed_at_ms = observed_at_ms.max(cli.observed_at_ms);
-            expires_at_ms = expires_at_ms.min(cli.expires_at_ms);
-            providers.push(cli.provider);
-        }
-        if expires_at_ms <= chrono::Utc::now().timestamp_millis() {
-            return Err("agent_team_catalog_expired".into());
-        }
-        // Project only IDs and a digest. Raw Host labels, reasons, descriptions,
-        // response text, and arbitrary metadata never cross the model surface.
-        Ok(AgentTeamCatalog {
-            project: caller.project().into(),
-            target: scope.target,
-            observed_at_ms,
-            expires_at_ms,
-            providers,
-            unavailable_providers,
-            host_profile_ids: profiles.ids,
-            host_catalog_ref,
-            host_profiles_expires_at_ms: profiles.expires_at_ms,
-        })
+        Ok((value, host_catalog_ref))
     }
 }
 
@@ -526,8 +621,16 @@ impl AgentTeamAssets for RunnerAgentTeamAssets {
         &'a self,
         caller: &'a VerifiedAgentRun,
         provider: AgentCliProvider,
+        require_host: bool,
+        configured_default: bool,
     ) -> AssetFuture<'a, AgentTeamCatalog> {
-        Box::pin(self.read_catalog(caller, true, Some(provider)))
+        Box::pin(self.read_catalog(
+            caller,
+            true,
+            Some(provider),
+            require_host,
+            configured_default,
+        ))
     }
 
     fn inventory<'a>(
@@ -557,14 +660,14 @@ impl AgentTeamAssets for RunnerAgentTeamAssets {
         &'a self,
         caller: &'a VerifiedAgentRun,
     ) -> Pin<Box<dyn Future<Output = Result<AgentTeamCatalog, String>> + Send + 'a>> {
-        Box::pin(self.read_catalog(caller, true, None))
+        Box::pin(self.read_catalog(caller, true, None, true, false))
     }
 
     fn host_catalog<'a>(
         &'a self,
         caller: &'a VerifiedAgentRun,
     ) -> Pin<Box<dyn Future<Output = Result<AgentTeamCatalog, String>> + Send + 'a>> {
-        Box::pin(self.read_catalog(caller, false, None))
+        Box::pin(self.read_catalog(caller, false, None, true, false))
     }
 }
 
@@ -635,6 +738,7 @@ fn map_cli_catalog(
         observed_at_ms: catalog.observed_at_ms,
         expires_at_ms: catalog.expires_at_ms,
         provider: ObservedCliProvider {
+            host_cli: None,
             provider_id: provider.id().into(),
             version: catalog.cli_version,
             executable_sha256: executable_sha256.into(),
@@ -649,6 +753,92 @@ fn map_cli_catalog(
             controls: None,
         },
     }))
+}
+
+/// A failed optional model list does not erase a separately pinned, reviewed
+/// executable. This projection has no model names and cannot satisfy an explicit
+/// model selection. Store/Runner admission and supported-loading checks remain.
+fn configured_default_resource(
+    resource: &AgentExecutionResourceDescriptor,
+    observed_at_ms: i64,
+) -> Result<Option<ReadyCliCatalog>, String> {
+    resource
+        .validate()
+        .map_err(|_| "agent_team_cli_resource_binding_mismatch")?;
+    if let Some(host) = &resource.host_cli {
+        if !host
+            .adapter
+            .invocation
+            .as_ref()
+            .is_some_and(|i| i.supports_configured_default)
+        {
+            return Ok(None);
+        }
+        return Ok(Some(ReadyCliCatalog {
+            observed_at_ms,
+            expires_at_ms: observed_at_ms + AGENT_CLI_CATALOG_TTL_MS,
+            provider: ObservedCliProvider {
+                host_cli: Some(host.clone()),
+                provider_id: host.adapter.id.clone(),
+                version: "configured_default".into(),
+                executable_sha256: host.executable_sha256.clone(),
+                models: vec![],
+                efforts: vec![],
+                model_efforts: Default::default(),
+                source: "configured_default".into(),
+                resource_set_id: resource.resource_set_id.clone(),
+                resource_manifest_hash: resource.manifest_hash.clone(),
+                controls: None,
+            },
+        }));
+    }
+    let Some(control) = resource.reviewed_controls.as_ref() else {
+        return Ok(None);
+    };
+    let provider = ObservedCliProvider {
+        host_cli: None,
+        provider_id: control.provider.id().into(),
+        version: control.cli_version.clone(),
+        executable_sha256: control.executable_sha256.clone(),
+        models: vec![],
+        efforts: vec![],
+        model_efforts: Default::default(),
+        source: "configured_default".into(),
+        resource_set_id: resource.resource_set_id.clone(),
+        resource_manifest_hash: resource.manifest_hash.clone(),
+        controls: Some(control.clone()),
+    };
+    if !crate::agent_team_execution::provider_supports_cli_default(&provider) {
+        return Ok(None);
+    }
+    Ok(Some(ReadyCliCatalog {
+        observed_at_ms,
+        expires_at_ms: observed_at_ms + AGENT_CLI_CATALOG_TTL_MS,
+        provider,
+    }))
+}
+fn map_configured_default(
+    catalog: &AgentCliCatalog,
+    resource: &AgentExecutionResourceDescriptor,
+) -> Result<Option<ReadyCliCatalog>, String> {
+    if !matches!(catalog.status.as_str(), "error" | "unavailable") {
+        return Ok(None);
+    }
+    let Some(mut ready) = configured_default_resource(resource, catalog.observed_at_ms)? else {
+        return Ok(None);
+    };
+    if catalog.executable_identity != resource.executable_identity
+        || catalog.resource_set_id != resource.resource_set_id
+        || catalog.resource_manifest_hash != resource.manifest_hash
+        || Some(catalog.provider) != resource.provider
+        || (resource.host_cli.is_none()
+            && !catalog.cli_version.is_empty()
+            && catalog.cli_version != ready.provider.version)
+    {
+        return Err("agent_team_cli_resource_binding_mismatch".into());
+    }
+    bind_reviewed_controls(&mut ready.provider, resource.clone())?;
+    Ok(Some(ready))
 }
 
 fn bind_reviewed_controls(
@@ -672,6 +862,7 @@ fn bind_reviewed_controls(
     // association. Trusted provenance is the existing Runner resource read,
     // not a model field or a new issuer. Valid facts remain readable even when
     // require_supported_loading would reject execution, as it currently does.
+    provider.host_cli = resource.host_cli;
     provider.controls = resource.reviewed_controls;
     Ok(())
 }
@@ -737,6 +928,7 @@ fn parse_host_profiles(value: &Value, now_ms: i64) -> Result<HostProfiles, Strin
             .and_then(Value::as_str)
             .ok_or(invalid)?;
         if id.is_empty()
+            || id == "default"
             || id.len() > 128
             || !id
                 .bytes()
@@ -807,6 +999,7 @@ mod tests {
 
     fn resource_for(catalog: &AgentCliCatalog) -> AgentExecutionResourceDescriptor {
         AgentExecutionResourceDescriptor {
+            host_cli: None,
             project_workspace_copy: false,
             resource_set_id: catalog.resource_set_id.clone(),
             manifest_hash: catalog.resource_manifest_hash.clone(),
@@ -1019,5 +1212,35 @@ mod tests {
         assert!(parse_host_profiles(&value, 1_001_000).is_err());
         value["profiles"] = json!([{"profile_id": "untrusted\ntext"}]);
         assert!(parse_host_profiles(&value, 1_001_000).is_err());
+    }
+    #[test]
+    fn optional_catalog_failure_retains_only_reviewed_default_selection() {
+        let (mut catalog, resource) = synthetic_record_fixture();
+        catalog.status = "error".into();
+        catalog.models.clear();
+        assert!(map_cli_catalog(
+            catalog.clone(),
+            &catalog.target,
+            catalog.provider,
+            1_001_000
+        )
+        .unwrap()
+        .is_none());
+        let default = map_configured_default(&catalog, &resource)
+            .unwrap()
+            .unwrap();
+        assert_eq!(default.provider.source, "configured_default");
+        assert!(default.provider.models.is_empty());
+        assert_eq!(default.provider.controls, resource.reviewed_controls);
+        assert!(crate::agent_team_execution::provider_supports_cli_default(
+            &default.provider
+        ));
+        let mut missing = resource.clone();
+        missing.reviewed_controls = None;
+        assert!(map_configured_default(&catalog, &missing)
+            .unwrap()
+            .is_none());
+        catalog.executable_identity = format!("sha256:{}", "9".repeat(64));
+        assert!(map_configured_default(&catalog, &resource).is_err());
     }
 }

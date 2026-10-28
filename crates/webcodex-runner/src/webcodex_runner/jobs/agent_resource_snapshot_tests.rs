@@ -332,6 +332,8 @@ fn catalog_pins_only_the_mapped_verified_executable() {
     let executable = fixture.temporary.path().join("catalog-fixture.exe");
     fs::write(&executable, b"synthetic executable never launched").unwrap();
     let p = AgentExecutionResourceProfile {
+        host_cli: None,
+        native_worker: None,
         id: "catalog-fixture".into(),
         provider: Some(AgentCliProvider::WorkBuddy),
         reviewed_controls: None,
@@ -516,6 +518,8 @@ fn reviewed_catalog_rechecks_and_pins_the_entire_readonly_payload() {
     fs::write(&control, b"synthetic readonly policy").unwrap();
     fs::write(&dependency, b"synthetic dependency").unwrap();
     let mut p = AgentExecutionResourceProfile {
+        host_cli: None,
+        native_worker: None,
         id: "reviewed-fixture".into(),
         provider: Some(AgentCliProvider::WorkBuddy),
         reviewed_controls: None,

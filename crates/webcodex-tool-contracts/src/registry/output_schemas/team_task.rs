@@ -37,9 +37,9 @@ fn summary() -> Value {
 fn attempt() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "attempt_id":{"type":"string"},"project_id":{"type":"string"},"root_task_id":{"type":"string"},
-        "source_task_id":{"type":"string"},"call_index":{"type":"integer","minimum":0,"maximum":31},
-        "provider_id":{"type":"string"},"model":{"type":"string"},"effort":nullable("string"),
-        "instruction":schema_type("string","Frozen explicit team-plan CLI subtask instruction, or the AgentTask instruction inherited by its sole call; this text grants no execution authority."),
+        "source_task_id":{"type":"string"},"call_index":{"type":"integer","minimum":0},
+        "provider_id":{"type":"string"},"model":nullable("string"),"effort":nullable("string"),
+        "instruction":schema_type("string","Frozen independent CLI task instruction; the parent Agent goal is never inherited and this text grants no execution authority."),
         "fallback_thinking_profile_id":{"type":"string"},"timeout_secs":nullable("integer"),
         "dispatch_state":{"enum":["reserved","dispatching","bound","terminal","unknown"]},
         "job_id":nullable("string"),"execution_state":{"enum":[null,"not_started","completed","timed_out","outcome_unknown"]},
@@ -120,7 +120,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
             ("completion", completion()),
             ("attempts", page("attempts", attempt())),
             ("agents", json!({"type":"array","maxItems":32,"items":agent_attempt()})),
-            ("task_summaries", json!({"type":"array","maxItems":33,"items":{"type":"object","additionalProperties":false,"properties":{"task_id":{"type":"string"},"title":{"type":"string","maxLength":200},"state":{"enum":["ready","active","succeeded","failed"]}},"required":["task_id","title","state"]}})),
+            ("task_summaries", json!({"type":"array","maxItems":33,"items":{"type":"object","additionalProperties":false,"properties":{"task_id":{"type":"string"},"title":{"type":"string","maxLength":200},"state":{"enum":["ready","active","succeeded","failed"]},"activity":nullable("object")},"required":["task_id","title","state"]}})),
             ("fallbacks", json!({"type":"array","maxItems":100,"items":fallback()})),
             ("fallbacks_may_be_truncated", json!({"type":"boolean"})),
             ("enforcement", json!({"const":"managed_tasks"})),

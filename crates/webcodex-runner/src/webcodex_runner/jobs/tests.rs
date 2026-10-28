@@ -369,6 +369,7 @@ fn detached_job_request(
         client_id: "detached-agent".to_string(),
         runner_instance_id: "old-runner-instance".to_string(),
         context: ShellJobContext {
+            agent_program: None,
             agent_execution: None,
             document: None,
             runtime_project_id: Some("agent:detached-agent:project".to_string()),

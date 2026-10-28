@@ -1,3 +1,4 @@
+import { servicesReady } from "../../models/topology";
 import { useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { desktopApi, type QuickShareProvider } from "../../lib/desktop-api";
@@ -49,7 +50,7 @@ export function FirstRun({ state, onState, chooseModeFirst = false, onComplete }
   const canReuseRemoteEnrollment = Boolean(
     mode === "remote" &&
       !remoteEnrollmentNeedsRefresh &&
-      state.project?.runtime_project_id &&
+      state.topology &&
       state.topology?.experience === "full" &&
       state.topology.server.kind === "remote" &&
       sameServerOrigin(serverUrl, state.topology.server.url),
@@ -71,26 +72,25 @@ export function FirstRun({ state, onState, chooseModeFirst = false, onComplete }
   };
 
   const run = async () => {
-    if (!mode || !project || mutationBusy) return;
+    if (!mode || (mode === "share" && !project) || mutationBusy) return;
     setBusy(true);
     setError(null);
     try {
       if (mode === "local") {
-        let next = await desktopApi.configureLocal(project.path);
+        let next = await desktopApi.configureLocal();
         onState(next);
-        if (connectAfterSetup && next.openai_tunnel_configured && next.readiness.runtime_ready && !next.regular_tunnel) {
+        if (connectAfterSetup && next.openai_tunnel_configured && servicesReady(next.readiness) && !next.regular_tunnel) {
           next = await desktopApi.startRegularTunnel();
           onState(next);
         }
         onComplete?.();
       } else if (mode === "remote") {
-        if (!project) return;
         const oneTimeCode = pairingCode;
         setPairingCode("");
         const next = await desktopApi.configureRemote(
           serverUrl,
           oneTimeCode,
-          project.path,
+          "",
         );
         setRemoteEnrollmentNeedsRefresh(false);
         onState(next);
@@ -166,13 +166,10 @@ export function FirstRun({ state, onState, chooseModeFirst = false, onComplete }
       <div className="eyebrow">{modeLabel(mode, t)}</div>
       <h1 id="setup-title">{setupTitle(mode, t)}</h1>
       <p className="lede">{setupDescription(mode, t)}</p>
-      <div className="project-picker-card">
+      {mode === "share" && <div className="project-picker-card">
         <div>
           <span className="section-kicker">{t("setup.project")}</span>
           <strong>{project ? project.path : t("setup.chooseProject")}</strong>
-          {mode === "local" && !project && (
-            <span className="project-meta">{t("setup.projectRequired")}</span>
-          )}
           {project && (
             <span className="project-meta">
               {t("setup.allowedRoot", {
@@ -185,7 +182,8 @@ export function FirstRun({ state, onState, chooseModeFirst = false, onComplete }
         <button type="button" className="secondary-button" onClick={chooseProject} disabled={mutationBusy} data-webcodex-action="choose-project">
           {project ? t("setup.changeFolder") : t("setup.chooseFolder")}
         </button>
-      </div>
+      </div>}
+      {mode !== "share" && <p className="inline-note">{t("setup.projectsLater")}</p>}
 
       <PowerShellInstallGuidance state={state} onState={onState} />
 
@@ -324,7 +322,7 @@ export function FirstRun({ state, onState, chooseModeFirst = false, onComplete }
           className="primary-button"
           disabled={
             mutationBusy ||
-            !project ||
+            (mode === "share" && !project) ||
             (mode === "remote" &&
               (!serverUrl.trim() || (!canReuseRemoteEnrollment && !pairingCode.trim())))
           }

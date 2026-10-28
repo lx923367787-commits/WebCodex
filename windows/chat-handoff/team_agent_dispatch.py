@@ -66,8 +66,10 @@ class TeamAgentControlApi(Api):
 
 
 def _launch_arguments(envelope, *, require_fence=True):
-    for key in ("team_agent_attempt_id", "root_task_id", "source_task_id", "thinking_profile_id"):
+    for key in ("team_agent_attempt_id", "root_task_id", "source_task_id"):
         _identifier(envelope.get(key))
+    if envelope.get("thinking_profile_id") != "":
+        _identifier(envelope.get("thinking_profile_id"))
     if require_fence:
         _request_id(envelope.get("dispatch_attempt_id"))
     if envelope["root_task_id"] == envelope["source_task_id"]:

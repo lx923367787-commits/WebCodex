@@ -226,6 +226,23 @@ def discover_profiles(browser, request, keys=None):
 
 
 def select_profile(browser, request, keys, selection=None):
+    if isinstance(selection, dict) and selection.get("mode") == "default":
+        if selection.get("profile_id") != "default" or set(selection) - {"profile_id", "mode", "observed_profile"}:
+            raise ThinkingProfileError("thinking_profile_snapshot_invalid")
+        if "observed_profile" in selection:
+            # A successor inherits the original actual setting, not a new default.
+            observed = selection["observed_profile"]
+            if not isinstance(observed, dict) or observed.get("mode") == "default" or observed.get("profile_id") == "default":
+                raise ThinkingProfileError("thinking_profile_snapshot_invalid")
+            result = select_profile(browser, request, keys, observed)
+            chosen = result["thinking_profile"]
+        else:
+            deadline = time.monotonic() + 60
+            chosen = _profile(_open(browser, request, deadline))
+            _close(browser, request, chosen, deadline)
+            result = {"intelligence": chosen["label"], "reasoning_effort": chosen["reasoning_effort"]}
+        result["thinking_profile"] = {"profile_id": "default", "mode": "default", "observed_profile": chosen}
+        return result
     deadline = time.monotonic() + 60
     initial = _profile(_open(browser, request, deadline))
     context = _context(initial)

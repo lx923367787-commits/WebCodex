@@ -62,6 +62,29 @@ fn validate_context(
     snapshot: &ShellJobSnapshot,
 ) -> Result<(), String> {
     let context = &snapshot.context;
+    if let Some(binding) = context.agent_program.as_ref() {
+        binding.validate()?;
+        if context.agent_execution.is_some()
+            || binding.target.client_id != client_id
+            || binding.job_id != snapshot.job_id
+            || binding.start_request_id != snapshot.request_id
+            || context.runtime_project_id.is_some()
+            || context.workflow_session_id.is_some()
+            || context.document.is_some()
+            || context.ssh_resource.is_some()
+            || context.cwd.is_some()
+            || context.project_cwd.is_some()
+            || context.structured_execution.as_ref().is_none_or(|m| {
+                m.execution_source != webcodex_core::agent_program::AGENT_PROGRAM_START_KIND
+            })
+        {
+            return Err("agent_program_inventory_binding_mismatch".into());
+        }
+    } else if context.structured_execution.as_ref().is_some_and(|m| {
+        m.execution_source == webcodex_core::agent_program::AGENT_PROGRAM_START_KIND
+    }) {
+        return Err("agent_program_inventory_binding_required".into());
+    }
     if let Some(binding) = context.agent_execution.as_ref() {
         binding.validate()?;
         if binding.target.client_id != client_id
@@ -541,6 +564,7 @@ pub(super) fn validate_job_inventory_without_project_membership(
 fn same_context(job: &ShellJobRecord, snapshot: &ShellJobSnapshot) -> bool {
     let context = &snapshot.context;
     job.request_id.as_deref() == Some(snapshot.request_id.as_str())
+        && job.agent_program.as_ref() == context.agent_program.as_ref()
         && job.agent_execution.as_ref().map(|state| &state.binding)
             == context.agent_execution.as_ref()
         && job.project_id == context.runtime_project_id
@@ -714,6 +738,7 @@ fn record_from_snapshot(
 ) -> ShellJobRecord {
     let context = &snapshot.context;
     let mut record = ShellJobRecord {
+        agent_program: context.agent_program.clone(),
         agent_execution: None,
         document: context.document.clone(),
         job_id: snapshot.job_id.clone(),
@@ -755,7 +780,11 @@ fn record_from_snapshot(
         validation: context.validation.clone(),
         validation_progress: snapshot.validation_progress.clone(),
         activity: snapshot.activity,
-        visibility: super::state::ShellJobVisibility::Public,
+        visibility: if context.agent_program.is_some() {
+            super::state::ShellJobVisibility::HiddenUntilHandoff
+        } else {
+            super::state::ShellJobVisibility::Public
+        },
         last_update_seq: snapshot.update_seq,
         recovery: JobRecoveryState {
             phase: Some(JobRecoveryPhase::Reconciled),

@@ -159,7 +159,7 @@ fn ordinary_team_control_requires_explicit_bootstrap_not_a_model_token() {
 }
 
 #[test]
-fn ordinary_team_start_rejects_prompt_override_and_missing_manager_profile() {
+fn ordinary_team_start_rejects_prompt_override_and_accepts_missing_profile() {
     let good = json!({"project":"agent:runner:repo","root_task_id":"root","source_task_id":"child","idempotency_key":"key","thinking_profile_id":"profile-explicit"});
     assert!(serde_json::from_value::<Start>(good.clone()).is_ok());
     let mut supplied = good.clone();
@@ -170,7 +170,12 @@ fn ordinary_team_start_rejects_prompt_override_and_missing_manager_profile() {
         .as_object_mut()
         .unwrap()
         .remove("thinking_profile_id");
-    assert!(serde_json::from_value::<Start>(missing).is_err());
+    assert_eq!(
+        serde_json::from_value::<Start>(missing)
+            .unwrap()
+            .thinking_profile_id,
+        ""
+    );
     assert!(serde_json::from_value::<ControlRequest>(json!({"action":"team_agent_acquire","owner_user":"owner","project":"agent:runner:repo","team_agent_attempt_id":"id","dispatch_permitted":true})).is_err());
 }
 

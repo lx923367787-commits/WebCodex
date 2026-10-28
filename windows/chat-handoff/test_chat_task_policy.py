@@ -40,6 +40,34 @@ class ChatTaskPolicyTests(unittest.TestCase):
         return policy.register_goal_binding(request_id or self.request_id, self.project,
                                             goal or self.goal, runtime=self.root)
 
+    def test_no_profile_or_failed_adjustment_can_bind_without_readback(self):
+        for status in ("not_requested", "not_adjusted"):
+            with self.subTest(status=status):
+                self.prepare(self.request_id)
+                browser = policy.read_json(self.browser_path())
+                browser.pop("thinking_profile")
+                browser["thinking_adjustment"] = {"status": status}
+                policy.write_json(self.browser_path(), browser)
+                if status == "not_requested":
+                    path = self.root / "tasks" / self.request_id / "request.json"
+                    request = policy.read_json(path)
+                    request["config"].pop("thinking_profile")
+                    policy.write_json(path, request)
+                self.register(goal=status)
+                self.assertIsNone(self.resolve(goal=status)["thinking_profile"])
+
+    def test_default_goal_binding_requires_actual_readback_and_freezes_it(self):
+        self.prepare(self.request_id, {"profile_id":"default", "mode":"default"})
+        with self.assertRaisesRegex(policy.PolicyError, "chat_task_profile_not_confirmed"):
+            self.register()
+        browser = policy.read_json(self.browser_path())
+        actual = {"profile_id":"default", "mode":"default", "observed_profile":self.profile}
+        browser["thinking_profile"] = actual
+        policy.write_json(self.browser_path(), browser)
+        self.register()
+        binding = policy.read_json(self.binding_path())
+        self.assertEqual(actual, binding["thinking_profile"])
+
     def resolve(self, goal=None):
         return policy.resolve_goal_profile(self.project, goal or self.goal, runtime=self.root)
 

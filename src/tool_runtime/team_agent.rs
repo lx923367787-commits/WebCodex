@@ -12,6 +12,7 @@ struct Start {
     root_task_id: String,
     source_task_id: String,
     idempotency_key: String,
+    #[serde(default)]
     thinking_profile_id: String,
 }
 #[derive(Deserialize)]
@@ -93,16 +94,7 @@ impl ToolRuntime {
                     Ok(None) => {}
                     Err(value) => return store_error(value),
                 }
-                if let Err(value) = self
-                    .validate_team_fallback_profile(
-                        auth,
-                        &request.project,
-                        &request.thinking_profile_id,
-                    )
-                    .await
-                {
-                    return value;
-                }
+                // Optional page settings are not dispatch admission evidence.
                 match db.reserve_team_agent_attempt(
                     &principal,
                     &request.project,

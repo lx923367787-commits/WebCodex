@@ -94,6 +94,53 @@ fn saved_policy_effort_resolves_null_and_replays_original_revision() {
     );
 }
 
+#[test]
+fn omitted_effort_uses_cli_default_even_with_saved_custom_preference() {
+    let (_dir, db) = database();
+    let owner = principal('a');
+    let root = task(&db, &owner, PROJECT, "default-root");
+    let child = task(&db, &owner, PROJECT, "default-child");
+    let mut settings = TeamPolicyInput::default();
+    settings.mode = TeamPolicyMode::Custom;
+    settings.providers = vec![TeamProviderPreference {
+        provider_id: "workbuddy".into(),
+        enabled: true,
+        model: Some("discovered-model".into()),
+        effort: Some("high".into()),
+    }];
+    db.save_team_policy(&owner, PROJECT, 0, settings).unwrap();
+    let mut value = serde_json::to_value(plan(&root, &child)).unwrap();
+    for member in ["manager", "subagents"] {
+        let members = if member == "manager" {
+            vec![value.get_mut(member).unwrap()]
+        } else {
+            value[member].as_array_mut().unwrap().iter_mut().collect()
+        };
+        for member in members {
+            for call in member["cli_calls"].as_array_mut().unwrap() {
+                call.as_object_mut().unwrap().remove("effort");
+            }
+        }
+    }
+    let input: TeamPlanInput = serde_json::from_value(value).unwrap();
+    let saved = db
+        .register_team_plan(&owner, PROJECT, &root, 1, input.clone(), "default-plan")
+        .unwrap();
+    assert!(saved
+        .plan
+        .plan
+        .manager
+        .cli_calls
+        .iter()
+        .all(|call| call.effort.is_none()));
+    let replay = db
+        .register_team_plan(&owner, PROJECT, &root, 1, input, "default-plan")
+        .unwrap();
+    assert!(replay.replayed);
+    let receipt = reserve(&db, &owner, &root, &root, 0, "default-call");
+    assert_eq!(receipt.effort, None);
+}
+
 fn principal(hex: char) -> CommunicationPrincipal {
     CommunicationPrincipal {
         kind: "user".into(),
@@ -136,7 +183,7 @@ fn call() -> TeamCliCall {
         provider_id: "workbuddy".into(),
         model: "discovered-model".into(),
         effort: Some("high".into()),
-        instruction: None,
+        instruction: Some("Independent delegated test task".into()),
     }
 }
 fn plan(root: &str, child: &str) -> TeamPlanInput {
@@ -204,40 +251,33 @@ fn observation(
 }
 
 #[test]
-fn custom_policy_rejects_impossible_cli_minimum_and_keeps_feasible_maxima() {
+fn legacy_minimums_do_not_require_delegation_or_cli() {
     let (_dir, db) = database();
     let owner = principal('a');
     let mut settings = TeamPolicyInput::default();
-    settings.providers = ["workbuddy", "antigravity"]
-        .into_iter()
-        .map(|id| crate::TeamProviderPreference {
-            provider_id: id.into(),
-            enabled: true,
-            model: None,
-            effort: None,
-        })
-        .collect();
     settings.mode = TeamPolicyMode::Custom;
-    settings.subagents = TeamCountRange { min: 2, max: 32 };
-    settings.cli_per_agent = TeamCountRange { min: 11, max: 32 };
-    assert_eq!(
-        db.save_team_policy(&owner, PROJECT, 0, settings.clone())
-            .unwrap_err()
-            .code(),
-        "team_cli_budget_unsatisfiable"
-    );
-    assert_eq!(db.get_team_policy(&owner, PROJECT).unwrap().revision, 0);
-    settings.subagents.min = 3;
-    settings.cli_per_agent.min = 8;
-    let saved = db
-        .save_team_policy(&owner, PROJECT, 0, settings.clone())
-        .unwrap();
-    assert_eq!(saved.settings, settings);
-    // Autonomous mode imposes no minimum, even if a prior custom draft had one.
-    settings.mode = TeamPolicyMode::Auto;
-    settings.subagents.min = 32;
-    settings.cli_per_agent.min = 32;
-    assert!(db.save_team_policy(&owner, PROJECT, 1, settings).is_ok());
+    settings.subagents = TeamCountRange { min: 100, max: 100 };
+    settings.cli_per_agent = TeamCountRange { min: 100, max: 100 };
+    db.save_team_policy(&owner, PROJECT, 0, settings).unwrap();
+    let root = task(&db, &owner, PROJECT, "solo");
+    db.register_team_plan(
+        &owner,
+        PROJECT,
+        &root,
+        1,
+        TeamPlanInput {
+            manager: TeamAgentPlan {
+                task_id: root.clone(),
+                cli_calls: vec![],
+            },
+            subagents: vec![],
+        },
+        "solo",
+    )
+    .unwrap();
+    let progress = db.read_team_completion(&owner, PROJECT, &root).unwrap();
+    assert_eq!(progress.required_subagents, 0);
+    assert_eq!(progress.success_gate, "not_required");
 }
 
 #[test]
@@ -245,15 +285,6 @@ fn legacy_policy_with_impossible_cli_minimum_remains_readable_and_revisable() {
     let (dir, db) = database();
     let owner = principal('a');
     let mut settings = TeamPolicyInput::default();
-    settings.providers = ["workbuddy", "antigravity"]
-        .into_iter()
-        .map(|id| crate::TeamProviderPreference {
-            provider_id: id.into(),
-            enabled: true,
-            model: None,
-            effort: None,
-        })
-        .collect();
     settings.mode = TeamPolicyMode::Custom;
     settings.subagents = TeamCountRange { min: 2, max: 2 };
     settings.cli_per_agent = TeamCountRange { min: 11, max: 11 };
@@ -261,58 +292,21 @@ fn legacy_policy_with_impossible_cli_minimum_remains_readable_and_revisable() {
         revision: 7,
         settings,
     };
-    // This row satisfied the old individual count limits before total-budget
-    // admission was added. Restore the actual persisted shape, then reopen it.
-    db.conn.lock().unwrap().execute(
-        "INSERT INTO wc_team_policies(owner_principal_kind,owner_principal_digest,project_id,policy_json) VALUES(?1,?2,?3,?4)",
-        params![owner.kind, owner.digest, PROJECT, encode(&legacy).unwrap()],
-    ).unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO wc_team_policies VALUES(?1,?2,?3,?4)",
+            params![owner.kind, owner.digest, PROJECT, encode(&legacy).unwrap()],
+        )
+        .unwrap();
     drop(db);
     let db = Database::open(&dir.path().join("state.db")).unwrap();
     assert_eq!(db.get_team_policy(&owner, PROJECT).unwrap(), legacy);
-    assert_eq!(
-        db.save_team_policy(&owner, PROJECT, legacy.revision, legacy.settings.clone())
-            .unwrap_err()
-            .code(),
-        "team_cli_budget_unsatisfiable"
-    );
-
-    let root = task(&db, &owner, PROJECT, "legacy-root");
-    let children = [
-        task(&db, &owner, PROJECT, "legacy-first"),
-        task(&db, &owner, PROJECT, "legacy-second"),
-    ];
-    let member = |id: &str, count: usize| TeamAgentPlan {
-        task_id: id.into(),
-        cli_calls: (0..count)
-            .map(|_| TeamCliCall {
-                instruction: Some("Review this member's assigned material".into()),
-                ..call()
-            })
-            .collect(),
-    };
-    let plan = |count| TeamPlanInput {
-        manager: member(&root, count),
-        subagents: children.iter().map(|id| member(id, count)).collect(),
-    };
-    assert_eq!(
-        db.register_team_plan(&owner, PROJECT, &root, 7, plan(11), "new-plan")
-            .unwrap_err()
-            .code(),
-        "team_cli_budget_unsatisfiable"
-    );
-    assert_eq!(db.get_team_policy(&owner, PROJECT).unwrap(), legacy);
-
-    let mut corrected = legacy.settings;
-    corrected.cli_per_agent.min = 10;
-    let saved = db.save_team_policy(&owner, PROJECT, 7, corrected).unwrap();
+    let saved = db
+        .save_team_policy(&owner, PROJECT, 7, legacy.settings)
+        .unwrap();
     assert_eq!(saved.revision, 8);
-    assert_eq!(db.get_team_policy(&owner, PROJECT).unwrap(), saved);
-    assert!(
-        db.register_team_plan(&owner, PROJECT, &root, 8, plan(10), "new-plan")
-            .unwrap()
-            .created
-    );
 }
 
 #[test]
@@ -391,65 +385,59 @@ fn plan_requires_real_same_owner_same_project_tasks_without_existence_leak() {
 }
 
 #[test]
-fn custom_policy_counts_all_ordinary_members_and_pins_native_selection() {
+fn legacy_policy_does_not_cap_counts_or_lock_model_effort() {
     let (_dir, db) = database();
     let owner = principal('a');
     let root = task(&db, &owner, PROJECT, "root");
     let child = task(&db, &owner, PROJECT, "child");
     let mut settings = TeamPolicyInput::default();
-    settings.providers = ["workbuddy", "antigravity"]
-        .into_iter()
-        .map(|id| TeamProviderPreference {
-            provider_id: id.into(),
-            enabled: true,
-            model: None,
-            effort: None,
+    settings.mode = TeamPolicyMode::Custom;
+    settings.subagents = TeamCountRange { min: 0, max: 0 };
+    settings.cli_per_agent = TeamCountRange { min: 0, max: 0 };
+    settings.providers.push(TeamProviderPreference {
+        provider_id: "workbuddy".into(),
+        enabled: false,
+        model: Some("old-model".into()),
+        effort: Some("low".into()),
+    });
+    db.save_team_policy(&owner, PROJECT, 0, settings).unwrap();
+    let mut input = plan(&root, &child);
+    input.manager.cli_calls = (0..40)
+        .map(|_| TeamCliCall {
+            instruction: Some("Explicit independent task".into()),
+            ..call()
         })
         .collect();
-    settings.mode = TeamPolicyMode::Custom;
-    settings.subagents = TeamCountRange { min: 1, max: 1 };
-    settings.cli_per_agent = TeamCountRange { min: 1, max: 2 };
-    settings.providers[0].model = Some("discovered-model".into());
-    settings.providers[0].effort = Some("high".into());
-    settings.providers[1].enabled = false;
-    db.save_team_policy(&owner, PROJECT, 0, settings).unwrap();
-    let valid = plan(&root, &child);
-    let mut changed = valid.clone();
-    changed.subagents.clear();
+    db.register_team_plan(&owner, PROJECT, &root, 1, input, "unrestricted")
+        .unwrap();
+    let receipt = reserve(&db, &owner, &root, &root, 39, "fortieth");
+    assert_eq!(receipt.call_index, 39);
+    assert_eq!(receipt.model.named(), Some("discovered-model"));
+    assert_eq!(receipt.effort.as_deref(), Some("high"));
+}
+
+#[test]
+fn cli_without_independent_instruction_does_not_inherit_source_goal() {
+    let (_dir, db) = database();
+    let owner = principal('a');
+    let root = task(&db, &owner, PROJECT, "private-root-goal");
+    let mut planned = TeamPlanInput {
+        manager: TeamAgentPlan {
+            task_id: root.clone(),
+            cli_calls: vec![call()],
+        },
+        subagents: vec![],
+    };
+    planned.manager.cli_calls[0].instruction = None;
+    let error = db
+        .register_team_plan(&owner, PROJECT, &root, 0, planned, "no-goal-copy")
+        .unwrap_err();
+    assert_eq!(error.code(), "team_cli_instruction_required");
     assert_eq!(
-        db.register_team_plan(&owner, PROJECT, &root, 1, changed, "missing-child")
-            .unwrap_err()
-            .code(),
-        "team_subagent_quota"
-    );
-    let mut changed = valid.clone();
-    changed.manager.cli_calls.clear();
-    assert_eq!(
-        db.register_team_plan(&owner, PROJECT, &root, 1, changed, "manager-no-cli")
-            .unwrap_err()
-            .code(),
-        "team_cli_quota"
-    );
-    let mut changed = valid.clone();
-    changed.subagents[0].cli_calls[0].model = "other-model".into();
-    assert_eq!(
-        db.register_team_plan(&owner, PROJECT, &root, 1, changed, "wrong-model")
-            .unwrap_err()
-            .code(),
-        "team_model_policy_mismatch"
-    );
-    let mut changed = valid.clone();
-    changed.subagents[0].cli_calls[0].provider_id = "antigravity".into();
-    assert_eq!(
-        db.register_team_plan(&owner, PROJECT, &root, 1, changed, "disabled-provider")
-            .unwrap_err()
-            .code(),
-        "team_provider_disabled"
-    );
-    assert!(
-        db.register_team_plan(&owner, PROJECT, &root, 1, valid, "valid")
+        db.list_team_plans(&owner, PROJECT, 0, 20)
             .unwrap()
-            .created
+            .total_count,
+        0
     );
 }
 
@@ -534,7 +522,7 @@ fn reservation_freezes_instruction_profile_timeout_and_charges_slot_once() {
     let owner = principal('a');
     let (root, child, _) = setup(&db, &owner);
     let first = reserve(&db, &owner, &root, &child, 0, "call");
-    assert_eq!(first.instruction, "Authoritative instruction for child");
+    assert_eq!(first.instruction, "Independent delegated test task");
     assert_eq!(first.timeout_secs, Some(120));
     assert_eq!(first.execution_state, None);
     let replay = db
@@ -684,7 +672,7 @@ fn multiple_calls_require_explicit_bounded_text_but_can_intentionally_repeat_rev
 }
 
 #[test]
-fn a_sole_cli_call_can_inherit_task_instruction_without_changing_legacy_serialization() {
+fn legacy_cli_call_serialization_is_readable_but_new_calls_use_independent_goals() {
     let original =
         serde_json::json!({"provider_id":"workbuddy","model":"discovered-model","effort":"high"});
     let parsed: TeamCliCall = serde_json::from_value(original.clone()).unwrap();
@@ -700,11 +688,11 @@ fn a_sole_cli_call_can_inherit_task_instruction_without_changing_legacy_serializ
         .unwrap();
     assert_eq!(
         reserve(&db, &owner, &root, &root, 0, "root-call").instruction,
-        "Authoritative instruction for root"
+        "Independent delegated test task"
     );
     assert_eq!(
         reserve(&db, &owner, &root, &child, 0, "child-call").instruction,
-        "Authoritative instruction for child"
+        "Independent delegated test task"
     );
 }
 
@@ -1368,7 +1356,7 @@ fn cli_attempt_pagination_rejects_foreign_roots_wrong_projects_and_unbounded_pag
             .code(),
         "team_task_not_found"
     );
-    for (offset, limit) in [(0, 0), (0, 21), (65537, 20)] {
+    for (offset, limit) in [(0, 0), (0, 21), (usize::MAX, 20)] {
         assert_eq!(
             db.list_team_cli_attempts(&owner, PROJECT, Some(&root), offset, limit)
                 .unwrap_err()
@@ -1376,4 +1364,134 @@ fn cli_attempt_pagination_rejects_foreign_roots_wrong_projects_and_unbounded_pag
             "invalid_team_request"
         );
     }
+}
+
+#[test]
+fn omitted_model_is_frozen_as_cli_default_and_replays_without_rewriting_history() {
+    let (dir, db) = database();
+    let owner = principal('a');
+    let root = task(&db, &owner, PROJECT, "cli-default-root");
+    let child = task(&db, &owner, PROJECT, "cli-default-child");
+    let mut value = serde_json::to_value(plan(&root, &child)).unwrap();
+    for call in value["manager"]["cli_calls"].as_array_mut().unwrap() {
+        call.as_object_mut().unwrap().remove("model");
+        call.as_object_mut().unwrap().remove("effort");
+    }
+    let input: TeamPlanInput = serde_json::from_value(value).unwrap();
+    for blank in ["", " "] {
+        let mut invalid = input.clone();
+        invalid.manager.cli_calls[0].model = blank.into();
+        assert!(db
+            .register_team_plan(&owner, PROJECT, &root, 0, invalid, "blank-model")
+            .is_err());
+    }
+    let saved = db
+        .register_team_plan(&owner, PROJECT, &root, 0, input.clone(), "cli-default-plan")
+        .unwrap();
+    assert!(saved.plan.plan.manager.cli_calls[0].model.is_cli_default());
+    let receipt = reserve(&db, &owner, &root, &root, 0, "cli-default-call");
+    assert!(receipt.model.is_cli_default());
+    drop(db);
+    let reopened = Database::open(&dir.path().join("state.db")).unwrap();
+    assert!(
+        reopened
+            .register_team_plan(&owner, PROJECT, &root, 0, input.clone(), "cli-default-plan")
+            .unwrap()
+            .replayed
+    );
+    let mut changed = input;
+    changed.manager.cli_calls[0].model = "new-explicit-model".into();
+    assert!(reopened
+        .register_team_plan(&owner, PROJECT, &root, 0, changed, "cli-default-plan")
+        .is_err());
+}
+
+#[test]
+fn historical_4096_plans_do_not_limit_registration_after_reopen() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("plan-history.db");
+    let db = Database::open(&path).unwrap();
+    let owner = principal('a');
+    {
+        let mut conn = db.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        let now = now_unix_ms();
+        for index in 0..4096 {
+            let key = format!("historical-plan-{index}");
+            let task = crate::agent_task::create_agent_task_on_connection(
+                &tx,
+                &owner,
+                NewAgentTask {
+                    title: key.clone(),
+                    instruction: "Independent ordinary task".into(),
+                    assignee_agent_id: None,
+                    source_conversation_id: None,
+                    source_message_id: None,
+                    referenced_project_id: Some(PROJECT.into()),
+                    idempotency_key: key.clone(),
+                },
+                now,
+            )
+            .unwrap()
+            .task
+            .summary
+            .task_id;
+            register_team_plan_on_connection(
+                &tx,
+                &owner,
+                PROJECT,
+                &task,
+                0,
+                TeamPlanInput {
+                    manager: TeamAgentPlan {
+                        task_id: task.clone(),
+                        cli_calls: vec![],
+                    },
+                    subagents: vec![],
+                },
+                &key,
+                PROJECT,
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    drop(db);
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        db.list_team_plans(&owner, PROJECT, 0, 20)
+            .unwrap()
+            .total_count,
+        4096
+    );
+    let root = task(&db, &owner, PROJECT, "new-plan-after-history");
+    let created = db
+        .register_team_plan(
+            &owner,
+            PROJECT,
+            &root,
+            0,
+            TeamPlanInput {
+                manager: TeamAgentPlan {
+                    task_id: root.clone(),
+                    cli_calls: vec![],
+                },
+                subagents: vec![],
+            },
+            "new-plan-after-history",
+        )
+        .unwrap();
+    assert!(created.created && created.state_changed);
+    assert_eq!(
+        db.list_team_plans(&owner, PROJECT, 0, 20)
+            .unwrap()
+            .total_count,
+        4097
+    );
+    assert_eq!(
+        db.list_team_cli_attempts(&owner, PROJECT, None, 0, 20)
+            .unwrap()
+            .total_count,
+        0
+    );
 }

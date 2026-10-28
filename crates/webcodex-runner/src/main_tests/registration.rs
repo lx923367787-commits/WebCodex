@@ -14,6 +14,9 @@ fn mcp_gateway_register_request_projects_bounded_provider_inventory_without_loca
             "GITHUB_TOKEN".to_string(),
             "OPERATOR_GITHUB_TOKEN".to_string(),
         )]),
+        url: None,
+        headers: Default::default(),
+        env: Default::default(),
         timeout_secs: Some(5),
     }];
 

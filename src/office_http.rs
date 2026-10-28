@@ -49,6 +49,8 @@ pub(crate) async fn control(req: &mut Request, depot: &mut Depot, res: &mut Resp
         Some("plan-list") => "office_plan_list",
         Some("plan-read") => "office_plan_read",
         Some("task-create") => "office_task_create",
+        Some("cli-discover") => "office_cli_discover",
+        Some("cli-models") => "office_cli_models",
         _ => "office_invalid_action",
     };
     let audit = ActionAudit::start(req, depot, "/api/office/control", "officeControl");

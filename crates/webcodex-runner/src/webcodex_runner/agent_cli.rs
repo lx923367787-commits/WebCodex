@@ -85,6 +85,9 @@ pub(crate) fn discover_inventory(
             .into_iter()
             .map(|entry| AgentCliInstallation {
                 command: entry.command,
+                execution_ready: Some(false),
+                execution_mode: None,
+                reason_code: Some("cli_resource_not_registered".into()),
                 provider_id: entry.provider_id,
                 label: entry.label,
                 installed: entry.installed,
@@ -153,6 +156,9 @@ pub(crate) fn validate_target(
 fn adapter_for(
     resource: &AgentExecutionResourceDescriptor,
 ) -> Result<webcodex_core::cli_adapter::CliAdapter, String> {
+    if let Some(host) = &resource.host_cli {
+        return Ok(host.adapter.clone());
+    }
     if let Some(adapter) = resource
         .reviewed_controls
         .as_ref()
@@ -312,6 +318,42 @@ fn probe_metadata(
             .map_err(|_| "agent_cli_metadata_worker_failed".to_owned())?
     })?;
     Ok(raw)
+}
+
+pub(crate) fn inventory_with_resource_errors(
+    inventory: Result<webcodex_core::agent_cli::AgentCliInventory, String>,
+    failures: &std::collections::BTreeMap<String, String>,
+) -> Result<webcodex_core::agent_cli::AgentCliInventory, String> {
+    let mut inventory = inventory?;
+    for entry in &mut inventory.installations {
+        if let Some(error) = failures
+            .get(&entry.provider_id)
+            .or_else(|| failures.get("*"))
+        {
+            entry.execution_ready = Some(false);
+            entry.reason_code = Some(error.clone());
+            entry.message = format!("该 CLI 执行资源未加载：{error}；其他工具不受影响。");
+        }
+    }
+    Ok(inventory)
+}
+
+pub(crate) fn inventory_with_load_status(
+    inventory: Result<webcodex_core::agent_cli::AgentCliInventory, String>,
+    load_error: Option<String>,
+) -> Result<webcodex_core::agent_cli::AgentCliInventory, String> {
+    let Some(error) = load_error else {
+        return inventory;
+    };
+    let mut inventory = inventory.map_err(|_| error.clone())?;
+    for entry in &mut inventory.installations {
+        if entry.native && entry.adapter_available {
+            entry.execution_ready = Some(false);
+            entry.reason_code = Some(error.clone());
+            entry.message = format!("Runner CLI 资源加载失败：{error}");
+        }
+    }
+    Ok(inventory)
 }
 
 pub(crate) fn bounded_json_result<T: serde::Serialize>(

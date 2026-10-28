@@ -37,6 +37,12 @@ pub(crate) fn detached_initiator_identity_from_auth(
     if auth.is_native_host() {
         return Err("native_host_runner_audience_denied".into());
     }
+    if let Some(actor) = auth.agent_run.as_ref() {
+        return Ok(DetachedInitiatorIdentity::from_stable_principal(format!(
+            "agent:{}",
+            actor.agent_id()
+        )));
+    }
     if auth.is_bootstrap() {
         return Ok(DetachedInitiatorIdentity::from_stable_principal(
             "bootstrap".to_string(),

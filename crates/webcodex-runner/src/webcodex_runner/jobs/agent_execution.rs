@@ -26,6 +26,10 @@ use webcodex_core::runner_protocol::{
 };
 
 const RESOURCE_CLEANUP_BUDGET: Duration = Duration::from_secs(10);
+#[path = "agent_browser.rs"]
+mod browser;
+#[path = "agent_program.rs"]
+mod program;
 
 fn validate_workspace_source(
     start: &AgentExecutionStart,
@@ -155,7 +159,12 @@ impl JobManager {
                     .profiles
                     .descriptors()
                     .into_iter()
-                    .filter_map(|resource| resource.reviewed_controls?.adapter)
+                    .filter_map(|resource| {
+                        resource
+                            .host_cli
+                            .map(|host| host.adapter)
+                            .or_else(|| resource.reviewed_controls?.adapter)
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -334,6 +343,17 @@ impl JobManager {
             Err(_) => return Err("agent_execution_resource_root_unavailable".into()),
         }
         let root_pins = super::agent_resources::initialize_resource_root(&resource_root)?;
+        store.initialize_agent_program_metadata(&resource_root)?;
+        #[cfg(windows)]
+        for row in store.read_agent_program_metadata()? {
+            if row.start.binding.local_service_port.is_some()
+                && (!row.native_create_attempted || row.tree_stopped && row.worker_finished)
+            {
+                webcodex_process::windows_local_service::LocalServiceNetwork::remove_stopped(
+                    &row.start.binding.identity_hash()?,
+                )?;
+            }
+        }
         let configuration = AgentExecutionConfiguration {
             profiles,
             store,
@@ -566,9 +586,11 @@ impl JobManager {
                         .find(|job| job.binding == start.binding)
                 })
                 .is_none_or(|job| job.native_create_attempted);
+            let not_started =
+                !attempted || error.starts_with("agent_execution_native_not_started:");
             {
                 let _lifecycle = lock_unpoison(&self.lifecycle);
-                if !attempted {
+                if not_started {
                     if let Some(custody) = lock_unpoison(&self.agent_execution).live.get_mut(id) {
                         custody.helpers_finished = true;
                     }
@@ -584,12 +606,12 @@ impl JobManager {
             self.update_and_send(
                 id,
                 RunnerJobDelta {
-                    status: if attempted { "lost" } else { "failed" }.into(),
+                    status: if not_started { "failed" } else { "lost" }.into(),
                     error: Some(error),
-                    command_execution_state: Some(if attempted {
-                        ShellCommandExecutionState::OutcomeUnknown
-                    } else {
+                    command_execution_state: Some(if not_started {
                         ShellCommandExecutionState::NotStarted
+                    } else {
+                        ShellCommandExecutionState::OutcomeUnknown
                     }),
                     finished: true,
                     ..Default::default()
@@ -1188,6 +1210,19 @@ impl JobManager {
 }
 
 #[cfg(windows)]
+fn native_spawn_failure(error: webcodex_process::windows_lpac::SpawnFailure) -> String {
+    let stage = if error.execution_state == "not_started" {
+        "not_started"
+    } else {
+        "outcome_unknown"
+    };
+    format!(
+        "agent_execution_native_{stage}:{}:{}",
+        error.code, error.os_code
+    )
+}
+
+#[cfg(windows)]
 impl JobManager {
     /// Called only after every stdin/output helper has joined. Physical cleanup
     /// does not claim that this worker's own JoinHandle has joined for close.
@@ -1256,6 +1291,10 @@ impl JobManager {
             start,
             &configuration.resource_root,
         )?;
+        if prepared.native_host {
+            LpacChild::validate_host_launch(prepared.launch_spec())
+                .map_err(native_spawn_failure)?;
+        }
         configuration
             .store
             .update_agent_execution_metadata(|metadata| {
@@ -1358,8 +1397,13 @@ impl JobManager {
                     stored.native_create_attempted = true;
                     Ok(())
                 })?;
-            let mut native = LpacChild::spawn(custody.resources.as_ref().unwrap().launch_spec())
-                .map_err(|_| "agent_execution_native_create_outcome_unknown")?;
+            let resources = custody.resources.as_ref().unwrap();
+            let mut native = if resources.native_host {
+                LpacChild::spawn_host(resources.launch_spec())
+            } else {
+                LpacChild::spawn(resources.launch_spec())
+            }
+            .map_err(native_spawn_failure)?;
             let stdin = native.stdin.take();
             let stdout = native.stdout.take();
             let stderr = native.stderr.take();

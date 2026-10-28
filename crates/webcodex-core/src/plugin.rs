@@ -19,14 +19,17 @@ pub const PLUGIN_MAX_TOOL_NAME_BYTES: usize = 128;
 pub const PLUGIN_MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
 pub const PLUGIN_MAX_SCHEMA_BYTES: usize = 64 * 1024;
 pub const PLUGIN_MAX_ARGUMENT_BYTES: usize = 64 * 1024;
-pub const PLUGIN_MAX_STRUCTURED_CONTENT_BYTES: usize = 128 * 1024;
-pub const PLUGIN_MAX_TEXT_CONTENT_BYTES: usize = 64 * 1024;
-pub const PLUGIN_MAX_RESULT_BYTES: usize = 256 * 1024;
+pub const PLUGIN_MAX_STRUCTURED_CONTENT_BYTES: usize = 512 * 1024;
+pub const PLUGIN_MAX_TEXT_CONTENT_BYTES: usize = 512 * 1024;
+// Keep envelope headroom under the Server's 2 MiB HTTP polling body limit.
+pub const PLUGIN_MAX_RESULT_BYTES: usize = 2 * 1024 * 1024 - 64 * 1024;
 pub const PLUGIN_MAX_CONTENT_ITEMS: usize = 32;
-pub const PLUGIN_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub const PLUGIN_MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const PLUGIN_MAX_JSON_DEPTH: usize = 16;
 pub const PLUGIN_MAX_JSON_NODES: usize = 4_096;
 pub const PLUGIN_MAX_JSON_STRING_BYTES: usize = 64 * 1024;
+pub const PLUGIN_MAX_RESULT_JSON_NODES: usize = 65_536;
+pub const PLUGIN_MAX_RESULT_JSON_STRING_BYTES: usize = 512 * 1024;
 pub const PLUGIN_MAX_CHECK_DETAIL_BYTES: usize = 512;
 pub const PLUGIN_SCHEMA_MAX_PROPERTIES: usize = 128;
 pub const PLUGIN_SCHEMA_MAX_REQUIRED: usize = 128;
@@ -780,7 +783,7 @@ pub fn validate_plugin_structured_output(
     structured_content: &Value,
 ) -> Result<(), String> {
     validate_plugin_tool_schema_profile(output_schema, "tool outputSchema")?;
-    validate_json_value(
+    validate_result_json_value(
         structured_content,
         PLUGIN_MAX_STRUCTURED_CONTENT_BYTES,
         "structuredContent",
@@ -1074,7 +1077,7 @@ pub fn validate_tool_result(result: &PluginToolResult) -> Result<(), String> {
         if !structured.is_object() {
             return Err("structuredContent must be a JSON object".to_string());
         }
-        validate_json_value(
+        validate_result_json_value(
             structured,
             PLUGIN_MAX_STRUCTURED_CONTENT_BYTES,
             "structuredContent",
@@ -1313,13 +1316,44 @@ fn validate_status_atom(value: &str, field: &str) -> Result<(), String> {
 }
 
 pub fn validate_json_value(value: &Value, max_bytes: usize, field: &str) -> Result<(), String> {
+    validate_json_value_with_limits(
+        value,
+        max_bytes,
+        field,
+        PLUGIN_MAX_JSON_NODES,
+        PLUGIN_MAX_JSON_STRING_BYTES,
+    )
+}
+
+/// Result budgets are separate from argument and schema admission limits.
+pub fn validate_result_json_value(
+    value: &Value,
+    max_bytes: usize,
+    field: &str,
+) -> Result<(), String> {
+    validate_json_value_with_limits(
+        value,
+        max_bytes,
+        field,
+        PLUGIN_MAX_RESULT_JSON_NODES,
+        PLUGIN_MAX_RESULT_JSON_STRING_BYTES,
+    )
+}
+
+fn validate_json_value_with_limits(
+    value: &Value,
+    max_bytes: usize,
+    field: &str,
+    max_nodes: usize,
+    max_string_bytes: usize,
+) -> Result<(), String> {
     let encoded =
         serde_json::to_vec(value).map_err(|_| format!("{field} could not be serialized"))?;
     if encoded.len() > max_bytes {
         return Err(format!("{field} exceeds maximum {max_bytes} bytes"));
     }
     let mut nodes = 0usize;
-    validate_json_node(value, 0, &mut nodes, field)
+    validate_json_node(value, 0, &mut nodes, field, max_nodes, max_string_bytes)
 }
 
 fn validate_json_node(
@@ -1327,23 +1361,25 @@ fn validate_json_node(
     depth: usize,
     nodes: &mut usize,
     field: &str,
+    max_nodes: usize,
+    max_string_bytes: usize,
 ) -> Result<(), String> {
     if depth > PLUGIN_MAX_JSON_DEPTH {
         return Err(format!("{field} exceeds JSON depth bound"));
     }
     *nodes = nodes.saturating_add(1);
-    if *nodes > PLUGIN_MAX_JSON_NODES {
+    if *nodes > max_nodes {
         return Err(format!("{field} exceeds JSON node bound"));
     }
     match value {
         Value::String(text) => {
-            if text.len() > PLUGIN_MAX_JSON_STRING_BYTES {
+            if text.len() > max_string_bytes {
                 return Err(format!("{field} contains an oversized string"));
             }
         }
         Value::Array(values) => {
             for value in values {
-                validate_json_node(value, depth + 1, nodes, field)?;
+                validate_json_node(value, depth + 1, nodes, field, max_nodes, max_string_bytes)?;
             }
         }
         Value::Object(values) => {
@@ -1351,7 +1387,7 @@ fn validate_json_node(
                 if key.len() > 1024 || key.chars().any(char::is_control) {
                     return Err(format!("{field} contains an invalid object key"));
                 }
-                validate_json_node(value, depth + 1, nodes, field)?;
+                validate_json_node(value, depth + 1, nodes, field, max_nodes, max_string_bytes)?;
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -1368,6 +1404,10 @@ fn validate_text_controls(value: &str, field: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "plugin_result_tests.rs"]
+mod result_tests;
 
 #[cfg(test)]
 mod tests {

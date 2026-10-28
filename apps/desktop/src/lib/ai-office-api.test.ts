@@ -7,6 +7,18 @@ const native = vi.mocked(invoke);
 beforeEach(() => { native.mockReset(); });
 
 describe("AI office native team adapter", () => {
+  it("uses the current project's Runner inventory for both discovery and models", async () => {
+    const installation = { providerId: "codex", installed: true, adapterAvailable: true, executionReady: true };
+    native.mockResolvedValueOnce({ success: true, output: { installations: [installation] } });
+    await expect(aiOfficeApi.discoverCli("agent:runner:project")).resolves.toEqual([installation]);
+    expect(native).toHaveBeenLastCalledWith("ai_office_team_call", { action: "cli-discover", params: { project: "agent:runner:project" } });
+    native.mockResolvedValueOnce({ success: true, output: { observed_at_ms: 1000, capabilities: { providerId: "codex", models: [], efforts: [], status: "ready" } } });
+    await expect(aiOfficeApi.refreshCli("codex", "agent:runner:project")).resolves.toMatchObject({ providerId: "codex", checkedAt: "1970-01-01T00:00:01.000Z", models: [] });
+    expect(native).toHaveBeenLastCalledWith("ai_office_team_call", { action: "cli-models", params: { project: "agent:runner:project", provider_id: "codex" } });
+    await expect(aiOfficeApi.discoverCli()).rejects.toMatchObject({ code: "team_project_required" });
+    expect(native).toHaveBeenCalledTimes(2);
+  });
+
   it("passes the exact project identity and unwraps the full ToolResult output", async () => {
     const output = { plans: [], total_count: 0, next_offset: null };
     native.mockResolvedValue({ success: true, output, error: null });

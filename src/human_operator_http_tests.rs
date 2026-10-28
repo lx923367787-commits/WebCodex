@@ -61,6 +61,7 @@ fn registration(client_id: &str, owner: &str) -> RunnerRegisterRequest {
         host_context: None,
         capabilities: RunnerCapabilities {
             runner_config_control: true,
+            tool_connections: false,
             ..Default::default()
         },
         policy: None,

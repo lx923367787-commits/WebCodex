@@ -33,6 +33,14 @@ fn fake_binary() -> Arc<FakeBinary> {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/webcodex_runner/fake_mcp_gateway.rs");
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let result = Command::new(rustc)
+        .env(
+            "WEBCODEX_TEST_MCP_FRAME_LIMIT",
+            crate::mcp_gateway::MCP_GATEWAY_MAX_MESSAGE_BYTES.to_string(),
+        )
+        .env(
+            "WEBCODEX_TEST_MCP_TEXT_LIMIT",
+            crate::mcp_gateway::MCP_GATEWAY_MAX_TEXT_CONTENT_BYTES.to_string(),
+        )
         .arg("--edition=2021")
         .arg("--crate-name=webcodex_mcp_gateway_fake")
         .arg(source)
@@ -102,6 +110,9 @@ impl Fixture {
                 args,
                 cwd,
                 env_from_env,
+                url: None,
+                headers: BTreeMap::new(),
+                env: BTreeMap::new(),
                 timeout_secs: provider_timeout_secs,
             }],
         });
@@ -373,9 +384,9 @@ fn provider_callback_after_dispatch_remains_unsupported_and_unknown() {
     );
     assert_eq!(
         fixture.call(&provider).error.as_ref().unwrap().code,
-        "stale_provider"
+        "provider_callbacks_unsupported"
     );
-    assert_eq!(fixture.marker_count("start"), 1);
+    assert_eq!(fixture.marker_count("start"), 2);
 }
 
 #[test]
@@ -394,13 +405,13 @@ fn provider_notification_flood_is_bounded_and_retires_after_dispatch() {
     );
     assert_eq!(
         fixture.list(&provider).error.as_ref().unwrap().code,
-        "stale_provider"
+        "provider_notification_flood"
     );
-    assert_eq!(fixture.marker_count("start"), 1);
+    assert_eq!(fixture.marker_count("start"), 2);
 }
 
 #[test]
-fn crash_is_outcome_unknown_and_never_restarted_or_replayed() {
+fn crash_is_not_replayed_and_a_later_request_starts_a_new_session() {
     let fixture = Fixture::new("crash", 2);
     let provider = fixture.provider();
     assert!(fixture.list(&provider).error.is_none());
@@ -411,11 +422,15 @@ fn crash_is_outcome_unknown_and_never_restarted_or_replayed() {
     );
     assert_eq!(first.error.as_ref().unwrap().code, "provider_eof");
 
-    let second = fixture.call(&provider);
-    assert_eq!(second.dispatch_state, McpGatewayDispatchState::NotStarted);
-    assert_eq!(second.error.as_ref().unwrap().code, "stale_provider");
-    assert_eq!(fixture.marker_count("start"), 1);
     assert_eq!(fixture.marker_count("call"), 1);
+    let second = fixture.call(&provider);
+    assert_eq!(
+        second.dispatch_state,
+        McpGatewayDispatchState::OutcomeUnknown
+    );
+    assert_eq!(second.error.as_ref().unwrap().code, "provider_eof");
+    assert_eq!(fixture.marker_count("start"), 2);
+    assert_eq!(fixture.marker_count("call"), 2);
 }
 
 #[test]
@@ -438,10 +453,10 @@ fn initialization_failure_is_not_misreported_as_tool_dispatch() {
         assert_eq!(fixture.marker_count("start"), 1, "{scenario}");
         assert_eq!(
             fixture.call(&provider).error.as_ref().unwrap().code,
-            "stale_provider",
+            code,
             "{scenario}"
         );
-        assert_eq!(fixture.marker_count("start"), 1, "{scenario}");
+        assert_eq!(fixture.marker_count("start"), 2, "{scenario}");
     }
 }
 
@@ -510,7 +525,7 @@ fn timeout_and_invalid_untrusted_outputs_are_bounded() {
         (
             "paginated_list",
             "list",
-            "provider_pagination_unsupported",
+            "invalid_provider_cursor",
             McpGatewayDispatchState::Completed,
         ),
     ] {
@@ -586,4 +601,91 @@ fn stale_provider_instance_fails_without_starting_child() {
     assert_eq!(response.dispatch_state, McpGatewayDispatchState::NotStarted);
     assert_eq!(response.error.as_ref().unwrap().code, "stale_provider");
     assert_eq!(fixture.marker_count("start"), 0);
+}
+
+#[test]
+fn prepare_reuses_identical_config_and_failed_replacement_keeps_old_provider() {
+    let fixture = Fixture::new("normal", 2);
+    let status = fixture.manager.connection_status();
+    assert_eq!(status[0].state, "configured");
+    assert_eq!(status[0].tool_count, None);
+    let old = fixture.provider();
+    let config = fixture.manager.config("fake").unwrap();
+    let prepared = fixture.manager.prepare(&config).unwrap();
+    assert_eq!(prepared.inventory(), old);
+    assert_eq!(prepared.tool_count(), 1);
+    fixture.manager.commit(prepared);
+    let status = fixture.manager.connection_status();
+    assert_eq!(status[0].state, "connected");
+    assert_eq!(status[0].tool_count, Some(1));
+    let prepared = fixture.manager.prepare(&config).unwrap();
+    fixture.manager.commit(prepared);
+    assert_eq!(fixture.marker_count("start"), 1);
+    let mut replacement = config.clone();
+    replacement.executable = fixture
+        ._temp
+        .path()
+        .join("missing-provider.exe")
+        .to_string_lossy()
+        .into_owned();
+    assert!(fixture.manager.prepare(&replacement).is_err());
+    assert_eq!(fixture.manager.config("fake"), Some(config));
+    assert_eq!(fixture.manager.connection_status()[0].state, "connected");
+    assert!(fixture.call(&old).error.is_none());
+    let prepared = fixture
+        .manager
+        .prepare_reconnect(&fixture.manager.config("fake").unwrap())
+        .unwrap();
+    let new = fixture.manager.commit(prepared);
+    assert_ne!(old.provider_instance_id, new.provider_instance_id);
+    assert_eq!(fixture.call(&old).error.unwrap().code, "stale_provider");
+    assert!(fixture.call(&new).error.is_none());
+    assert!(fixture.manager.remove("fake"));
+    assert_eq!(fixture.call(&old).error.unwrap().code, "stale_provider");
+}
+
+#[test]
+fn remove_allows_in_flight_call_to_complete() {
+    let fixture = Fixture::new("slow", 5);
+    let provider = fixture.provider();
+    assert!(fixture.list(&provider).error.is_none());
+    std::thread::scope(|scope| {
+        let running = scope.spawn(|| fixture.call(&provider));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while fixture.marker_count("call") == 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(fixture.manager.remove("fake"));
+        assert_eq!(
+            fixture.call(&provider).error.unwrap().code,
+            "stale_provider"
+        );
+        assert!(running.join().unwrap().error.is_none());
+    });
+    assert_eq!(fixture.marker_count("call"), 1);
+}
+
+#[test]
+fn replacement_fences_new_calls_but_preserves_old_in_flight_call() {
+    let fixture = Fixture::new("slow", 5);
+    let old = fixture.provider();
+    assert!(fixture.list(&old).error.is_none());
+    std::thread::scope(|scope| {
+        let running = scope.spawn(|| fixture.call(&old));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while fixture.marker_count("call") == 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut replacement = fixture.manager.config("fake").unwrap();
+        replacement.args[0] = "normal".into();
+        let prepared = fixture.manager.prepare(&replacement).unwrap();
+        let new = fixture.manager.commit(prepared);
+        assert_ne!(old.provider_instance_id, new.provider_instance_id);
+        assert_eq!(fixture.call(&old).error.unwrap().code, "stale_provider");
+        assert!(fixture.call(&new).error.is_none());
+        assert!(running.join().unwrap().error.is_none());
+    });
+    assert_eq!(fixture.marker_count("call"), 2);
 }

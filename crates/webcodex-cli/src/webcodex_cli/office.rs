@@ -22,7 +22,7 @@ const INDETERMINATE: &str =
 const INVALID_RESPONSE: &str =
     "office_invalid_response: Server returned an invalid tool response; observe before retrying";
 
-pub(crate) const USAGE: &str = "Usage: webcodex office ACTION --config PATH --server-url URL --client-id ID --token-file PATH --json\n\nActions: policy-get, policy-save, plan-list, plan-read, task-create\n\nReads one JSON parameter object (at most 64 KiB) from stdin. The project must belong to the exact saved Runner. This human configuration/read bridge uses only the saved user API token; it cannot dispatch Agents or CLI jobs. Tool results, including business errors, are returned intact as JSON. Requests are never automatically retried.\n";
+pub(crate) const USAGE: &str = "Usage: webcodex office ACTION --config PATH --server-url URL --client-id ID --token-file PATH --json\n\nActions: policy-get, policy-save, plan-list, plan-read, task-create, cli-discover, cli-models\n\nReads one JSON parameter object (at most 64 KiB) from stdin. The project must belong to the exact saved Runner. This human configuration/read bridge uses only the saved user API token; it cannot dispatch Agents or CLI jobs. Tool results, including business errors, are returned intact as JSON. Requests are never automatically retried.\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -31,6 +31,8 @@ pub(crate) enum Action {
     PlanList,
     PlanRead,
     TaskCreate,
+    CliDiscover,
+    CliModels,
 }
 
 impl Action {
@@ -41,6 +43,8 @@ impl Action {
             "plan-list" => Self::PlanList,
             "plan-read" => Self::PlanRead,
             "task-create" => Self::TaskCreate,
+            "cli-discover" => Self::CliDiscover,
+            "cli-models" => Self::CliModels,
             _ => return None,
         })
     }
@@ -52,6 +56,8 @@ impl Action {
             Self::PlanList => "plan-list",
             Self::PlanRead => "plan-read",
             Self::TaskCreate => "task-create",
+            Self::CliDiscover => "cli-discover",
+            Self::CliModels => "cli-models",
         }
     }
 }
@@ -242,7 +248,11 @@ pub(crate) async fn run(opts: Options, params: Value) -> Result<String, String> 
     }
     // Exactly one send. A dropped response may follow a committed mutation.
     let (status, _, body) = tokio::time::timeout(
-        REQUEST_TIMEOUT,
+        if matches!(opts.action, Action::CliDiscover | Action::CliModels) {
+            Duration::from_secs(45)
+        } else {
+            REQUEST_TIMEOUT
+        },
         http_post_json_status(
             &opts.server_url,
             &server_http,

@@ -39,6 +39,8 @@ fn office_parser_only_admits_human_configuration_read_and_public_task_creation()
         "plan-list",
         "plan-read",
         "task-create",
+        "cli-discover",
+        "cli-models",
     ] {
         assert_eq!(parse(&args(action)).unwrap().action.action(), action);
     }

@@ -89,6 +89,7 @@ fn query() -> AgentCliCatalogQuery {
 }
 fn resource() -> AgentExecutionResourceDescriptor {
     AgentExecutionResourceDescriptor {
+        host_cli: None,
         project_workspace_copy: false,
         reviewed_controls: None,
         resource_set_id: "workbuddy-resource".into(),
@@ -239,6 +240,9 @@ fn cli_inventory_has_a_scoped_read_only_codec_and_expiring_typed_results() {
         capabilities: None,
         installations: vec![AgentCliInstallation {
             command: "third-party-cli".into(),
+            execution_ready: Some(false),
+            execution_mode: None,
+            reason_code: Some("cli_resource_not_registered".into()),
             provider_id: "third-party-cli".into(),
             label: "Third Party CLI".into(),
             installed: true,

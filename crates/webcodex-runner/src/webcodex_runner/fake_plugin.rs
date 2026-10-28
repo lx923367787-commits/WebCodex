@@ -345,6 +345,15 @@ fn main() -> io::Result<()> {
                 calls += 1;
                 append(marker, "call\n")?;
                 match scenario {
+                    "single_block_call" => {
+                        let release = marker
+                            .map(|path| path.with_extension("release"))
+                            .expect("blocking call scenario requires marker path");
+                        while !release.exists() {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        send_result(&mut writer, id, calls)?;
+                    }
                     "crash" => return Ok(()),
                     "timeout" => thread::sleep(Duration::from_secs(3)),
                     "split_timeout" => {

@@ -31,6 +31,7 @@ mod agent_isolation;
 #[cfg(test)]
 mod agent_isolation_tests;
 mod agent_private_files;
+mod agent_program;
 mod agent_team;
 mod agent_team_catalog;
 mod agent_team_decision;

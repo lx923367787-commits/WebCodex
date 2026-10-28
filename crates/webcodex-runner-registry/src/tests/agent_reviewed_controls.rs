@@ -36,6 +36,7 @@ fn synthetic_record() -> ReviewedAgentCliControls {
 fn controlled_resource() -> AgentExecutionResourceDescriptor {
     let controls = synthetic_record();
     AgentExecutionResourceDescriptor {
+        host_cli: None,
         project_workspace_copy: false,
         resource_set_id: controls.resource_set_id.clone(),
         executable_identity: format!("sha256:{}", controls.executable_sha256),
@@ -226,4 +227,74 @@ async fn reviewed_controls_changed_provider_is_fenced_before_admission_and_at_de
         assert!(poll(&registry).await.is_none());
         assert_eq!(prepared.binding(), &binding);
     }
+}
+
+#[tokio::test]
+async fn native_host_resource_prepares_and_dispatches_without_review_gate() {
+    let registry = registry(true).await;
+    let adapter = webcodex_core::cli_adapter::cli_adapters(&[])
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == "workbuddy")
+        .unwrap();
+    let host = webcodex_core::host_cli::HostCliRegistration {
+        adapter: adapter.clone(),
+        executable_sha256: "e".repeat(64),
+        worker_sid: String::new(),
+    };
+    let mut facts = resources();
+    facts[0].provider = Some(AgentCliProvider::WorkBuddy);
+    facts[0].manifest_hash = host.manifest(&facts[0].resource_set_id).unwrap();
+    facts[0].host_cli = Some(host);
+    registry
+        .register_with_auth(registration(true, facts.clone()), Some(&access()))
+        .await
+        .unwrap();
+    let (reservation, mut start) = reserved_start(&registry, 0).await;
+    let (args, stdin) = adapter
+        .invocation_selected(None, None, "independent task")
+        .unwrap();
+    start.process.args = args.clone();
+    start.stdin = Some(stdin);
+    start.binding.resource_manifest_hash = facts[0].manifest_hash.clone();
+    start.binding.launch_intent_hash =
+        compute_launch_intent_hash(&start.process, start.stdin.as_deref(), start.timeout_secs)
+            .unwrap();
+    let mut wrong = start.clone();
+    wrong.process.executable = format!("sha256:{}", "f".repeat(64));
+    wrong.binding.launch_intent_hash =
+        compute_launch_intent_hash(&wrong.process, wrong.stdin.as_deref(), wrong.timeout_secs)
+            .unwrap();
+    assert_eq!(
+        registry
+            .prepare_agent_execution(&access(), &reservation, wrong, "controller".into())
+            .await
+            .err()
+            .unwrap(),
+        "agent_execution_resource_changed"
+    );
+    let prepared = registry
+        .prepare_agent_execution(&access(), &reservation, start.clone(), "controller".into())
+        .await
+        .unwrap();
+    let admission = Admission(AtomicUsize::new(0));
+    let dispatched = registry
+        .dispatch_prepared_agent_execution(&access(), &prepared, &admission)
+        .await
+        .unwrap();
+    assert!(dispatched.dispatched);
+    let replay = registry
+        .dispatch_prepared_agent_execution(&access(), &prepared, &admission)
+        .await
+        .unwrap();
+    assert!(!replay.dispatched);
+    assert_eq!(replay.job.job_id, dispatched.job.job_id);
+    let request = poll(&registry).await.unwrap();
+    let RunnerOperation::Job(RunnerJobOperation::StartIsolatedProcess(operation)) =
+        request.decode_operation().unwrap()
+    else {
+        panic!("original process start expected")
+    };
+    assert_eq!(operation.start.process.args, args);
+    assert!(poll(&registry).await.is_none());
 }

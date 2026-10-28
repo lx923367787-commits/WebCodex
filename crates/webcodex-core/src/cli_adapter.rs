@@ -5,6 +5,40 @@ use std::collections::BTreeSet;
 
 pub const MAX_CLI_ADAPTERS: usize = 32;
 
+/// Explicit names retain their historical JSON string encoding. Null/omission
+/// means the CLI's own configured/default selection, never a fake model name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct CliModelSelection(Option<String>);
+impl CliModelSelection {
+    pub fn named(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+    pub fn is_cli_default(&self) -> bool {
+        self.0.is_none()
+    }
+}
+impl From<&str> for CliModelSelection {
+    fn from(value: &str) -> Self {
+        Self(Some(value.into()))
+    }
+}
+impl From<String> for CliModelSelection {
+    fn from(value: String) -> Self {
+        Self(Some(value))
+    }
+}
+impl From<&String> for CliModelSelection {
+    fn from(value: &String) -> Self {
+        Self(Some(value.clone()))
+    }
+}
+impl From<&CliModelSelection> for CliModelSelection {
+    fn from(value: &CliModelSelection) -> Self {
+        value.clone()
+    }
+}
+
 pub fn valid_cli_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -61,6 +95,8 @@ pub struct CliInvocation {
     #[serde(default)]
     pub prefix_args: Vec<String>,
     pub model_flag: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_configured_default: bool,
     pub effort_flag: Option<String>,
     /// Optional native config key; the selected value is JSON/TOML quoted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,24 +215,6 @@ impl CliAdapter {
                     .prefix_args
                     .iter()
                     .chain(&invocation.fixed_args)
-                    .any(|arg| {
-                        matches!(
-                            arg.split('=')
-                                .next()
-                                .unwrap_or(arg)
-                                .to_ascii_lowercase()
-                                .as_str(),
-                            "--dangerously-skip-permissions"
-                                | "--dangerously-bypass-approvals-and-sandbox"
-                                | "--yolo"
-                                | "--allow-all-tools"
-                                | "--no-sandbox"
-                        )
-                    })
-                || invocation
-                    .prefix_args
-                    .iter()
-                    .chain(&invocation.fixed_args)
                     .any(|s| {
                         s == "--"
                             || s.split('=').next() == Some(invocation.model_flag.as_str())
@@ -218,29 +236,43 @@ impl CliAdapter {
         effort: Option<&str>,
         instruction: &str,
     ) -> Result<(Vec<String>, String), String> {
+        self.invocation_selected(Some(model), effort, instruction)
+    }
+
+    pub fn invocation_selected(
+        &self,
+        model: Option<&str>,
+        effort: Option<&str>,
+        instruction: &str,
+    ) -> Result<(Vec<String>, String), String> {
         self.validate()?;
         let invocation = self
             .invocation
             .as_ref()
             .ok_or("cli_adapter_invocation_unavailable")?;
-        if model.trim().is_empty()
-            || model.starts_with(['-', '@'])
-            || model.len() > 256
-            || model.chars().any(char::is_control)
-            || effort.is_some_and(|e| {
-                e.trim().is_empty()
-                    || e.starts_with(['-', '@'])
-                    || e.len() > 64
-                    || e.chars().any(char::is_control)
-            })
-            || instruction.is_empty()
+        if model.is_none() && !invocation.supports_configured_default {
+            return Err("cli_adapter_model_required".into());
+        }
+        if model.is_some_and(|model| {
+            model.trim().is_empty()
+                || model.starts_with(['-', '@'])
+                || model.len() > 256
+                || model.chars().any(char::is_control)
+        }) || effort.is_some_and(|e| {
+            e.trim().is_empty()
+                || e.starts_with(['-', '@'])
+                || e.len() > 64
+                || e.chars().any(char::is_control)
+        }) || instruction.is_empty()
             || instruction.len() > 512 * 1024
             || instruction.contains('\0')
         {
             return Err("cli_adapter_invalid_selection".into());
         }
         let mut args = invocation.prefix_args.clone();
-        args.extend([invocation.model_flag.clone(), model.into()]);
+        if let Some(model) = model {
+            args.extend([invocation.model_flag.clone(), model.into()]);
+        }
         if let Some(effort) = effort {
             let flag = invocation
                 .effort_flag
@@ -310,6 +342,7 @@ mod tests {
             invocation: Some(CliInvocation {
                 prefix_args: vec!["run".into()],
                 model_flag: "--model".into(),
+                supports_configured_default: false,
                 effort_flag: None,
                 effort_config_key: None,
                 effort_required: false,
@@ -330,5 +363,40 @@ mod tests {
             .is_err());
         assert!(cli_adapters(&[custom.clone(), custom]).is_err());
         assert!(!valid_cli_id("cmd.exe /c whoami"));
+    }
+    #[test]
+    fn configured_default_omits_override_and_preserves_explicit_encoding() {
+        let selected: CliModelSelection = serde_json::from_str("null").unwrap();
+        assert!(selected.is_cli_default());
+        assert_eq!(
+            serde_json::to_string(&CliModelSelection::from("real-model")).unwrap(),
+            "\"real-model\""
+        );
+        let adapter = cli_adapters(&[])
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == "workbuddy")
+            .unwrap();
+        let (args, _) = adapter
+            .invocation_selected(selected.named(), None, "fixture")
+            .unwrap();
+        assert!(!args
+            .iter()
+            .any(|a| a == "--model" || a == "--effort" || a.is_empty()));
+        assert!(adapter
+            .invocation_selected(Some(""), None, "fixture")
+            .is_err());
+        let mut strict = adapter;
+        strict
+            .invocation
+            .as_mut()
+            .unwrap()
+            .supports_configured_default = false;
+        assert_eq!(
+            strict
+                .invocation_selected(None, None, "fixture")
+                .unwrap_err(),
+            "cli_adapter_model_required"
+        );
     }
 }

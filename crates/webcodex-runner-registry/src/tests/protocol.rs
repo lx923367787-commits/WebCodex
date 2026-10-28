@@ -450,6 +450,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
             host_context: None,
             capabilities: RunnerCapabilities {
                 agent_isolated_execution_v1: true,
+                agent_program_execution_v1: true,
                 shell: true,
                 file_read: true,
                 file_write: true,
@@ -508,6 +509,7 @@ async fn runner_supports_recognizes_all_protocol_capability_names() {
                 native_tool_plugins: true,
                 managed_ssh_resources: true,
                 runner_config_control: true,
+                tool_connections: true,
             },
             policy: Some(crate::runner_protocol::RunnerPolicySummary {
                 ..Default::default()

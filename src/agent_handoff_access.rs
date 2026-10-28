@@ -12,19 +12,35 @@ pub(crate) fn ensure(
     tool: &str,
     arguments: &Value,
 ) -> Result<(), ToolResult> {
+    // Handoff scopes private Goal data, not general runtime capabilities.
+    if !tool.starts_with("goal_") {
+        return Ok(());
+    }
     let scope = db
         .agent_run_task_goal(binding)
         .map_err(|e| denial(e.code()))?;
     let Some(goal_id) = scope else {
         return Ok(());
     };
+    if tool == "goal_bootstrap"
+        && arguments.get("goal_id").is_none_or(Value::is_null)
+        && db
+            .agent_enrollment_goal(binding)
+            .map_err(|error| denial(error.code()))?
+            .as_deref()
+            == Some(goal_id.as_str())
+    {
+        return Ok(());
+    }
     if matches!(
         tool,
         "agent_identity"
             | "agent_assignment"
+            | "bind_chat_task_goal"
             | "agent_private"
             | "agent_meeting"
             | "agent_project_files"
+            | "agent_process"
     ) || crate::agent_team::supports(tool)
         || crate::tool_runtime::named_project_files::supports(tool)
     {

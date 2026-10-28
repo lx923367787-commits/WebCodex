@@ -65,6 +65,7 @@ struct CliStart {
     source_task_id: String,
     call_index: u32,
     idempotency_key: String,
+    #[serde(default = "crate::agent_team::default_thinking_selection")]
     fallback_thinking_profile_id: String,
     #[serde(default = "task_timeout")]
     timeout_secs: u64,
@@ -228,7 +229,7 @@ fn cli_process(
 
 pub(crate) fn fixed_cli_process(
     provider: &str,
-    model: &str,
+    model: impl Into<webcodex_core::cli_adapter::CliModelSelection>,
     effort: Option<&str>,
     instruction: &str,
 ) -> Result<(String, Vec<String>, String), ToolResult> {
@@ -238,7 +239,7 @@ pub(crate) fn fixed_cli_process(
 pub(crate) fn cli_process_with_adapter(
     selected: Option<&webcodex_core::cli_adapter::CliAdapter>,
     provider: &str,
-    model: &str,
+    model: impl Into<webcodex_core::cli_adapter::CliModelSelection>,
     effort: Option<&str>,
     instruction: &str,
 ) -> Result<(String, Vec<String>, String), ToolResult> {
@@ -253,7 +254,8 @@ pub(crate) fn cli_process_with_adapter(
                 "Select a discovered CLI with a configured invocation adapter",
             )
         })?;
-    let (args, stdin) = adapter.invocation(model, effort, instruction).map_err(|code| {
+    let model = model.into();
+    let (args, stdin) = adapter.invocation_selected(model.named(), effort, instruction).map_err(|code| {
         let code = if code == "cli_adapter_effort_required" || (effort.is_some_and(|e| e.trim().is_empty())) {
             "team_effort_required"
         } else { &code };
@@ -485,7 +487,7 @@ impl ToolRuntime {
                             std::iter::once(&plan.plan.manager).chain(plan.plan.subagents.iter())
                         {
                             match db.read_agent_task(&principal, &member.task_id) {
-                                Ok(task) if task.summary.referenced_project_id.as_deref()==Some(project.as_str()) => task_summaries.push(json!({"task_id":task.summary.task_id,"title":task.summary.title,"state":task.summary.state})),
+                                Ok(task) if task.summary.referenced_project_id.as_deref()==Some(project.as_str()) => task_summaries.push(json!({"task_id":task.summary.task_id,"title":task.summary.title,"state":task.summary.state,"activity":db.public_team_activity(&principal,&project,&member.task_id).ok()})),
                                 _ => return error("team_source_unavailable", "A team task is no longer available"),
                             }
                         }

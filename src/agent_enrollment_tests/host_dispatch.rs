@@ -210,6 +210,34 @@ fn owner(f: &Fixture) -> CommunicationPrincipal {
 }
 
 #[tokio::test]
+async fn host_dispatch_http_without_profile_reserves_and_claims_original_member_once() {
+    let f = Fixture::new();
+    let manager = manager(&f, "no-profile").await;
+    let child = member(&f, &manager);
+    let mut request = reserve_request(&f, &manager, &child);
+    request
+        .as_object_mut()
+        .unwrap()
+        .remove("thinking_profile_id");
+    let (code, first) = f.control(CONTROL, request.clone()).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_public(&first);
+    assert_eq!(first["binding"]["thinking_profile_id"], "");
+    let (code, repeated) = f.control(CONTROL, request).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(first["binding"], repeated["binding"]);
+    let queue = first["binding"]["queue_id"].as_str().unwrap();
+    let claim = queue_request(&f, &manager, queue, "agent_host_dispatch_claim");
+    let (code, issued) = f.control(CONTROL, claim.clone()).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(issued["dispatch_permitted"], true);
+    let (code, replay) = f.control(CONTROL, claim).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(replay["dispatch_permitted"], false);
+    assert!(replay["claim_grant"].is_null());
+}
+
+#[tokio::test]
 async fn host_dispatch_http_prepare_read_claim_replay_and_native_attach_are_exact() {
     let f = Fixture::new();
     let manager = manager(&f, "first").await;

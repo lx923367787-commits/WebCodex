@@ -175,7 +175,7 @@ pub(crate) async fn call(
 struct SelectedStart {
     project: String,
     cli_id: String,
-    model: String,
+    model: Option<String>,
     effort: Option<String>,
     instruction: String,
     idempotency_key: String,
@@ -229,29 +229,26 @@ pub(crate) async fn start_selected(
     let Some(invocation) = adapter.invocation.as_ref() else {
         return denial("local_cli_native_arguments_required");
     };
-    if capabilities.status != "ready" || !capabilities.models.contains(&request.model) {
+    if request
+        .model
+        .as_ref()
+        .is_some_and(|model| capabilities.status != "ready" || !capabilities.models.contains(model))
+    {
         return denial("local_cli_model_not_discovered");
     }
-    let levels = if capabilities.model_efforts.is_empty() {
-        &capabilities.efforts
-    } else {
-        let Some(levels) = capabilities.model_efforts.get(&request.model) else {
-            return denial("local_cli_model_not_discovered");
+    if let Some(effort) = request.effort.as_ref() {
+        let levels = match request.model.as_ref() {
+            Some(model) if !capabilities.model_efforts.is_empty() => {
+                capabilities.model_efforts.get(model)
+            }
+            _ => Some(&capabilities.efforts),
         };
-        levels
-    };
-    if request
-        .effort
-        .as_ref()
-        .is_some_and(|effort| !levels.contains(effort))
-        || (request.effort.is_none()
-            && !capabilities.model_efforts.is_empty()
-            && !levels.is_empty())
-    {
-        return denial("local_cli_effort_not_discovered");
+        if capabilities.status != "ready" || !levels.is_some_and(|levels| levels.contains(effort)) {
+            return denial("local_cli_effort_not_discovered");
+        }
     }
-    let (argv, stdin) = match adapter.invocation(
-        &request.model,
+    let (argv, stdin) = match adapter.invocation_selected(
+        request.model.as_deref(),
         request.effort.as_deref(),
         &request.instruction,
     ) {

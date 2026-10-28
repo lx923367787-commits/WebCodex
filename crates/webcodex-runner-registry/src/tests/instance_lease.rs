@@ -655,6 +655,7 @@ async fn lease_replacement_transfers_exact_detached_inventory_to_new_instance() 
             error: record.error.clone(),
             command_execution_state: record.command_execution_state,
             context: crate::runner_protocol::ShellJobContext {
+                agent_program: None,
                 agent_execution: None,
                 document: None,
                 runtime_project_id: record.project_id.clone(),

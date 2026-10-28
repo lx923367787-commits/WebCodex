@@ -31,7 +31,7 @@ use webcodex_core::coding_agent::{
     CODING_AGENT_MAX_INVENTORY_RUNS, CODING_AGENT_MAX_PROVIDERS,
     CODING_AGENT_MAX_PROVIDER_NAME_BYTES,
 };
-use webcodex_core::mcp_gateway::validate_providers;
+use webcodex_core::mcp_gateway::{validate_providers, McpGatewayProvider};
 use webcodex_core::runner_protocol::{
     RunnerRegisterRequest, RunnerView, RUNNER_JOB_CONCURRENCY_MAX, RUNNER_JOB_CONCURRENCY_MIN,
 };
@@ -127,6 +127,10 @@ fn reject_same_instance_feature_downgrade(
         ));
     }
     Ok(())
+}
+
+fn same_mcp_gateway_inventory(left: &[McpGatewayProvider], right: &[McpGatewayProvider]) -> bool {
+    left.len() == right.len() && left.iter().all(|provider| right.contains(provider))
 }
 
 struct StreamingSessionRegistration {
@@ -321,12 +325,26 @@ impl RunnerRegistry {
             validate_providers(providers)
                 .map_err(|error| format!("invalid MCP gateway provider inventory: {error}"))?;
         }
+        let mcp_revision = policy
+            .as_ref()
+            .and_then(|policy| policy.mcp_gateway_revision);
+        if mcp_revision.is_some() {
+            if !runner_features.supports(RunnerFeature::ToolConnections) {
+                return Err("MCP gateway revision requires tool_connections capability".into());
+            }
+            if policy
+                .as_ref()
+                .is_none_or(|policy| policy.mcp_gateway_providers.is_none())
+            {
+                return Err("MCP gateway revision requires a complete provider inventory".into());
+            }
+        }
         let now = now_ts();
         // Registration establishes liveness only. Project routing becomes authoritative
         // exclusively through the bounded paged inventory protocol.
         let projects = Vec::new();
         let project_inventory = pending_inventory_state(0);
-        let record = RunnerRecord {
+        let mut record = RunnerRecord {
             client_id: client_id.clone(),
             runner_instance_id: runner_instance_id.clone(),
             display_name: trim_string(body.display_name),
@@ -459,6 +477,12 @@ impl RunnerRegistry {
             &runner_features,
             RunnerFeature::NativeToolPlugins,
         )?;
+        reject_same_instance_feature_downgrade(
+            inner.runners.get(&client_id),
+            &runner_instance_id,
+            &runner_features,
+            RunnerFeature::ToolConnections,
+        )?;
         if inner.runners.get(&client_id).is_some_and(|existing| {
             existing.runner_instance_id == runner_instance_id
                 && existing.coding_agent_providers != coding_agent_providers
@@ -468,20 +492,51 @@ impl RunnerRegistry {
                     .to_string(),
             );
         }
-        if inner.runners.get(&client_id).is_some_and(|existing| {
-            existing.runner_instance_id == runner_instance_id
-                && existing
-                    .policy
-                    .as_ref()
-                    .and_then(|policy| policy.mcp_gateway_providers.as_ref())
-                    != record
-                        .policy
-                        .as_ref()
-                        .and_then(|policy| policy.mcp_gateway_providers.as_ref())
-        }) {
-            return Err(
-                "same runner instance cannot change MCP gateway provider inventory".to_string(),
-            );
+        if let Some(existing) = inner
+            .runners
+            .get(&client_id)
+            .filter(|existing| existing.runner_instance_id == runner_instance_id)
+        {
+            let current_inventory = existing
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.mcp_gateway_providers.as_ref());
+            let incoming_inventory = record
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.mcp_gateway_providers.as_ref());
+            let current_revision = existing
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.mcp_gateway_revision);
+            if let Some(revision) = mcp_revision {
+                match revision.cmp(&current_revision.unwrap_or(0)) {
+                    std::cmp::Ordering::Less => {
+                        // A late registration can renew the transport lease but
+                        // must not undo a newer management/status observation.
+                        let policy = record.policy.as_mut().expect("validated inventory");
+                        policy.mcp_gateway_providers = current_inventory.cloned();
+                        policy.mcp_gateway_revision = current_revision;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if !same_mcp_gateway_inventory(
+                            current_inventory.map(Vec::as_slice).unwrap_or_default(),
+                            incoming_inventory.map(Vec::as_slice).unwrap_or_default(),
+                        ) {
+                            return Err("MCP gateway inventory revision conflicts with its accepted snapshot".into());
+                        }
+                    }
+                    std::cmp::Ordering::Greater => {}
+                }
+            } else if current_inventory != incoming_inventory {
+                // Legacy registration carries no ordering proof and remains
+                // immutable, even if other optional fields change.
+                return Err(
+                    "same runner instance cannot change MCP gateway provider inventory".into(),
+                );
+            } else if let Some(policy) = record.policy.as_mut() {
+                policy.mcp_gateway_revision = current_revision;
+            }
         }
         // A successful different-instance registration is an explicit lease
         // takeover. `last_seen` remains a passive liveness grace for temporary
@@ -551,7 +606,6 @@ impl RunnerRegistry {
         // Same-instance re-register is a transport reconnect: keep the
         // original registration time; `connected_at` reflects the new
         // connection. A new instance starts a fresh lifecycle.
-        let mut record = record;
         if let Some(existing) = inner.runners.get(&client_id) {
             if existing.runner_instance_id == runner_instance_id {
                 record.registered_at = existing.registered_at;
@@ -799,6 +853,71 @@ impl RunnerRegistry {
         }
         runner.last_seen = now_ts();
         Ok(())
+    }
+
+    /// Replace the current process's MCP routing inventory from a validated
+    /// management or status response. The caller must correlate that response
+    /// to this exact Runner instance. Revision-aware registration uses the
+    /// same ordering rule to recover a lost management response on reconnect.
+    ///
+    /// Revisions belong to the Runner process, not response arrival order. A
+    /// stale response or an identical replay returns false. A conflicting
+    /// same-revision snapshot is rejected. This changes neither liveness nor
+    /// queued/in-flight request identities, and never retries provider calls.
+    pub async fn replace_mcp_gateway_inventory(
+        &self,
+        client_id: &str,
+        expected_instance_id: &str,
+        access: Option<&crate::RunnerAccess>,
+        revision: u64,
+        inventory: Vec<McpGatewayProvider>,
+    ) -> Result<bool, String> {
+        validate_id(client_id, "client_id")?;
+        validate_runner_instance_id(expected_instance_id)?;
+        validate_providers(&inventory)
+            .map_err(|error| format!("invalid MCP gateway provider inventory: {error}"))?;
+
+        let mut inner = self.inner.lock().await;
+        let runner = inner
+            .runners
+            .get_mut(client_id)
+            .ok_or_else(|| format!("unknown shell client: {client_id}"))?;
+        assert_runner_access(access, runner)?;
+        if runner.runner_instance_id != expected_instance_id {
+            return Err("stale Runner instance for MCP gateway inventory".to_string());
+        }
+        if !runner
+            .runner_features
+            .supports(RunnerFeature::ToolConnections)
+        {
+            return Err("capability_unavailable: tool_connections".into());
+        }
+        let current_revision = runner
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.mcp_gateway_revision)
+            .unwrap_or(0);
+        if revision < current_revision {
+            return Ok(false);
+        }
+        if revision == current_revision {
+            let current = runner
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.mcp_gateway_providers.as_deref())
+                .unwrap_or_default();
+            if same_mcp_gateway_inventory(current, &inventory) {
+                return Ok(false);
+            }
+            return Err(
+                "MCP gateway inventory revision conflicts with its accepted snapshot".into(),
+            );
+        }
+
+        let policy = runner.policy.get_or_insert_with(Default::default);
+        policy.mcp_gateway_providers = Some(inventory);
+        policy.mcp_gateway_revision = Some(revision);
+        Ok(true)
     }
 
     /// Test-only hook to force a runner's `last_seen` so liveness/stale

@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { describe, expect, it, vi } from "vitest";
 import { AiOffice } from "./AiOffice";
 import { OfficePolicyPanel, officeError } from "./OfficePolicyPanel";
-import type { AiOfficeApi, CliCatalog, OfficePolicy, OfficeSnapshot } from "./types";
+import type { AiOfficeApi, OfficePolicy, OfficeSnapshot } from "./types";
 
 const policy: OfficePolicy = {
   revision: 7, mode: "auto", subagents: { min: 0, max: 4 }, cli_per_agent: { min: 0, max: 2 },
@@ -27,75 +27,6 @@ function apiFixture(): AiOfficeApi {
 }
 
 describe("AI office", () => {
-  it("allows an installed CLI to be selected for native arguments without an automatic adapter", async () => {
-    const api = apiFixture();
-    api.discoverCli = vi.fn(async () => [{ providerId: "manual-cli", label: "Native CLI", installed: true, native: true, adapterAvailable: false, status: "adapter_required", message: "可使用原生参数调用" }]);
-    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, providers: [] } }} api={api} onSaved={vi.fn()} />);
-    await screen.findByLabelText("启用 Native CLI");
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    expect(screen.getByLabelText("启用 Native CLI")).toBeEnabled();
-    fireEvent.click(screen.getByLabelText("启用 Native CLI"));
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 7, expect.objectContaining({ providers: [expect.objectContaining({ provider_id: "manual-cli", enabled: true })] })));
-    expect(api.refreshCli).not.toHaveBeenCalled();
-  });
-  it("limits reasoning options to the selected model and clears stale effort", async () => {
-    const api = apiFixture();
-    api.refreshCli = vi.fn<AiOfficeApi["refreshCli"]>(async (id) => ({ providerId: id, label: "WorkBuddy", installed: true, version: "test", models: ["model-a", "model-b", "model-c"], efforts: ["low", "high"], modelEfforts: { "model-a": ["low"], "model-b": ["high"], "model-c": [] }, source: "live_catalog", status: "ready", message: "Model catalog", checkedAt: "now", accountAvailabilityVerified: false }));
-    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "刷新 WorkBuddy 模型列表" }));
-    await screen.findByText("Model catalog");
-    const model = screen.getByLabelText("WorkBuddy 模型");
-    const effort = screen.getByLabelText("WorkBuddy 思考强度");
-    fireEvent.change(model, { target: { value: "model-a" } });
-    expect(within(effort).queryByText("high")).not.toBeInTheDocument();
-    fireEvent.change(effort, { target: { value: "low" } });
-    fireEvent.change(model, { target: { value: "model-b" } });
-    expect(effort).toHaveValue("");
-    expect(within(effort).queryByText("low")).not.toBeInTheDocument();
-    expect(within(effort).getByText("high")).toBeInTheDocument();
-    fireEvent.change(model, { target: { value: "model-c" } });
-    expect(effort).toBeDisabled();
-  });
-  it("renders discovered third-party CLIs and keeps missing saved selections explicit", async () => {
-    const api = apiFixture();
-    api.discoverCli = vi.fn(async () => [{ providerId: "custom-cli", label: "Custom CLI", installed: true, native: true, adapterAvailable: true, status: "discovered", message: "已发现" }]);
-    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, providers: [] } }} api={api} onSaved={vi.fn()} />);
-    await screen.findByText("Custom CLI");
-    expect(screen.queryByText("WorkBuddy")).not.toBeInTheDocument();
-    expect(screen.queryByText("Antigravity")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    fireEvent.click(screen.getByLabelText("启用 Custom CLI"));
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 7, expect.objectContaining({ providers: [expect.objectContaining({ provider_id: "custom-cli", enabled: true })] })));
-  });
-
-  it("reports an empty or failed scan without inventing a provider", async () => {
-    const api = apiFixture();
-    api.discoverCli = vi.fn().mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("扫描失败"));
-    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, providers: [] } }} api={api} onSaved={vi.fn()} />);
-    await screen.findByText(/未发现本机 CLI/);
-    expect(screen.queryByLabelText(/启用 /)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "重新扫描本机 CLI" }));
-    await screen.findByText("扫描失败");
-  });
-
-  it("ignores a late capability response after rescanning and supports arbitrary registry keys", async () => {
-    const api = apiFixture();
-    const entry = (providerId: string, label: string) => ({ providerId, label, installed: true, native: true, adapterAvailable: true, status: "discovered", message: "已发现" });
-    api.discoverCli = vi.fn().mockResolvedValueOnce([entry("old-cli", "Old CLI")]).mockResolvedValueOnce([entry("constructor", "New CLI")]);
-    let finish!: (catalog: CliCatalog) => void;
-    api.refreshCli = vi.fn(() => new Promise<CliCatalog>((resolve) => { finish = resolve; }));
-    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, providers: [] } }} api={api} onSaved={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "刷新 Old CLI 模型列表" }));
-    fireEvent.click(screen.getByRole("button", { name: "重新扫描本机 CLI" }));
-    await screen.findByText("New CLI");
-    await act(async () => finish({ providerId: "old-cli", label: "Old CLI", installed: true, version: "1", models: ["stale-model"], efforts: [], source: "installed_help", status: "ready", message: "old result", checkedAt: "now", accountAvailabilityVerified: false }));
-    expect(screen.queryByText("stale-model")).not.toBeInTheDocument();
-    expect(screen.queryByText("old result")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "刷新 New CLI 模型列表" })).toBeEnabled();
-  });
   it("opens real team observations using the selected project identity", async () => {
     const api = apiFixture();
     api.team = vi.fn(async () => ({ plans: [], total_count: 0, next_offset: null }));
@@ -121,19 +52,6 @@ describe("AI office", () => {
     expect(api.evaluatePlan).not.toHaveBeenCalled();
   });
 
-  it("keeps idle projects configurable and sends their identity plus revision on save", async () => {
-    const api = apiFixture();
-    render(<AiOffice api={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: /闲置项目/ }));
-    await screen.findByText("这里安静，随时准备开工");
-    fireEvent.click(screen.getByRole("button", { name: "团队策略" }));
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最少数量"), { target: { value: "1" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("idle", 7, expect.objectContaining({ mode: "custom", subagents: { min: 1, max: 4 } })));
-    expect(await screen.findByText("已保存到「闲置项目」，策略版本 8")).toBeInTheDocument();
-  });
-
   it("labels every demo as simulated", async () => {
     const api = apiFixture();
     api.snapshot = vi.fn<AiOfficeApi["snapshot"]>(async () => ({ ...snapshot, source: "demo" }));
@@ -154,146 +72,63 @@ describe("AI office", () => {
     expect(screen.getByRole("button", { name: /活跃项目/ })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "查看执行员的任务" })).toBeInTheDocument();
   });
+
 });
-
-describe("office policy", () => {
-  it("rejects impossible minimum CLI budgets but keeps feasible upper ranges", async () => {
+describe("optional collaboration", () => {
+  it("removes quotas and pinned-model controls even for an old custom policy", async () => {
     const api = apiFixture();
-    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最多数量"), { target: { value: "32" } });
-    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最少数量"), { target: { value: "16" } });
-    fireEvent.change(screen.getByLabelText("每个 Agent 的 CLI 调用最少数量"), { target: { value: "2" } });
-    expect(screen.getByRole("alert")).toHaveTextContent("最低分工需要 34 次 CLI");
-    expect(screen.getByRole("button", { name: "保存团队策略" })).toBeDisabled();
+    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, mode: "custom", subagents: { min: 2, max: 4 } } }} api={api} onSaved={vi.fn()} />);
+    expect(await screen.findByRole("button", { name: "刷新 WorkBuddy 模型列表" })).toBeVisible();
+    expect(screen.getByText(/不强制调用，不设置人数/)).toBeVisible();
+    expect(screen.getByText(/协作采用软约定：各 Agent 和 CLI 各自维护记忆、执行目标和验收标准/)).toBeVisible();
+    expect(screen.queryByText(/仅隔离各自/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存团队策略" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "配置本机 CLI 执行" })).not.toBeInTheDocument();
+    expect(api.discoverCli).toHaveBeenCalledWith("active");
     expect(api.savePolicy).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最少数量"), { target: { value: "15" } });
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 7, expect.objectContaining({ subagents: { min: 15, max: 32 }, cli_per_agent: { min: 2, max: 2 } })));
   });
-
-  it("allows the default policy to be explicitly saved before its first use", async () => {
-    const api = apiFixture();
-    render(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, revision: 0 } }} api={api} onSaved={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "保存团队策略" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "高级诊断" }));
-    expect(screen.getByRole("button", { name: /验证委派计划/ })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 0, expect.objectContaining({ mode: "auto", subagents: { min: 0, max: 4 }, cli_per_agent: { min: 0, max: 2 } })));
-  });
-
-  it("shows native read-only guidance without retrying or confirming an unknown save", async () => {
-    const api = apiFixture();
-    const nextAction = "只读重新查询原项目策略以核实结果；保存可能已提交，不要自动重发或更新版本号后重存旧设置。";
-    vi.mocked(api.savePolicy).mockRejectedValue({ code: "webcodex_contract_invalid", message: "Server 团队策略回执未能核实。", next_action: nextAction, details: { diagnostic: "PRIVATE_DETAILS" } });
-    const onSaved = vi.fn();
-    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={onSaved} />);
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最多数量"), { target: { value: "6" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("请先点击「载入最新策略」核查。");
-    expect(alert).toHaveTextContent(nextAction);
-    expect(alert).not.toHaveTextContent("PRIVATE_DETAILS");
-    expect(api.savePolicy).toHaveBeenCalledExactlyOnceWith("active", 7, expect.objectContaining({ subagents: { min: 0, max: 6 } }));
-    expect(api.snapshot).not.toHaveBeenCalled();
-    expect(onSaved).not.toHaveBeenCalled();
-    expect(screen.getByText("当前版本 7 · 活跃项目")).toBeInTheDocument();
-    expect(screen.getByLabelText("总经理可委派的子 Agent最多数量")).toHaveValue(6);
-    expect(screen.queryByText(/已保存到/)).not.toBeInTheDocument();
-
-    vi.mocked(api.snapshot).mockResolvedValue({ ...snapshot, projects: [{ ...snapshot.projects[0], policy: { ...policy, revision: 8 } }] });
-    fireEvent.click(within(alert).getByRole("button", { name: "载入最新策略（替换草稿）" }));
-    await screen.findByText("已载入最新策略，本地草稿已替换。");
-    expect(api.snapshot).toHaveBeenCalledExactlyOnceWith("active");
-    expect(api.savePolicy).toHaveBeenCalledTimes(1);
-    expect(onSaved).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ revision: 8 }));
-    expect(screen.queryByText(/已保存到/)).not.toBeInTheDocument();
-  });
-
-  it("only formats bounded textual next actions and never serializes error details", () => {
-    expect(officeError({ message: "未能核实", next_action: "  只读核查  ", details: { token: "PRIVATE_DETAILS" } })).toBe("未能核实 只读核查");
-    for (const next_action of [null, {}, [], 42, " ", "x".repeat(2049)]) {
-      expect(officeError({ message: "未能核实", next_action, details: { token: "PRIVATE_DETAILS" } }, "载入最新策略：")).toBe("未能核实");
-    }
-    expect(officeError(new Error("原有错误"))).toBe("原有错误");
-    expect(officeError("原有文本错误")).toBe("原有文本错误");
-  });
-
-  it("restores valid defaults when switching from invalid custom ranges to autonomous mode", async () => {
+  it("shows discovered capability without claiming account or execution readiness", async () => {
     const api = apiFixture();
     render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最少数量"), { target: { value: "5" } });
-    expect(screen.getByText("最少数量不能大于最多数量。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存团队策略" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: /总经理自主安排 默认/ }));
-    expect(screen.getByLabelText("总经理可委派的子 Agent最少数量")).toHaveValue(0);
-    expect(screen.getByLabelText("总经理可委派的子 Agent最多数量")).toHaveValue(4);
-    expect(screen.getByRole("button", { name: "保存团队策略" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 7, expect.objectContaining({ mode: "auto", subagents: { min: 0, max: 4 }, cli_per_agent: { min: 0, max: 2 } })));
-  });
-
-  it("preserves dirty values after a revision conflict and only replaces them on explicit reload", async () => {
-    const api = apiFixture();
-    api.savePolicy = vi.fn(async () => { throw new Error("策略版本冲突：请载入最新版本。"); });
-    const onSaved = vi.fn();
-    const { rerender } = render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={onSaved} />);
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
-    fireEvent.change(screen.getByLabelText("总经理可委派的子 Agent最多数量"), { target: { value: "6" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    await screen.findByText("策略版本冲突：请载入最新版本。");
-    rerender(<OfficePolicyPanel project={{ ...snapshot.projects[0], policy: { ...policy, revision: 8 } }} api={api} onSaved={onSaved} />);
-    expect(screen.getByLabelText("总经理可委派的子 Agent最多数量")).toHaveValue(6);
-    expect(onSaved).not.toHaveBeenCalled();
-    api.snapshot = vi.fn(async () => ({ ...snapshot, projects: [{ ...snapshot.projects[0], policy: { ...policy, revision: 8 } }] }));
-    fireEvent.click(screen.getByRole("button", { name: "载入最新策略（替换草稿）" }));
-    await screen.findByText("已载入最新策略，本地草稿已替换。");
-    expect(screen.getByLabelText("总经理可委派的子 Agent最多数量")).toHaveValue(4);
-    expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ revision: 8 }));
-  });
-
-  it("shows CLI discovery loading, preserves actual model/effort values, and qualifies account availability", async () => {
-    const api = apiFixture();
-    let finish!: (catalog: CliCatalog) => void;
-    api.refreshCli = vi.fn(() => new Promise<CliCatalog>((resolve) => { finish = resolve; }));
-    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: /我来设定边界/ }));
     fireEvent.click(await screen.findByRole("button", { name: "刷新 WorkBuddy 模型列表" }));
-    expect(screen.getByRole("button", { name: "刷新 WorkBuddy 模型列表" })).toBeDisabled();
-    expect(screen.getByText("发现中…")).toBeInTheDocument();
-    await act(async () => finish({ providerId: "workbuddy", label: "WorkBuddy", installed: true, version: "1.2", models: ["actual-model"], efforts: ["actual-effort"], source: "installed_help", status: "ready", message: "已读取本机帮助", checkedAt: "now", accountAvailabilityVerified: false }));
-    fireEvent.change(screen.getByLabelText("WorkBuddy 模型"), { target: { value: "actual-model" } });
-    fireEvent.change(screen.getByLabelText("WorkBuddy 思考强度"), { target: { value: "actual-effort" } });
-    expect(screen.getByText(/账号可用性未核验/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "保存团队策略" }));
-    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith("active", 7, expect.objectContaining({ providers: expect.arrayContaining([expect.objectContaining({ provider_id: "workbuddy", model: "actual-model", effort: "actual-effort" })]) })));
-  });
-
-  it("does not invent model options when discovery fails", async () => {
-    const api = apiFixture();
-    api.refreshCli = vi.fn(async () => { throw new Error("未发现可用 CLI 程序"); });
-    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "刷新 Antigravity 模型列表" }));
-    await screen.findByText("未发现可用 CLI 程序");
-    expect(within(screen.getByLabelText("Antigravity 模型")).getAllByRole("option")).toHaveLength(1);
-  });
-
-  it("validates an explicit plan against the saved revision without launching work", async () => {
-    const api = apiFixture();
-    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
-    expect(screen.queryByLabelText("计划子 Agent 数量")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "高级诊断" })).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(screen.getByRole("button", { name: "高级诊断" }));
+    expect(await screen.findByText("模型：discovered-model")).toBeVisible();
+    expect(screen.getByText("思考选项：high")).toBeVisible();
+    expect(screen.getByText("账号可用性未核验")).toBeVisible();
+    expect(screen.getAllByText("加载状态未观测")).toHaveLength(2);
+    expect(api.refreshCli).toHaveBeenCalledWith("workbuddy", "active");
     expect(api.evaluatePlan).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("计划子 Agent 数量"), { target: { value: "3" } });
-    fireEvent.click(screen.getByRole("button", { name: /验证委派计划/ }));
-    await screen.findByText("✓ 计划符合已保存策略");
-    expect(api.evaluatePlan).toHaveBeenCalledWith("active", 7, expect.objectContaining({ manager: expect.objectContaining({ cli_calls: [] }), subagents: expect.arrayContaining([expect.objectContaining({ id: "agent-3", cli_calls: [] })]) }));
-    expect(screen.getByText("仅验证，没有启动 Agent 或 CLI 进程。")).toBeInTheDocument();
-    expect(api.savePolicy).not.toHaveBeenCalled();
-    expect(api.refreshCli).not.toHaveBeenCalled();
+  });
+  it("distinguishes Runner loading from actual execution and clears obsolete policy counts", async () => {
+    const api = apiFixture();
+    api.discoverCli = vi.fn(async () => [{ providerId: "custom", label: "Custom CLI", installed: true, native: false, adapterAvailable: true, executionReady: true, status: "discovered", message: "Runner inventory" }]);
+    api.snapshot = vi.fn(async () => ({ ...snapshot, projects: snapshot.projects.map(project => ({ ...project, policy: { ...policy, mode: "custom" as const, subagents: { min: 2, max: 4 } } })) }));
+    render(<AiOffice api={api} />);
+    await screen.findByText("按任务需要自由协作");
+    expect(screen.queryByText(/2–4 位子 Agent/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: /团队策略/ })[0]);
+    expect(await screen.findByText("Runner 已加载")).toBeVisible();
+    expect(screen.getByText(/目录不证明执行成功/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "刷新 Custom CLI 模型列表" })).toBeEnabled();
+  });
+  it("does not retain an old capability response after rescan", async () => {
+    const api = apiFixture();
+    let finish!: (value: Awaited<ReturnType<AiOfficeApi["refreshCli"]>>) => void;
+    api.refreshCli = vi.fn<AiOfficeApi["refreshCli"]>(() => new Promise((resolve) => { finish = resolve; }));
+    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "刷新 WorkBuddy 模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新扫描本机 CLI" }));
+    await waitFor(() => expect(api.discoverCli).toHaveBeenCalledTimes(2));
+    const result = await apiFixture().refreshCli("workbuddy");
+    await act(async () => finish(result));
+    expect(screen.queryByText("模型：discovered-model")).not.toBeInTheDocument();
+  });
+  it("allows independent work when no CLI is installed and formats errors safely", async () => {
+    const api = apiFixture(); api.discoverCli = vi.fn().mockResolvedValue([]);
+    render(<OfficePolicyPanel project={snapshot.projects[0]} api={api} onSaved={vi.fn()} />);
+    expect(await screen.findByText(/主 Agent 仍可独立完成任务/)).toBeVisible();
+    expect(officeError({ message: "Failed", next_action: "Retry", secret: "hidden" })).toBe("Failed Retry");
+    expect(officeError({ secret: "hidden" })).not.toContain("hidden");
   });
 });

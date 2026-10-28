@@ -193,7 +193,14 @@ pub(crate) struct McpGatewayConfig {
 pub(crate) struct McpGatewayProviderConfig {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[serde(default)]
     pub(crate) executable: String,
+    #[serde(default)]
+    pub(crate) url: Option<String>,
+    #[serde(default)]
+    pub(crate) headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) env: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) args: Vec<String>,
     /// Optional host-local working directory used exactly as `Command::current_dir`.
@@ -240,6 +247,8 @@ pub(crate) struct PluginProviderConfig {
     pub(crate) command: String,
     #[serde(default)]
     pub(crate) args: Vec<String>,
+    #[serde(default)]
+    pub(crate) env: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) cwd: Option<String>,
     #[serde(default)]
@@ -367,6 +376,9 @@ pub(crate) struct RunnerPolicy {
     pub(crate) allow_cwd_anywhere: bool,
     #[serde(default)]
     pub(crate) allowed_roots: Vec<PathBuf>,
+    /// Explicit empty authority, used by project-free Desktop enrollment.
+    #[serde(default)]
+    pub(crate) require_explicit_roots: bool,
     #[serde(default = "default_max_timeout_secs")]
     pub(crate) max_timeout_secs: u64,
     #[serde(default = "default_max_output_bytes")]
@@ -379,6 +391,7 @@ impl Default for RunnerPolicy {
             allow_raw_shell: true,
             allow_cwd_anywhere: false,
             allowed_roots: Vec::new(),
+            require_explicit_roots: false,
             max_timeout_secs: DEFAULT_MAX_TIMEOUT_SECS,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         }
@@ -563,6 +576,7 @@ impl HotRunnerConfig {
 
 pub(crate) struct ReloadableRunnerConfig {
     agent_execution_ready: AtomicBool,
+    agent_execution_load_error: Mutex<Option<String>>,
     startup: RunnerConfig,
     startup_managed_ssh: SshConfig,
     managed_ssh: Arc<ManagedSshResourceStore>,
@@ -571,16 +585,22 @@ pub(crate) struct ReloadableRunnerConfig {
     coding_agents: Option<Arc<CodingAgentManager>>,
     /// Runner-owned startup-bound config path. First-class check/reload uses only
     /// this path on every platform; Unix SIGHUP is an additional trigger only.
-    path: PathBuf,
+    pub(super) path: PathBuf,
     current: RwLock<Arc<HotRunnerConfig>>,
     /// Serializes every authoritative activation path, including Unix SIGHUP and
     /// first-class reload, so optimistic generation fences cannot race.
-    reload_lock: Mutex<()>,
+    pub(super) reload_lock: Mutex<()>,
+    pub(super) connection_revision: std::sync::atomic::AtomicU64,
     external_routers: Mutex<Vec<Weak<ExternalToolRouter>>>,
     stopping: AtomicBool,
 }
 
 impl ReloadableRunnerConfig {
+    pub(crate) fn local_browser(
+        &self,
+    ) -> Option<&super::jobs::agent_resources::LocalBrowserConfig> {
+        self.startup.agent_execution_resources.browser.as_ref()
+    }
     pub(crate) fn new(startup: RunnerConfig, path: PathBuf) -> Self {
         let status = RunnerConfigReloadStatus::default();
         let managed_ssh = Arc::new(ManagedSshResourceStore::initialize(
@@ -608,6 +628,7 @@ impl ReloadableRunnerConfig {
         let config = Self {
             mcp_gateway: Arc::new(McpGatewayManager::new(&startup.mcp_gateway)),
             agent_execution_ready: AtomicBool::new(false),
+            agent_execution_load_error: Mutex::new(None),
             plugins: Arc::new(PluginManager::new(&startup, path.clone())),
             coding_agents,
             startup_managed_ssh,
@@ -616,6 +637,7 @@ impl ReloadableRunnerConfig {
             path,
             current: RwLock::new(current),
             reload_lock: Mutex::new(()),
+            connection_revision: std::sync::atomic::AtomicU64::new(0),
             external_routers: Mutex::new(external_routers),
             stopping: AtomicBool::new(false),
         };
@@ -638,11 +660,64 @@ impl ReloadableRunnerConfig {
     }
 
     pub(crate) fn set_agent_execution_ready(&self, ready: bool) {
+        if ready {
+            *lock_unpoison(&self.agent_execution_load_error) = None;
+        }
         self.agent_execution_ready.store(ready, Ordering::Release);
     }
 
+    pub(crate) fn set_agent_execution_load_error(&self, stage: &str, error: &str) {
+        // Preserve a concrete stage and cause, never raw parser values/paths.
+        let cause = error
+            .split(':')
+            .next()
+            .unwrap_or(error)
+            .split(" at line ")
+            .next()
+            .unwrap_or(error);
+        let mut cause: String = cause
+            .chars()
+            .take(128)
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if let Some(os_error) = error
+            .split("(os error ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+        {
+            if !os_error.is_empty() && os_error.bytes().all(|b| b.is_ascii_digit()) {
+                cause.push_str("_os_error_");
+                cause.push_str(os_error);
+            }
+        }
+        let code = format!("cli_resource_{stage}_failed:{}", cause.trim_matches('_'));
+        tracing::warn!(error = %code, "CLI resource load failed");
+        *lock_unpoison(&self.agent_execution_load_error) = Some(code);
+    }
+
+    pub(crate) fn cli_resource_load_errors(&self) -> BTreeMap<String, String> {
+        self.startup
+            .agent_execution_resources
+            .native_cli
+            .as_ref()
+            .map(|config| config.load_errors.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn agent_execution_load_error(&self) -> Option<String> {
+        lock_unpoison(&self.agent_execution_load_error).clone()
+    }
+
     pub(crate) fn agent_execution_ready(&self) -> bool {
-        self.agent_execution_ready.load(Ordering::Acquire) && !self.stopping.load(Ordering::Acquire)
+        self.agent_execution_ready.load(Ordering::Acquire)
+            && self.agent_execution_load_error().is_none()
+            && !self.stopping.load(Ordering::Acquire)
     }
 
     pub(crate) fn with_active(&self, f: impl FnOnce(&HotRunnerConfig)) {
@@ -713,6 +788,9 @@ impl ReloadableRunnerConfig {
         match self.load_candidate() {
             Ok(candidate) => {
                 let mut fields = restart_required_fields(&self.startup, &candidate);
+                if self.mcp_gateway.matches_config(&candidate.mcp_gateway) {
+                    fields.retain(|field| field != "mcp_gateway");
+                }
                 fields.sort();
                 RunnerConfigOperationResponse {
                     action: RunnerConfigAction::Check,
@@ -813,7 +891,10 @@ impl ReloadableRunnerConfig {
             }
         };
         let generation = active.generation.saturating_add(1);
-        let restart_required_fields = restart_required_fields(&self.startup, &candidate);
+        let mut restart_required_fields = restart_required_fields(&self.startup, &candidate);
+        if self.mcp_gateway.matches_config(&candidate.mcp_gateway) {
+            restart_required_fields.retain(|field| field != "mcp_gateway");
+        }
         let mut status = RunnerConfigReloadStatus {
             generation,
             last_reload_result: if restart_required_fields.is_empty() {
@@ -1497,10 +1578,13 @@ fn validate_shell_profile_toml_shape(content: &str) -> Result<(), String> {
 pub(crate) fn load_config(path: &Path) -> Result<RunnerConfig, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read config {}: {}", path.display(), e))?;
-    validate_shell_profile_toml_shape(&content)
-        .map_err(|e| format!("failed to parse config {}: {}", path.display(), e))?;
-    let mut cfg: RunnerConfig = toml::from_str(&content)
-        .map_err(|e| format!("failed to parse config {}: {}", path.display(), e))?;
+    parse_config(&content)
+}
+
+pub(crate) fn parse_config(content: &str) -> Result<RunnerConfig, String> {
+    validate_shell_profile_toml_shape(content)?;
+    let mut cfg: RunnerConfig =
+        toml::from_str(content).map_err(|e| format!("failed to parse config: {e}"))?;
     if cfg.server_url.trim().is_empty() {
         return Err("server_url cannot be empty".to_string());
     }
@@ -1545,9 +1629,10 @@ pub(crate) fn load_config(path: &Path) -> Result<RunnerConfig, String> {
     // predictably. If HOME is unavailable and allow_cwd_anywhere is false,
     // surface a clear configuration error. Explicit allowed_roots is preserved
     // as-is and overrides the HOME default.
-    let effective =
-        effective_allowed_roots(&cfg.policy.allowed_roots, cfg.policy.allow_cwd_anywhere)?;
-    cfg.policy.allowed_roots = effective;
+    if !cfg.policy.require_explicit_roots {
+        cfg.policy.allowed_roots =
+            effective_allowed_roots(&cfg.policy.allowed_roots, cfg.policy.allow_cwd_anywhere)?;
+    }
     // Normalize old/new config spellings into one effective registry path. Two
     // explicit fields are ambiguous and fail closed rather than guessing
     // precedence. With neither field configured, select the on-disk layout
@@ -1583,6 +1668,7 @@ pub(crate) fn load_config(path: &Path) -> Result<RunnerConfig, String> {
     validate_mcp_gateway_config(&cfg.mcp_gateway)?;
     validate_plugin_config(&cfg.plugins, &cfg.shell)?;
     validate_acp_config(&cfg.acp)?;
+    super::jobs::agent_resources::host_cli::expand(&mut cfg.agent_execution_resources)?;
     Ok(cfg)
 }
 
@@ -1736,7 +1822,7 @@ fn validate_mcp_gateway_env_name(value: &str) -> Result<(), ()> {
     Ok(())
 }
 
-fn validate_mcp_gateway_config(config: &McpGatewayConfig) -> Result<(), String> {
+pub(crate) fn validate_mcp_gateway_config(config: &McpGatewayConfig) -> Result<(), String> {
     use crate::mcp_gateway::{
         validate_provider_id, validate_provider_name, MCP_GATEWAY_MAX_PROVIDERS,
     };
@@ -1768,7 +1854,53 @@ fn validate_mcp_gateway_config(config: &McpGatewayConfig) -> Result<(), String> 
         if !ids.insert(provider.id.as_str()) {
             return Err("mcp provider ids must be unique".to_string());
         }
-        if provider.executable.is_empty()
+        if let Some(url) = &provider.url {
+            let parsed =
+                reqwest::Url::parse(url).map_err(|_| "mcp provider URL is invalid".to_string())?;
+            if url.len() > 8192
+                || !matches!(parsed.scheme(), "http" | "https")
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.fragment().is_some()
+                || !provider.executable.is_empty()
+                || !provider.args.is_empty()
+                || provider.cwd.is_some()
+                || !provider.env.is_empty()
+                || !provider.env_from_env.is_empty()
+            {
+                return Err(
+                    "mcp HTTP provider requires a valid URL and no process configuration"
+                        .to_string(),
+                );
+            }
+            if provider.headers.len() > 64 {
+                return Err("mcp HTTP provider has too many headers".to_string());
+            }
+            let mut header_names = HashSet::new();
+            for (name, value) in &provider.headers {
+                if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err()
+                    || reqwest::header::HeaderValue::from_str(value).is_err()
+                    || value.len() > 8192
+                    || !header_names.insert(name.to_ascii_lowercase())
+                    || matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "host"
+                            | "content-length"
+                            | "transfer-encoding"
+                            | "connection"
+                            | "content-type"
+                            | "accept"
+                            | "mcp-session-id"
+                            | "mcp-protocol-version"
+                    )
+                {
+                    return Err(
+                        "mcp HTTP provider contains an invalid or reserved header".to_string()
+                    );
+                }
+            }
+        } else if provider.executable.is_empty()
             || provider.executable.len() > 1_024
             || provider.executable.contains('\0')
             || !Path::new(&provider.executable).is_absolute()
@@ -1777,6 +1909,32 @@ fn validate_mcp_gateway_config(config: &McpGatewayConfig) -> Result<(), String> 
                 "mcp provider '{}' executable must be an absolute path of at most 1024 bytes",
                 provider.id
             ));
+        }
+        if provider.url.is_none() && !provider.headers.is_empty() {
+            return Err("mcp stdio provider cannot specify HTTP headers".to_string());
+        }
+        if provider.env.len() + provider.env_from_env.len() > MCP_GATEWAY_MAX_ENV_MAPPINGS {
+            return Err("mcp provider has too many environment mappings".to_string());
+        }
+        for (name, value) in &provider.env {
+            if validate_mcp_gateway_env_name(name).is_err()
+                || super::shell::is_sensitive_env_key(name)
+                || value.contains('\0')
+                || value.len() > 16384
+                || provider
+                    .env_from_env
+                    .keys()
+                    .any(|key| super::shell::env_keys_equal(key, name))
+                || provider
+                    .env
+                    .keys()
+                    .any(|key| key != name && super::shell::env_keys_equal(key, name))
+            {
+                return Err(
+                    "mcp provider contains an invalid or conflicting environment mapping"
+                        .to_string(),
+                );
+            }
         }
         if provider.args.len() > 64 {
             return Err(format!(
@@ -1877,6 +2035,24 @@ fn validate_plugin_config(config: &PluginConfig, shell: &ShellConfig) -> Result<
         if !ids.insert(provider.id.as_str()) {
             return Err(format!("duplicate plugin provider id '{}'", provider.id));
         }
+        if provider.env.len() > MCP_GATEWAY_MAX_ENV_MAPPINGS {
+            return Err("plugin provider has too many environment mappings".into());
+        }
+        for (name, value) in &provider.env {
+            if validate_mcp_gateway_env_name(name).is_err()
+                || super::shell::is_sensitive_env_key(name)
+                || value.contains('\0')
+                || value.len() > 16384
+                || provider
+                    .env
+                    .keys()
+                    .any(|key| key != name && super::shell::env_keys_equal(key, name))
+            {
+                return Err(
+                    "plugin provider contains an invalid or conflicting environment mapping".into(),
+                );
+            }
+        }
         if provider.command.trim().is_empty()
             || provider.command.len() > PLUGIN_MAX_COMMAND_BYTES
             || provider.command.contains('\0')
@@ -1959,6 +2135,7 @@ mod plugin_config_tests {
 
     fn provider() -> PluginProviderConfig {
         PluginProviderConfig {
+            env: BTreeMap::new(),
             document_worker: None,
             document_worker_args: Vec::new(),
             id: "provider".to_string(),
@@ -1985,6 +2162,28 @@ mod plugin_config_tests {
         )
         .unwrap_err()
         .contains("at most 1024 bytes"));
+    }
+
+    #[test]
+    fn plugin_environment_literals_are_bounded_and_reject_reserved_names() {
+        let mut entry = provider();
+        entry
+            .env
+            .insert("SERVICE_TOKEN".into(), "local-placeholder".into());
+        let mut config = PluginConfig {
+            request_timeout_secs: 30,
+            providers: vec![entry],
+        };
+        assert!(validate_plugin_config(&config, &ShellConfig::default()).is_ok());
+        config.providers[0]
+            .env
+            .insert("WEBCODEX_TOKEN".into(), "reserved".into());
+        assert!(validate_plugin_config(&config, &ShellConfig::default()).is_err());
+        config.providers[0].env.remove("WEBCODEX_TOKEN");
+        config.providers[0]
+            .env
+            .insert("SERVICE_TOKEN".into(), "x".repeat(16_385));
+        assert!(validate_plugin_config(&config, &ShellConfig::default()).is_err());
     }
 
     #[test]
@@ -2027,6 +2226,9 @@ mod mcp_gateway_config_tests {
             args: Vec::new(),
             cwd: None,
             env_from_env: BTreeMap::new(),
+            url: None,
+            headers: BTreeMap::new(),
+            env: BTreeMap::new(),
             timeout_secs: None,
         }
     }
@@ -2036,6 +2238,54 @@ mod mcp_gateway_config_tests {
             request_timeout_secs: 30,
             providers: vec![provider],
         })
+    }
+
+    #[test]
+    fn mcp_gateway_http_configuration_rejects_ambiguous_transport_and_headers() {
+        let mut http = provider();
+        http.url = Some("http://127.0.0.1:12345/mcp".into());
+        assert!(validate(http.clone()).is_err());
+        http.executable.clear();
+        http.headers
+            .insert("Authorization".into(), "Bearer fixture-only".into());
+        validate(http.clone()).unwrap();
+        for header in ["Host", "Mcp-Session-Id", "Content-Length"] {
+            let mut invalid = http.clone();
+            invalid.headers.insert(header.into(), "value".into());
+            assert!(validate(invalid).is_err());
+        }
+        let mut invalid = http.clone();
+        invalid
+            .headers
+            .insert("authorization".into(), "other".into());
+        assert!(validate(invalid).is_err());
+        for url in [
+            "file:///tmp/server",
+            "http://name:secret@localhost/mcp",
+            "https://localhost/mcp#fragment",
+        ] {
+            let mut invalid = http.clone();
+            invalid.url = Some(url.into());
+            assert!(validate(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn mcp_gateway_literal_environment_is_bounded_and_cannot_override_runner_credentials() {
+        let mut configured = provider();
+        configured
+            .env
+            .insert("TOOL_KEY".into(), "fixture-only".into());
+        validate(configured.clone()).unwrap();
+        configured
+            .env_from_env
+            .insert("TOOL_KEY".into(), "OTHER_KEY".into());
+        assert!(validate(configured).is_err());
+        let mut sensitive = provider();
+        sensitive
+            .env
+            .insert("WEBCODEX_TOKEN".into(), "fixture-only".into());
+        assert!(validate(sensitive).is_err());
     }
 
     #[test]
@@ -2105,7 +2355,7 @@ mod mcp_gateway_config_tests {
             .collect();
         assert!(validate(too_many)
             .unwrap_err()
-            .contains("env_from_env may contain at most"));
+            .contains("environment mappings"));
     }
 
     #[test]

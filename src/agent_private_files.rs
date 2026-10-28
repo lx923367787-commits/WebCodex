@@ -1,7 +1,7 @@
 //! Trusted-server broker for agent-private files. The caller authenticates and
 //! revalidates `VerifiedAgentRun` in the store before every operation. No model
-//! receives the host root or chooses the owner. Arbitrary agent execution must
-//! remain disabled unless separately confined by the operating system.
+//! receives the host root or chooses the owner. This is an API ownership check,
+//! not an OS boundary against arbitrary programs running under the server account.
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;

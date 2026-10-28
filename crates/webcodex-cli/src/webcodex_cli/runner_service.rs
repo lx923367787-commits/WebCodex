@@ -253,6 +253,8 @@ struct RunnerStatusConfig {
 struct RunnerStatusPolicy {
     #[serde(default)]
     allowed_roots: Vec<PathBuf>,
+    #[serde(default)]
+    require_explicit_roots: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +266,7 @@ struct RunnerConfigMetadata {
     transport: Option<String>,
     project_registry_dir: PathBuf,
     allowed_roots: Vec<PathBuf>,
+    require_explicit_roots: bool,
     server_url: String,
     token: String,
 }
@@ -294,13 +297,17 @@ fn read_runner_config_metadata(path: &Path) -> Result<RunnerConfigMetadata, Stri
         transport: cfg.transport,
         project_registry_dir,
         allowed_roots: cfg.policy.allowed_roots,
+        require_explicit_roots: cfg.policy.require_explicit_roots,
         server_url: cfg.server_url,
         token: cfg.token,
     })
 }
 
-fn allowed_roots_summary(roots: &[PathBuf]) -> String {
-    if roots.is_empty() {
+fn allowed_roots_summary(roots: &[PathBuf], require_explicit_roots: bool) -> String {
+    if roots.is_empty() && require_explicit_roots {
+        "0 configured; no directory access until an explicit project folder is authorized"
+            .to_string()
+    } else if roots.is_empty() {
         "0 configured; Runner runtime defaults to $HOME when allowed_roots is omitted".to_string()
     } else {
         format!(
@@ -554,7 +561,7 @@ pub(crate) async fn run_runner_status(opts: RunnerStatusOptions) -> Result<Strin
                 "project_registry_dir": metadata.project_registry_dir.to_string_lossy().to_string(),
                 "allowed_roots": {
                     "count": metadata.allowed_roots.len(),
-                    "summary": allowed_roots_summary(&metadata.allowed_roots),
+                    "summary": allowed_roots_summary(&metadata.allowed_roots, metadata.require_explicit_roots),
                     "paths": metadata.allowed_roots.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
                 },
                 "server_url": metadata.server_url,
@@ -646,7 +653,7 @@ pub(crate) async fn run_runner_status(opts: RunnerStatusOptions) -> Result<Strin
     ));
     out.push_str(&format!(
         "  allowed_roots:        {}\n",
-        allowed_roots_summary(&metadata.allowed_roots)
+        allowed_roots_summary(&metadata.allowed_roots, metadata.require_explicit_roots)
     ));
     out.push_str(&format!(
         "  server_url:           {}\n",

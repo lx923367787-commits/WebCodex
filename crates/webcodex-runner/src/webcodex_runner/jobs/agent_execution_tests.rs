@@ -39,7 +39,11 @@ fn fixture() -> Fixture {
 fn fixture_with_provider(provider: Option<webcodex_core::agent_cli::AgentCliProvider>) -> Fixture {
     let temporary = tempfile::tempdir().unwrap();
     let profiles = validate_profiles(&AgentExecutionResourcesConfig {
+        native_cli: None,
+        browser: None,
         profiles: vec![AgentExecutionResourceProfile {
+            host_cli: None,
+            native_worker: None,
             id: "resource-profile".into(),
             provider,
             reviewed_controls: None,

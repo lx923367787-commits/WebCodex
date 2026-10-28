@@ -6,8 +6,9 @@ Native Tool Plugin 允许 WebCodex Runner 把任意本地可执行程序变成�
 可以使用 Node.js、Bun、Deno、Python、`uv`、Ruby，也可以是 Rust、Go、C/C++
 编译后的二进制。它**不需要**实现 MCP Server，也不需要依赖 MCP SDK。
 
-Plugin 进程只运行在 Runner 所在机器。Server 不会收到它的 command path、argv、
-cwd、prepared environment、PID、stderr 或本地凭据。
+Plugin 进程只运行在 Runner 所在机器。运行目录与工具响应不会返回 command path、argv、
+cwd、prepared environment、PID 或 stderr；显式传给 `tool_connection` 的管理参数会经过
+Server 转发。已有配置文件在 Runner 本机读取，优先用这种方式保留本地凭据。
 
 Native Plugin 是**受信任的本地 executable**。WebCodex 不会 sandbox、隔离、签名或把
 不可信 executable 自动变安全；启动 Plugin 与在 prepared Runner environment 下直接运行
@@ -15,7 +16,20 @@ Native Plugin 是**受信任的本地 executable**。WebCodex 不会 sandbox、�
 
 ## 配置 Plugin
 
-Plugin 使用独立的 `runner.toml` 配置，不复用 MCP provider：
+日常连接可直接使用 `tool_connection`，无需逐个登记 Plugin 内的工具：
+
+```json
+{"client_id":"my-runner","action":"connect","kind":"plugin","id":"repo-tools","entry":"E:/tools/repo/plugin.mjs"}
+```
+
+它验证并保存到该 Runner 的 `runner.toml`，后续会话可直接使用 `plugin_tool`。
+工具搬家使用 `update`，故障恢复使用 `reconnect`，查看使用 `status`，移除使用 `remove`；
+这些操作只针对指定连接，移除不会删除工具文件。完整示例与参数见
+[Runner 本地工具工作流](RUNNER.zh-CN.md#连接一次后续直接使用)。管理连接要求
+`runner:manage`，不会隐式获得 `plugin:invoke`。以下手工配置适用于需要 shell profile
+等高级设置的场景。
+
+Plugin 使用同一 `runner.toml` 中独立的 `[plugins]` 配置，不复用 MCP provider：
 
 ```toml
 [shell]
@@ -42,7 +56,7 @@ profile = "node"
 timeout_secs = 30
 ```
 
-`id`、`name`、`command` 必填；`args`、`cwd`、`profile`、`timeout_secs`
+`id`、`name`、`command` 必填；`args`、`cwd`、`profile`、`env`、`timeout_secs`
 可选。配置 `cwd` 时必须使用绝对路径。
 
 Plugin 不再发明一套 runtime/PATH/env 机制，而是真正复用 Runner 的 shell profile：
@@ -56,6 +70,7 @@ Plugin 不再发明一套 runtime/PATH/env 机制，而是真正复用 Runner �
 本身按 **native argv process** 启动，不再额外套一层 shell。`node`、`python`、
 `uv`、`bun` 这样的 bare command 会从 prepared snapshot 的 `PATH` 解析，而不是
 只看 Runner 父进程的 PATH。敏感 WebCodex 进程凭据会被过滤。
+provider 自己的 `env` 在 prepared environment 上覆盖同名值；WebCodex 保留的凭据变量名不能配置。
 
 Plugin candidate preparation 可以读取完整的 startup-bound `runner.toml`，因为 provider
 可能引用 shell/profile 输入；但 committed Plugin state 不再保存第二份 generic
@@ -93,8 +108,9 @@ Plugin 实现两套逻辑。任何声明暴露 `plugin_tool` 的 canonical model
 ```
 
 静态 ToolDefinition 只表达 worst-case discovery contract。真正执行 policy 会在校验后的
-`action` 上先分类，再进入 Session/permission governance：list/describe 只要求
-`plugin:inspect` 且是 read-only；call 要求 `plugin:invoke` 并走 local-execution governance；
+`action` 上先分类，再进入 Session/permission governance：list/describe 要求
+`plugin:inspect`，正常时读取已保存的 catalog；普通 provider 故障时可能触发下述进程恢复。
+call 要求 `plugin:invoke` 并走 local-execution governance；
 check/reload 要求 `plugin:manage` 并走 management governance。MCP 与 API transport 共用一个
 specialized executor，它也是 Workflow Session lifecycle 的唯一 owner，因此一次 Plugin
 调用只产生一套 authoritative lifecycle。`recording_session_id` 必须显式提供；不会从
@@ -131,12 +147,15 @@ exact Runner instance
 
 Runner 启动时会 eager prepare 配置中的 provider，执行 initialize + 一次 tools/list，形成
 第一版 committed provider set。成功 provider instance 的 validated catalog 在其生命周期内
-冻结；普通 list/describe/call 只读这份 frozen catalog，不会偷偷 re-list。schema/catalog
-变化必须通过 reload 产生新的 provider instance。
+冻结；健康 provider 的普通 list/describe/call 读取这份 catalog。修改 code/config 后使用
+`tool_connection update/reconnect` 或 `plugin_tool reload` 建立新 provider instance。
 
-`list(runner, plugin)` 只观察当前 committed provider instance；不会重新读取
-`runner.toml`、启动 candidate、执行 check/reload、创建 binding 或调用 Plugin Tool。完整
-schema 仍只由 `describe` 返回；list 只返回 bounded name/title 与安全 health metadata。
+`list(runner, plugin)` 正常只观察当前 committed provider，不重新读取 `runner.toml`，
+不创建 binding，也不调用业务工具。普通 provider 已失败时，`ToolsList` 可以用已保存
+配置重新启动并发现 catalog；这会产生新 instance，返回 stale/replaced 提示后需重新
+list/describe。恢复不会重放之前的 `tools/call`。因此 list/describe 在故障恢复时可能
+真实启动本地程序，不能视作绝无启动副作用的静态查询。完整 schema 仍由 `describe`
+返回；list 只返回 bounded name/title 与安全状态。
 
 `check` 是开发时 `reload` 之前推荐使用的预检。Runner 会重新读取当前
 `runner.toml`，只定位 requested provider，使用正常 Plugin runtime 的同一套
@@ -242,6 +261,12 @@ streaming、pagination 或 arbitrary JSON-RPC tunneling。
 message、schema、arguments、JSON depth/node/string、tool count 和 result 都有明确边界；
 非法或超限数据 fail closed，不会通过截断把它变成另一份 Tool contract。
 
+Native Plugin 与标准 MCP 网关的输出预算独立于输入：单条 text、structuredContent
+和输出 JSON 单字符串各最多 512 KiB，输出最多 65,536 个 JSON 节点；完整 tool result
+最多 1,984 KiB，provider wire message 最多 4 MiB。result 预留 64 KiB 封装余量，
+避免触及 Server HTTP polling 的 2 MiB 请求体上限。arguments/schema 仍最多 64 KiB、
+4,096 个节点、单字符串 64 KiB，JSON 深度仍为 16；工具权限和 schema 准入规则不变。
+
 ### Native Plugin Schema Profile v1
 
 `inputSchema` / `outputSchema` 使用 WebCodex 明确定义的小型 profile，**不宣称**支持完整
@@ -309,7 +334,7 @@ stdout 只用于 protocol。stderr 由独立 worker 持续 drain，因此 stderr
 
 Native Plugin authority 按 operation 拆分：
 
-- `plugin:inspect` 允许 list、describe 等纯 metadata observation；
+- `plugin:inspect` 允许 list、describe；普通 provider 故障时发现过程可能恢复其进程；
 - `plugin:invoke` 允许 `plugin_tool call`；
 - `plugin:manage` 允许会启动或改变本地 Plugin process 的开发/管理操作，目前是 check 和
   reload；它本身不会隐式授予 `plugin:invoke`；

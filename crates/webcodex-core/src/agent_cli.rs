@@ -48,6 +48,12 @@ impl AgentCliInventoryQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentCliInstallation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_ready: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
     pub provider_id: String,
     pub command: String,
     pub label: String,
@@ -377,6 +383,7 @@ impl AgentCliCatalog {
             .reviewed_controls
             .as_ref()
             .and_then(|record| record.adapter.clone())
+            .or_else(|| resource.host_cli.as_ref().map(|host| host.adapter.clone()))
             .or_else(|| {
                 crate::cli_adapter::cli_adapters(&[])
                     .ok()?

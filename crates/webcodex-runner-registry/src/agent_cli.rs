@@ -442,6 +442,33 @@ impl PendingRead {
                     return Err(code.into());
                 }
             }
+            if !response.success
+                && response.exit_code.is_none()
+                && response.stdout.is_none()
+                && matches!(
+                    self.operation,
+                    RunnerOperation::AgentCliInventory(_) | RunnerOperation::AgentCliCatalog(_)
+                )
+            {
+                if let Some(code) = response.error.as_deref().filter(|code| {
+                    code.len() <= 256
+                        && [
+                            "cli_resource_",
+                            "agent_cli_",
+                            "agent_resources_",
+                            "native_cli_",
+                            "agent_execution_",
+                        ]
+                        .iter()
+                        .any(|prefix| code.starts_with(prefix))
+                        && code.bytes().all(|c| {
+                            c.is_ascii_lowercase() || c.is_ascii_digit() || b"_:-".contains(&c)
+                        })
+                        && !webcodex_core::sensitive_text::secret_like_value(code)
+                }) {
+                    return Err(code.into());
+                }
+            }
             return Err("agent_cli_query_response_invalid".into());
         }
         let content = response.stdout.ok_or("agent_cli_query_response_missing")?;

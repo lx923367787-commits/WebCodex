@@ -44,6 +44,8 @@ struct RegistrationPolicy {
     allow_cwd_anywhere: bool,
     #[serde(default)]
     allowed_roots: Vec<PathBuf>,
+    #[serde(default)]
+    require_explicit_roots: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1010,7 +1012,12 @@ pub(crate) fn run_project_register(opts: ProjectRegisterOptions) -> Result<Strin
     // to one registry path, and an omitted field uses the shared four-state
     // on-disk selection contract.
     let project_registry_dir = registration_project_registry_dir(&config)?;
-    let prepared = prepare_project_authority(
+    let prepare = if config.policy.require_explicit_roots {
+        prepare_activation_project_authority
+    } else {
+        prepare_project_authority
+    };
+    let prepared = prepare(
         &opts.project,
         &config.policy.allowed_roots,
         config.policy.allow_cwd_anywhere,

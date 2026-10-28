@@ -30,7 +30,7 @@ SPAWN_PROPERTIES = {
     "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128,
                         "description": "Nonblank stable key for this exact task; reuse on retries."},
     "thinking_profile_id": {"type": "string", "minLength": 1, "maxLength": 128,
-                            "description": "Exact profile_id selected by the main GPT from discover_chat_profiles; catalog must be ready and no older than one hour. Uses only ASCII letters, digits, underscore, dot, colon or hyphen."},
+                            "description": "Optional page adjustment. Omit to leave settings untouched without reading the catalog or current setting. Legacy default is also a no-op; explicit IDs are best-effort adjustments. Uses only ASCII letters, digits, underscore, dot, colon or hyphen."},
 }
 TOOL_PROPERTIES = {
     "spawn_chat_task": SPAWN_PROPERTIES,
@@ -49,8 +49,8 @@ TOOL_PROPERTIES = {
 DESCRIPTIONS = {
     "spawn_chat_task": (
         "Delegate a user-authorized task to a new child chat through the configured Edge transport. "
-        "First discover_chat_profiles; the main GPT must select an actual thinking_profile_id, never assume a default. "
-        "The selected snapshot is immutable for this request; read requested_thinking_profile and applied_thinking_profile to verify application. "
+        "Omit thinking_profile_id to keep page settings without discovery or readback. An explicit ID requests an optional UI adjustment; failure does not cancel dispatch. "
+        "Read thinking_adjustment for the setting outcome; applied_thinking_profile is present only after confirmed application. The request selection is immutable. "
         "parent_task_id is only a correlation label and grants no authority. Returns accepted while "
         "the local worker starts; accepted does not mean sent or completed. The same idempotency_key "
         "does not resend. If state is unknown, read this request; never change keys to blindly retry. "
@@ -76,29 +76,30 @@ DESCRIPTIONS = {
     "read_chat_profiles": (
         "Read the existing cached model/thinking profile catalog without browser access, discovery, refresh, "
         "or worker startup. Takes no arguments. A missing catalog returns not_discovered; stale or incomplete "
-        "state does not authorize selection. For a new task require state=ready and refresh_required=false, "
-        "then match the main GPT's explicitly selected profile_id. This read never chooses a default. "
-        "Discovery is started only by an explicit discover_chat_profiles call or the activated Host coordinator; "
+        "state does not block task dispatch. For an optional explicit adjustment use state=ready and refresh_required=false, "
+        "then match the main GPT's explicitly selected profile_id. default_supported reports whether the Host implements the reserved default selection; this read never applies a setting. "
+        "Discovery is started only by an explicit discover_chat_profiles call; "
         "this read never starts it."
     ),
     "discover_chat_profiles": (
         "Discover current browser model/thinking choices without sending a prompt. Starts one asynchronous "
         "menu observation sharing the single browser-worker slot; call again to read state/cache. Initialization "
-        "and tools/list never trigger discovery. A ready catalog expires for new spawns after one hour; use "
-        "refresh=true to update it. The main GPT must choose a returned profile_id explicitly. Cached choices "
+        "and tools/list never trigger discovery. A ready catalog expires for explicit adjustments after one hour; use "
+        "refresh=true to update it. To request an adjustment choose a returned profile_id explicitly; task dispatch needs no selection. Cached choices "
         "are observations, not authority or proof that a profile has been applied to a child."
     ),
     "bind_chat_task_goal": (
         "Register this child request's own real project/Goal binding locally for pending Server validation. "
-        "Long child tasks must create their own Goal and register it before prolonged execution; never reuse "
-        "a parent Goal. This call does not contact Server and pending is not verified. Verified bindings carry "
+        "This compatibility tool is for ordinary non-enrolled browser tasks only. Host-enrolled isolated tasks "
+        "use their server-owned assignment Goal and goal_bootstrap; no separate local registration is required. "
+        "Never reuse a parent Goal. This call does not contact Server and pending is not verified. Verified bindings carry "
         "the child Goal and selected thinking profile through the existing 600K warning/800K handoff mechanism. "
-        "Legacy requests without a selected thinking profile cannot inherit a binding."
+        "Omitted thinking selection preserves the page setting and does not prevent registration."
     ),
     "discover_cli_options": (
         "Inspect only a supported installed CLI's bounded --version/--help output; never execute a task or read "
         "secret settings. Returns declared model/effort choices and exact native parameter names when verified, "
-        "not account entitlement. Discover before selecting, then explicitly pass that CLI's native model/effort "
+        "not account entitlement. Discover before selecting, then pass that CLI's native model and optionally an effort override "
         "arguments. Do not invent defaults or apply one CLI's effort levels to another; if unsupported, explain "
         "and omit effort. Missing or unknown formats return incomplete discovery, not a fabricated catalog."
     ),
@@ -110,7 +111,7 @@ TOOL_SPECS = [
         "inputSchema": {
             "type": "object",
             "properties": TOOL_PROPERTIES[name],
-            "required": [] if name == "discover_chat_profiles" else list(TOOL_PROPERTIES[name]),
+            "required": [] if name == "discover_chat_profiles" else [key for key in TOOL_PROPERTIES[name] if key != "thinking_profile_id"],
             "additionalProperties": False,
         },
         "annotations": {
@@ -133,7 +134,7 @@ def dispatch(service, name, arguments):
     if not isinstance(name, str) or name not in DESCRIPTIONS or not isinstance(arguments, dict):
         raise InvalidArguments()
     properties = TOOL_PROPERTIES[name]
-    required = set() if name == "discover_chat_profiles" else set(properties)
+    required = set() if name == "discover_chat_profiles" else set(properties) - {"thinking_profile_id"}
     if set(arguments) - set(properties) or not required <= set(arguments):
         raise InvalidArguments()
     for key, value in arguments.items():

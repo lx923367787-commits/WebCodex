@@ -34,12 +34,22 @@ impl WebCodexAdapter {
         cancellation: &CancellationContext,
     ) -> DesktopResult<Value> {
         let stdin = serde_json::to_vec(params).map_err(|_| invalid_contract("team request"))?;
-        let envelope: Value = run_json(
+        let envelope: Value = run_json_until(
             binary,
             &arguments(connection, client_id, action),
             Some(&stdin),
             true,
             cancellation,
+            Deadline::after(std::time::Duration::from_secs(
+                if matches!(
+                    action,
+                    TeamOfficeAction::CliDiscover | TeamOfficeAction::CliModels
+                ) {
+                    50
+                } else {
+                    30
+                },
+            )),
         )
         .await?;
         if envelope.get("success").and_then(Value::as_bool).is_none()

@@ -166,7 +166,7 @@ fn create_candidate(
                     provider_id: "workbuddy".into(),
                     model: "explicit-model".into(),
                     effort: Some("high".into()),
-                    instruction: None,
+                    instruction: Some("Independent delegated test task".into()),
                 }],
             }],
         },

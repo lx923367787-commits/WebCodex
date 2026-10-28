@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef, useState } from "react";
-import type { AiOfficeApi, CliCatalog, CliInstallation, CliProviderId, OfficePlan, OfficePlanEvaluation, OfficePolicy, OfficePolicyInput, OfficeProject, OfficeProvider } from "./types";
+import { useEffect, useRef, useState } from "react";
+import type { AiOfficeApi, CliCatalog, CliInstallation, OfficePolicy, OfficeProject } from "./types";
 
 export function officeError(error: unknown, nextActionPrefix = ""): string {
   if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
@@ -10,207 +10,64 @@ export function officeError(error: unknown, nextActionPrefix = ""): string {
   return typeof error === "string" ? error : "请求未完成，请重试。";
 }
 
-function copyInput(policy: OfficePolicyInput): OfficePolicyInput {
-  return { mode: policy.mode, subagents: { ...policy.subagents }, cli_per_agent: { ...policy.cli_per_agent }, providers: policy.providers.map((provider) => ({ ...provider })) };
-}
 
-function ownValue<T>(values: Partial<Record<string, T>>, id: string): T | undefined {
-  return Object.hasOwn(values, id) ? values[id] : undefined;
-}
-
-function modelEfforts(catalog: CliCatalog | undefined, model: string | null | undefined): string[] {
-  if (catalog?.modelEfforts && Object.keys(catalog.modelEfforts).length) {
-    return model ? ownValue(catalog.modelEfforts, model) ?? [] : [];
-  }
-  return catalog?.efforts ?? [];
-}
-
-export function OfficePolicyPanel({ project, api, onSaved }: { project: OfficeProject; api: AiOfficeApi; onSaved: (policy: OfficePolicy) => void }) {
-  const [draft, setDraft] = useState(() => copyInput(project.policy));
-  const [revision, setRevision] = useState(project.policy.revision);
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const [reloading, setReloading] = useState(false);
+export function OfficePolicyPanel({ project, api }: { project: OfficeProject; api: AiOfficeApi; onSaved: (policy: OfficePolicy) => void }) {
   const [installed, setInstalled] = useState<CliInstallation[]>([]);
-  const [discovering, setDiscovering] = useState(true);
-  const [discoveryError, setDiscoveryError] = useState("");
-  const discoveryGeneration = useRef(0);
-  const catalogGeneration = useRef<Record<string, number>>(Object.create(null));
+  const [catalogs, setCatalogs] = useState<Record<string, CliCatalog>>({});
+  const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const generation = useRef(0);
   async function discover() {
-    const generation = ++discoveryGeneration.current;
-    setDiscovering(true); setDiscoveryError(""); setRefreshing({}); setCatalogErrors({});
+    const current = ++generation.current;
+    setBusy(true); setError(""); setInstalled([]); setCatalogs({}); setRefreshing([]);
     try {
-      const found = await api.discoverCli();
-      if (generation !== discoveryGeneration.current) return;
-      setInstalled(found);
-      setCatalogs({});
-      catalogGeneration.current = Object.create(null);
-      setPlanProvider((current) => found.some((entry) => entry.providerId === current) ? current : "");
-      setPlanModel(""); setPlanEffort(""); setEvaluation(null);
+      const result = await api.discoverCli(project.id);
+      if (current === generation.current) setInstalled(result);
     } catch (cause) {
-      if (generation === discoveryGeneration.current) setDiscoveryError(officeError(cause));
-    } finally {
-      if (generation === discoveryGeneration.current) setDiscovering(false);
-    }
+      if (current === generation.current) setError(officeError(cause));
+    } finally { if (current === generation.current) setBusy(false); }
   }
-  useEffect(() => {
-    void discover();
-    return () => { discoveryGeneration.current += 1; catalogGeneration.current = Object.create(null); };
-  }, [api, project.id]);
-  const [catalogs, setCatalogs] = useState<Partial<Record<CliProviderId, CliCatalog>>>({});
-  const [refreshing, setRefreshing] = useState<Partial<Record<CliProviderId, boolean>>>({});
-  const [catalogErrors, setCatalogErrors] = useState<Partial<Record<CliProviderId, string>>>({});
-  const [planTask, setPlanTask] = useState("完成当前项目任务，并检查交付结果");
-  const [planAgents, setPlanAgents] = useState(2);
-  const [planCliCalls, setPlanCliCalls] = useState(0);
-  const [planProvider, setPlanProvider] = useState<CliProviderId>("");
-  const [planModel, setPlanModel] = useState("");
-  const [planEffort, setPlanEffort] = useState("");
-  const [evaluating, setEvaluating] = useState(false);
-  const [evaluation, setEvaluation] = useState<OfficePlanEvaluation | null>(null);
-  const [evaluationError, setEvaluationError] = useState("");
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
-  const diagnosticsId = useId();
-
-  useEffect(() => {
-    if (!dirty) {
-      setDraft(copyInput(project.policy));
-      setRevision(project.policy.revision);
-    }
-  }, [project.policy, dirty]);
-
-  function change(next: OfficePolicyInput) {
-    setDraft(next); setDirty(true); setError(""); setMessage(""); setEvaluation(null);
-  }
-  function updateProvider(id: CliProviderId, values: Partial<OfficeProvider>) {
-    const existing = draft.providers.find((provider) => provider.provider_id === id);
-    const provider: OfficeProvider = { provider_id: id, enabled: false, model: null, effort: null, ...existing, ...values };
-    change({ ...draft, providers: [...draft.providers.filter((item) => item.provider_id !== id), provider] });
-  }
-  async function refreshCatalog(id: CliProviderId) {
-    const inventoryGeneration = discoveryGeneration.current;
-    const generation = (catalogGeneration.current[id] ?? 0) + 1;
-    catalogGeneration.current[id] = generation;
-    const current = () => inventoryGeneration === discoveryGeneration.current && catalogGeneration.current[id] === generation;
-    setRefreshing((current) => ({ ...current, [id]: true }));
-    setCatalogErrors((current) => ({ ...current, [id]: "" }));
+  useEffect(() => { void discover(); return () => { generation.current += 1; }; }, [api, project.id]);
+  async function refresh(provider: string) {
+    const current = generation.current;
+    setRefreshing((previous) => [...previous, provider]); setError("");
     try {
-      const catalog = await api.refreshCli(id);
-      if (!current()) return;
-      if (catalog.providerId !== id) throw new Error("CLI 能力返回的标识不一致，请重新扫描。");
-      setCatalogs((previous) => ({ ...previous, [id]: catalog }));
-    } catch (cause) {
-      if (current()) setCatalogErrors((previous) => ({ ...previous, [id]: officeError(cause) }));
-    } finally {
-      if (current()) setRefreshing((previous) => ({ ...previous, [id]: false }));
-    }
+      const result = await api.refreshCli(provider, project.id);
+      if (current !== generation.current) return;
+      if (result.providerId !== provider) throw new Error("CLI 能力返回的标识不一致，请重新扫描。");
+      setCatalogs((previous) => ({ ...previous, [provider]: result }));
+    } catch (cause) { if (current === generation.current) setError(officeError(cause)); }
+    finally { if (current === generation.current) setRefreshing((previous) => previous.filter((id) => id !== provider)); }
   }
-  const invalidRange = draft.mode === "custom" && (draft.subagents.min > draft.subagents.max || draft.cli_per_agent.min > draft.cli_per_agent.max);
-  const minimumCliCalls = (draft.subagents.min + 1) * draft.cli_per_agent.min;
-  const invalidBudget = draft.mode === "custom" && minimumCliCalls > 32;
-  const maximumCliCalls = Math.min((draft.subagents.max + 1) * draft.cli_per_agent.max, 32);
-  async function save() {
-    if (invalidRange || invalidBudget || saving) return;
-    setSaving(true); setError(""); setMessage("");
-    try {
-      const policy = await api.savePolicy(project.id, revision, draft);
-      setDraft(copyInput(policy)); setRevision(policy.revision); setDirty(false);
-      setMessage(`已保存到「${project.name}」，策略版本 ${policy.revision}`);
-      onSaved(policy);
-    } catch (cause) {
-      setError(officeError(cause, "请先点击「载入最新策略」核查。 "));
-    } finally { setSaving(false); }
-  }
-  async function reload() {
-    setReloading(true); setError(""); setMessage("");
-    try {
-      const snapshot = await api.snapshot(project.id);
-      const latest = snapshot.projects.find((item) => item.id === project.id)?.policy;
-      if (!latest) throw new Error("当前项目未在最新快照中，请刷新项目列表。");
-      setDraft(copyInput(latest)); setRevision(latest.revision); setDirty(false); setEvaluation(null);
-      onSaved(latest); setMessage("已载入最新策略，本地草稿已替换。");
-    } catch (cause) { setError(officeError(cause)); }
-    finally { setReloading(false); }
-  }
-  async function evaluate() {
-    if (revision === 0 || dirty || evaluating) return;
-    setEvaluating(true); setEvaluation(null); setEvaluationError("");
-    const calls = Array.from({ length: planCliCalls }, () => ({ provider_id: planProvider, model: planModel, ...(planEffort ? { effort: planEffort } : {}) }));
-    const plan: OfficePlan = {
-      manager: { id: "manager", task: planTask, cli_calls: calls },
-      subagents: Array.from({ length: planAgents }, (_, index) => ({ id: `agent-${index + 1}`, task: `${planTask} · 子任务 ${index + 1}`, cli_calls: calls.map((call) => ({ ...call })) })),
-    };
-    try { setEvaluation(await api.evaluatePlan(project.id, revision, plan)); }
-    catch (cause) { setEvaluationError(officeError(cause)); }
-    finally { setEvaluating(false); }
-  }
-  const choices = [...installed, ...draft.providers.filter((saved) => !installed.some((entry) => entry.providerId === saved.provider_id)).map((saved) => ({ providerId: saved.provider_id, label: saved.provider_id, installed: false, native: false, adapterAvailable: false, status: "missing", message: "已保存的 CLI 当前未发现，请重新扫描或选择其它工具。" }))];
-  const planCatalog = ownValue(catalogs, planProvider);
-  const policyChangedElsewhere = project.policy.revision !== revision;
-
-  return <div className="ao-policy-layout">
-    <div className="ao-policy-main">
-      <section className="ao-card ao-policy-card">
-        <div className="ao-card-heading"><div><span className="ao-small-kicker">MANAGEMENT STYLE</span><h3>把团队，交给你的方式</h3></div><span className="ao-tag">仅当前项目</span></div>
-        <p className="ao-muted">项目闲置时也可以预先设置；设置会保存到这个项目。</p>
-        <div className="ao-mode-options" role="group" aria-label="调度模式">
-          <button type="button" className={`ao-mode-card ${draft.mode === "auto" ? "is-active" : ""}`} disabled={saving} aria-pressed={draft.mode === "auto"} onClick={() => change({ ...draft, mode: "auto", subagents: { min: 0, max: 4 }, cli_per_agent: { min: 0, max: 2 } })}><span className="ao-mode-icon">✳</span><strong>总经理自主安排 <small>默认</small></strong><span>由 AI 判断任务规模、分工与 CLI 使用。</span><i /></button>
-          <button type="button" className={`ao-mode-card ${draft.mode === "custom" ? "is-active" : ""}`} disabled={saving} aria-pressed={draft.mode === "custom"} onClick={() => change({ ...draft, mode: "custom" })}><span className="ao-mode-icon">≡</span><strong>我来设定边界</strong><span>明确子 Agent 人数、CLI 次数与模型。</span><i /></button>
-        </div>
-        <div className={`ao-range-grid ${draft.mode === "auto" ? "is-inactive" : ""}`}>
-          <RangeFields title="总经理可委派的子 Agent" caption="0 人允许独立完成；最少人数按已核实派发检查。" name="subagents" value={draft.subagents} max={32} disabled={draft.mode === "auto" || saving} onChange={(value) => change({ ...draft, subagents: value })} />
-          <RangeFields title="每个 Agent 的 CLI 调用" caption="包含总经理；最少次数按已核实调用检查。" name="cli" value={draft.cli_per_agent} max={32} disabled={draft.mode === "auto" || saving} onChange={(value) => change({ ...draft, cli_per_agent: value })} />
-        </div>
-        {invalidRange && <p role="alert" className="ao-error">最少数量不能大于最多数量。</p>}
-        {invalidBudget && <p role="alert" className="ao-error">最低分工需要 {minimumCliCalls} 次 CLI，超过每轮团队总预算 32 次。请减少最少人数或每人最少调用次数。</p>}
-        <p className="ao-inline-note">新聊天最多可委派 {draft.subagents.max} 位子 Agent，{draft.mode === "custom" ? `每人最多 ${draft.cli_per_agent.max} 次 CLI；` : "CLI 次数由总经理分配；"}包含总经理，每轮团队总预算最多 {maximumCliCalls} 次，不要求用满。</p>
-        {draft.mode === "auto" && <p className="ao-inline-note">自主模式不设置自定义最低执行门槛，人数与工具由总经理安排；已冻结的调用预算和运行权限仍有效。</p>}
-      </section>
-      <section className="ao-card ao-policy-card">
-        <div className="ao-card-heading"><div><span className="ao-small-kicker">CLI TOOLBOX</span><h3>选择本机 CLI</h3></div><span className="ao-tag">按本机发现结果选择</span></div>
-        <p className="ao-muted">使用本机已安装 CLI 和本机登录状态。刷新会查询模型与思考选项；未提供自动选项的工具可按本机帮助使用原生参数调用。</p>{draft.mode === "auto" && <p className="ao-inline-note">当前由总经理自主选择模型。想固定模型，请先选择上方的「我来设定边界」。</p>}
-        <button type="button" className="ao-button ao-button-subtle" disabled={discovering} onClick={() => void discover()}>{discovering ? "扫描本机 CLI 中…" : "重新扫描本机 CLI"}</button>
-        {discoveryError && <p role="alert" className="ao-error">{discoveryError}</p>}
-        {!discovering && installed.length === 0 && !discoveryError && <p className="ao-inline-note">未发现本机 CLI。安装并完成本机登录后，点击重新扫描。</p>}
-        <div className="ao-provider-list">{choices.map((installation) => {
-          const id = installation.providerId, name = installation.label, mark = name.slice(0, 1);
-          const provider = draft.providers.find((item) => item.provider_id === id);
-          const catalog = ownValue(catalogs, id);
-          const models = catalog?.models ?? [];
-          const efforts = modelEfforts(catalog, provider?.model);
-          return <div className="ao-provider" key={id}>
-            <div className="ao-provider-heading"><span className={`ao-provider-mark is-${id}`}>{mark}</span><div><strong>{name}</strong><span>{catalog ? catalog.installed ? catalog.version ? `已发现 · ${catalog.version}` : "已发现本机 CLI" : "本机不可用" : installation.installed ? "已发现本机安装" : "当前未发现"}</span></div><label className="ao-toggle"><input type="checkbox" aria-label={`启用 ${name}`} checked={provider?.enabled ?? false} disabled={draft.mode === "auto" || saving || (!installation.installed && !provider?.enabled)} onChange={(event) => updateProvider(id, { enabled: event.target.checked })} /><span /></label></div>
-            <div className="ao-provider-fields"><label>模型<select aria-label={`${name} 模型`} value={provider?.model ?? ""} disabled={draft.mode === "auto" || !provider?.enabled || saving} onChange={(event) => updateProvider(id, { model: event.target.value || null, effort: null })}><option value="">由总经理选择</option>{provider?.model && !models.includes(provider.model) && <option value={provider.model}>{provider.model} · 待发现验证</option>}{models.map((model) => <option value={model} key={model}>{model}</option>)}</select></label><button type="button" className="ao-button ao-button-subtle" disabled={Boolean(ownValue(refreshing, id)) || !installation.installed || !installation.native} onClick={() => void refreshCatalog(id)} aria-label={`刷新 ${name} 模型列表`}><span className={ownValue(refreshing, id) ? "ao-spin" : ""}>↻</span>{ownValue(refreshing, id) ? "发现中…" : "刷新模型"}</button></div>
-            <label className="ao-effort-field">思考强度<select aria-label={`${name} 思考强度`} value={provider?.effort ?? ""} disabled={draft.mode === "auto" || !provider?.enabled || efforts.length === 0 || saving} onChange={(event) => updateProvider(id, { effort: event.target.value || null })}><option value="">{efforts.length ? "由总经理选择" : "未发现支持的思考选项"}</option>{provider?.effort && !efforts.includes(provider.effort) && <option value={provider.effort}>{provider.effort} · 待发现验证</option>}{efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label>
-            {!catalog && <p className="ao-catalog-note">{installation.message}</p>}
-            {catalog && <p className={`ao-catalog-note ${catalog.status === "error" ? "ao-error" : ""}`}>{catalog.message}<span>{catalog.accountAvailabilityVerified ? "账号可用性已核验" : "账号可用性未核验"} · {catalog.source === "live_catalog" ? "实时目录" : catalog.source === "installed_help" ? "本机 CLI 帮助" : "无可用目录"}</span></p>}
-            {ownValue(catalogErrors, id) && <p className="ao-error" role="alert">{ownValue(catalogErrors, id)}</p>}
-          </div>;
-        })}</div>
-      </section>
-      <div className="ao-save-bar"><div><strong>{dirty ? "有尚未保存的修改" : revision === 0 ? "首次使用请保存团队策略" : "没有待保存修改"}</strong><span>当前版本 {revision} · {project.name}</span></div><button type="button" className="ao-button ao-button-primary" disabled={saving || reloading || invalidRange || invalidBudget || (!dirty && revision > 0)} onClick={() => void save()}>{saving ? "保存中…" : "保存团队策略"}</button></div>
-      {message && <p className="ao-success" role="status">{message}</p>}
-      {(error || policyChangedElsewhere) && <div className="ao-policy-error" role="alert"><p>{error || "策略已在其他位置更新。当前草稿保留，请载入最新策略后再编辑。"}</p><button type="button" className="ao-button ao-button-subtle" disabled={reloading || saving} onClick={() => void reload()}>{reloading ? "载入中…" : "载入最新策略（替换草稿）"}</button></div>}
-      <section className="ao-advanced-diagnostics">
-        <button type="button" className="ao-advanced-toggle" aria-expanded={diagnosticsOpen} aria-controls={diagnosticsId} onClick={() => setDiagnosticsOpen((open) => !open)}><span>高级诊断</span><span aria-hidden="true">{diagnosticsOpen ? "收起 −" : "展开 +"}</span></button>
-        {diagnosticsOpen && <div id={diagnosticsId} className="ao-plan-card"><h3>假设计划校验</h3><p className="ao-muted">仅检查下面的假设计划是否符合已保存策略，不修改设置或启动任务。</p><label>假设的总任务<input aria-label="验证计划的总任务" disabled={evaluating} value={planTask} onChange={(event) => { setPlanTask(event.target.value); setEvaluation(null); }} /></label><div className="ao-plan-counts"><label>假设的子 Agent 人数<input type="number" aria-label="计划子 Agent 数量" disabled={evaluating} min={0} max={32} value={planAgents} onChange={(event) => { setPlanAgents(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label><label>假设的每人 CLI 次数<input type="number" aria-label="计划每个 Agent CLI 次数" disabled={evaluating} min={0} max={32} value={planCliCalls} onChange={(event) => { setPlanCliCalls(boundedCount(event.target.value, 32)); setEvaluation(null); }} /></label></div>
-        {planCliCalls > 0 && <div className="ao-plan-cli"><label>假设的 CLI 工具<select aria-label="验证计划 CLI 工具" value={planProvider} onChange={(event) => { setPlanProvider(event.target.value as CliProviderId); setPlanModel(""); setPlanEffort(""); setEvaluation(null); }}><option value="">选择已发现的 CLI</option>{installed.map((entry) => <option key={entry.providerId} value={entry.providerId} disabled={!entry.adapterAvailable}>{entry.label}</option>)}</select></label><label>假设的调用模型<select aria-label="验证计划模型" value={planModel} onChange={(event) => { setPlanModel(event.target.value); setPlanEffort(""); setEvaluation(null); }}><option value="">先刷新并选择模型</option>{planCatalog?.models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>{Boolean(modelEfforts(planCatalog, planModel).length) && <label>假设的思考强度<select aria-label="验证计划思考强度" value={planEffort} onChange={(event) => { setPlanEffort(event.target.value); setEvaluation(null); }}><option value="">请选择</option>{modelEfforts(planCatalog, planModel).map((effort) => <option key={effort} value={effort}>{effort}</option>)}</select></label>}</div>}
-        <button type="button" className="ao-button ao-button-primary" onClick={() => void evaluate()} disabled={evaluating || dirty || revision === 0 || !planTask.trim() || (planCliCalls > 0 && (!planModel || (Boolean(modelEfforts(planCatalog, planModel).length) && !planEffort)))}>{evaluating ? "验证中…" : "验证委派计划"}<span>↗</span></button>
-        {(dirty || revision === 0) && <p className="ao-inline-note">诊断使用已保存的策略，请先保存上方设置。</p>}
-        {evaluation && <div className={`ao-evaluation ${evaluation.admitted ? "is-admitted" : "is-rejected"}`} role="status"><strong>{evaluation.admitted ? "✓ 计划符合已保存策略" : "计划未通过策略检查"}</strong><span>{evaluation.subagent_count} 位子 Agent · {evaluation.cli_call_count} 次 CLI · 策略 v{evaluation.policy_revision}</span>{evaluation.violations.length > 0 && <ul>{evaluation.violations.map((violation, index) => <li key={`${violation.code}-${index}`}>{violation.agent_id ? `${violation.agent_id}：` : ""}{violation.message}</li>)}</ul>}<small>仅验证，没有启动 Agent 或 CLI 进程。</small></div>}
-        {evaluationError && <p className="ao-error" role="alert">{evaluationError}</p>}
-        </div>}
-      </section>
-    </div>
+  return <div className="ao-policy-panel">
+    <section className="ao-card ao-policy-card"><h3>按任务需要自由协作</h3>
+      <p>主 Agent 可以独立完成，也可以调用子 Agent 或 CLI。不强制调用，不设置人数、次数、模型或思考强度限制。</p>
+      <p>模型和思考强度可按每次任务选择，也可以沿用工具默认设置。任务是否完成以实际交付和验收结果为准。</p>
+      <p className="ao-inline-note">协作采用软约定：各 Agent 和 CLI 各自维护记忆、执行目标和验收标准，不读取或修改其他实例存放这三类内容的文件夹。其余项目目录、工具、执行状态和成果在原有授权范围内正常共享。</p>
+      <p className="ao-muted">原有团队数量及模型限制已停用，无需为新聊天另存策略。</p>
+    </section>
+    <section className="ao-card ao-policy-card"><h3>本机 CLI</h3>
+      <p className="ao-muted">从当前项目的 Runner 读取执行目录，与主 Agent 使用同一来源。发现安装、调用配置、Runner 加载和真实执行分别核实。</p>
+      <button type="button" className="ao-button ao-button-subtle" disabled={busy} onClick={() => void discover()}>{busy ? "扫描本机 CLI 中…" : "重新扫描本机 CLI"}</button>
+      {error && <p role="alert" className="ao-error">{error}</p>}
+      {!busy && installed.length === 0 && !error && <p>未发现本机 CLI。主 Agent 仍可独立完成任务。</p>}
+      <div className="ao-provider-list">{installed.map((entry) => {
+        const catalog = Object.hasOwn(catalogs, entry.providerId) ? catalogs[entry.providerId] : undefined;
+        return <article className="ao-provider" key={entry.providerId}><h4>{entry.label}</h4>
+          <p>{entry.installed ? "已发现本机安装" : "当前未发现"}{catalog?.version ? ` · ${catalog.version}` : ""}</p>
+          <dl className="ao-member-facts" aria-label={`${entry.label} 执行链状态`}>
+            <div><dt>发现安装</dt><dd>{entry.installed ? "已发现" : "未发现"}</dd></div>
+            <div><dt>调用配置</dt><dd>{entry.adapterAvailable ? "配置完成" : "调用配置未就绪"}</dd></div>
+            <div><dt>Runner 加载</dt><dd>{entry.executionReady === true ? "Runner 已加载" : entry.executionReady === false ? "Runner 尚未加载可执行资源" : "加载状态未观测"}</dd></div>
+            <div><dt>真实执行</dt><dd>以运行任务中的 Job 状态、输出和退出码为准；目录不证明执行成功。</dd></div>
+            {entry.reasonCode && <div><dt>具体原因</dt><dd>{entry.reasonCode}</dd></div>}
+          </dl>
+          <p>{catalog?.message ?? entry.message}</p>
+          <button type="button" className="ao-button ao-button-subtle" disabled={busy || refreshing.includes(entry.providerId) || !entry.installed} onClick={() => void refresh(entry.providerId)} aria-label={`刷新 ${entry.label} 模型列表`}>{refreshing.includes(entry.providerId) ? "发现中…" : "刷新模型"}</button>
+          {catalog && <><p>模型：{catalog.models.join("、") || "可沿用 CLI 默认设置"}</p><p>思考选项：{catalog.efforts.join("、") || "使用工具默认设置"}</p><p className="ao-muted">{catalog.accountAvailabilityVerified ? "账号可用性已核验" : "账号可用性未核验"}</p></>}
+        </article>;
+      })}</div>
+    </section>
   </div>;
-}
-
-function boundedCount(value: string, max: number): number {
-  return Math.max(0, Math.min(max, Math.trunc(Number(value) || 0)));
-}
-
-function RangeFields({ title, caption, name, value, max, disabled, onChange }: { title: string; caption: string; name: string; value: { min: number; max: number }; max: number; disabled: boolean; onChange: (value: { min: number; max: number }) => void }) {
-  return <fieldset className="ao-count-range" disabled={disabled}><legend>{title}</legend><p>{caption}</p><div><label htmlFor={`ao-${name}-min`}>最少<input id={`ao-${name}-min`} aria-label={`${title}最少数量`} type="number" min={0} max={max} value={value.min} onChange={(event) => onChange({ ...value, min: boundedCount(event.target.value, max) })} /></label><span>—</span><label htmlFor={`ao-${name}-max`}>最多<input id={`ao-${name}-max`} aria-label={`${title}最多数量`} type="number" min={0} max={max} value={value.max} onChange={(event) => onChange({ ...value, max: boundedCount(event.target.value, max) })} /></label></div></fieldset>;
 }

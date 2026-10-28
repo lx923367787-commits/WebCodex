@@ -4,10 +4,13 @@ These rules apply to ordinary repository work. Read linked domain guidance only 
 
 WebCodex is actively developed. Requested features, fixes, and reliability improvements are welcome; preserve credential, process-tree, transport, durability, and boundedness contracts.
 
-## Model selection when delegating
+## Collaboration and privacy
 
-- Before calling an external Agent CLI (including CodeBuddy/WorkBuddy, Gemini, or Codex), discover the installed CLI/version and its actual model and reasoning options using the configured discovery tool, that CLI's help/model catalog, or its official documentation. The coordinating GPT selects the model and supported effort for the task and passes them explicitly through native arguments; do not silently use defaults or copy another CLI's option names. If effort is unsupported, state that and omit it. Help listings do not prove account availability. Preserve the recorded selection when resuming the same CLI task.
-- For browser child tasks, discover `chat-agents` profiles and pass an explicit `thinking_profile_id`. A long-running child uses its own real Host Goal and registers it with `bind_chat_task_goal` before relying on automatic handoff; child successors preserve the original selection. Unbound main Goal handoffs use the current highest Pro setting. Missing child binding/evidence must stop, never silently fall back to the main setting. These preferences grant no additional authority.
+- Sub-agents and external CLIs are optional. Do not require any delegation or CLI call, minimum/maximum count, model tier or thinking strength. Choose them only as the task needs; omission uses the tool's supported default.
+- Verify actual installed CLI arguments when selecting a model or effort; discovery is capability information, not an extra framework restriction or a prerequisite to use a supported default.
+- Within the authorized project, participants share project/workspace files, tools, execution status, logs, stdout/stderr and results. Only memory, execution objectives and acceptance criteria use the soft personal-directory convention: maintain your own and do not read or modify another Agent/CLI instance's directories for those three categories or deliberately retrieve those contents from copies. This is an instruction, not a technical guarantee of unreadability. Never classify an entire Agent directory, workspace, tool or output as private. Existing account/project authorization and credential audiences remain in force.
+- Read `agent_assignment` / `agent_identity` for the Agent's actual Server broker resource locations. For a launched CLI use its Runner-provided `WEBCODEX_MEMORY_DIR`, `WEBCODEX_OBJECTIVES_DIR` and `WEBCODEX_ACCEPTANCE_DIR`; do not guess paths or treat Server paths as Runner paths. Keep independently delegated task text as the receiver's own objective; do not automatically copy the parent's memory, objectives or acceptance criteria.
+- Keep current identity, STOP/PAUSE, duplicate-dispatch prevention and same-task handoff continuity. Those lifecycle checks do not impose collaboration quotas.
 
 ## 1. Verify and preserve
 
@@ -56,7 +59,7 @@ Testing guidance: [`docs/TESTING.md`](docs/TESTING.md).
 
 - Never print, commit, or expose credentials, authorization headers, private keys, tokens, secret files, or sensitive command output.
 - Before committing, review status and diff. Keep unrelated work separate; do not amend an unrelated commit.
-- Push, publish, tag, release, deploy, restart services, or alter external systems only when explicitly requested with a named destination.
+- Push, publish only when explicitly requested with a named destination.
 - Never force-push, move published tags, overwrite releases, or rewrite published history without an explicit request naming the operation and target. Release operations must also obey the immutable artifact contract below; failed pre-publication tag recovery is permitted only through its explicitly authorized guarded reclaim path.
 - Named development/dogfood deployments are separate from releases. Deploy the reviewed source commit, record its build identity without hiding dirty state, preserve rollback, and run focused smoke. They do not authorize version bumps, tagging, or publication.
 - Before finishing, check the final diff, whitespace, worktree, conflicts, and active jobs. Report the outcome, changed files/targets, validation, Git/job state, material deviations, and remaining risks. State whether push, publication, deployment, or service operations occurred.
@@ -78,6 +81,7 @@ Use these as domain sources of truth rather than duplicating their detailed cont
 ## 7. 文件生命周期管理（长期生效）
 
 ### 范围与责任
+
 
 - AI 对本项目文件的创建、修改、合并、清理和删除负责；创建前先查找可复用实现，避免重复文件和临时产物长期堆积。
 - 本章适用于本仓库及其子目录中的开发任务，仅授权处理当前任务已授权的仓库或 worktree。不得将权限扩大到用户主目录、其他项目、其他 worktree 或项目外文件；操作前核实绝对路径及符号链接、目录联接的实际目标。

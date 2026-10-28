@@ -59,23 +59,9 @@ fn agent_team_execution_delivery_contract_is_deterministic_and_keeps_task_on_std
     let prompt = cli_worker_prompt(brief);
     assert_eq!(prompt, cli_worker_prompt(brief));
     assert!(prompt.starts_with(brief));
-    assert!(prompt.ends_with(CLI_DELIVERY_V2));
-    assert!(prompt.contains("publish/manifest.json"));
-    let example: Value = serde_json::from_str(
-        CLI_DELIVERY_V2
-            .lines()
-            .find(|line| line.starts_with("{\"version\":"))
-            .expect("delivery prompt must include its manifest example"),
-    )
-    .unwrap();
-    assert_eq!(
-        example,
-        serde_json::json!({
-            "version": 2,
-            "summary": "Concrete result and checks performed",
-            "files": [{ "path": "files/report.txt" }]
-        })
-    );
+    assert!(prompt.ends_with(CLI_PRIVATE_DIRECTORIES));
+    assert!(!prompt.contains("publish/manifest.json"));
+    assert!(prompt.contains("WEBCODEX_MEMORY_DIR"));
     let (_, args, stdin) = crate::tool_runtime::fixed_cli_process(
         "antigravity",
         "explicit-model",
@@ -118,6 +104,7 @@ fn controls(id: &str) -> ReviewedAgentCliControls {
 fn provider(id: &str) -> ObservedCliProvider {
     let controls = controls(id);
     ObservedCliProvider {
+        host_cli: None,
         provider_id: id.into(),
         version: controls.cli_version.clone(),
         executable_sha256: controls.executable_sha256.clone(),
@@ -147,7 +134,7 @@ fn model_specific_cli_efforts_are_checked_before_dispatch() {
         "model-a",
         Some("high")
     ));
-    assert!(!cli_selection_discovered(&observed, "model-a", None));
+    assert!(cli_selection_discovered(&observed, "model-a", None));
     assert!(cli_selection_discovered(&observed, "model-b", None));
     assert!(!cli_selection_discovered(&observed, "model-b", Some("low")));
     observed.model_efforts.remove("model-a");
@@ -155,7 +142,7 @@ fn model_specific_cli_efforts_are_checked_before_dispatch() {
 }
 
 #[test]
-fn antigravity_exact_catalog_slug_pins_effort_without_override() {
+fn known_catalog_models_do_not_require_an_effort_override() {
     let mut observed = provider("antigravity");
     observed.models.push("gemini-3.8-flash-high".into());
     assert!(cli_selection_discovered(
@@ -164,9 +151,9 @@ fn antigravity_exact_catalog_slug_pins_effort_without_override() {
         None
     ));
     assert!(!cli_selection_discovered(&observed, "unknown-high", None));
-    assert!(!cli_selection_discovered(&observed, "explicit-model", None));
+    assert!(cli_selection_discovered(&observed, "explicit-model", None));
     observed.provider_id = "workbuddy".into();
-    assert!(!cli_selection_discovered(
+    assert!(cli_selection_discovered(
         &observed,
         "gemini-3.8-flash-high",
         None
@@ -187,6 +174,8 @@ fn catalog(project: &str, providers: Vec<ObservedCliProvider>) -> AgentTeamCatal
         host_profile_ids: vec!["explicit-host-profile".into()],
         host_catalog_ref: "private-host-catalog-ref".into(),
         host_profiles_expires_at_ms: 2_000,
+        host_profiles_error: None,
+        host_default_supported: true,
     }
 }
 
@@ -198,6 +187,51 @@ fn run_fixture() -> (tempfile::TempDir, Database, VerifiedAgentRun) {
         .unwrap();
     let binding = db.authenticate_agent_run(&grant.token).unwrap();
     (temp, db, binding)
+}
+
+#[test]
+fn agent_team_default_selection_does_not_depend_on_expired_host_profiles() {
+    let mut observed = catalog("agent:test-runner:project", vec![]);
+    observed.host_profiles_expires_at_ms = now_ms() + 60_000;
+    assert!(validate_host_selection(&observed, "explicit-host-profile", true).is_ok());
+    observed.host_profiles_error = Some("agent_team_host_profiles_expired".into());
+    observed.host_profiles_expires_at_ms = 0;
+    observed.host_profile_ids.clear();
+    assert!(validate_host_selection(&observed, "default", true).is_ok());
+    assert!(validate_host_selection(&observed, "default", false).is_ok());
+    assert_eq!(
+        validate_host_selection(&observed, "explicit-host-profile", false).unwrap_err(),
+        "agent_team_host_profiles_expired"
+    );
+    observed.host_default_supported = false;
+    assert_eq!(
+        validate_host_selection(&observed, "default", true).unwrap_err(),
+        "agent_team_host_default_unavailable"
+    );
+    // Direct CLI execution still requires its own catalog/controls, but Host
+    // support is needed only if this attempt later enters recovery.
+    assert!(validate_host_selection(&observed, "default", false).is_ok());
+    let projected = catalog_projection(&observed);
+    assert_eq!(
+        projected["host_profiles_error"],
+        "agent_team_host_profiles_expired"
+    );
+    assert_eq!(projected["default_selection"], "default");
+}
+
+#[test]
+fn agent_team_start_contracts_normalize_omission_without_inventing_profile_ids() {
+    let member: crate::agent_team::AgentStart = serde_json::from_value(json!({
+        "root_task_id":"root", "source_task_id":"child", "enrollment_id":"enrollment", "idempotency_key":"stable"
+    })).unwrap();
+    assert!(member.validate().is_ok());
+    assert_eq!(member.thinking_profile_id, "");
+    assert!(member.validate().is_ok());
+    let cli: crate::agent_team::CliStart = serde_json::from_value(json!({
+        "root_task_id":"root", "source_task_id":"child", "call_index":0, "idempotency_key":"stable"
+    }))
+    .unwrap();
+    assert_eq!(cli.fallback_thinking_profile_id, "default");
 }
 
 fn assert_controls_unverified(provider: &ObservedCliProvider) {
@@ -597,7 +631,7 @@ fn agent_team_execution_catalog_preserves_models_without_inventing_effort_choice
         json!(["explicit-model"])
     );
     assert_eq!(projected["providers"][0]["efforts"], json!([]));
-    assert_eq!(projected["selection_required"], true);
+    assert_eq!(projected["selection_required"], false);
 }
 
 #[test]
@@ -616,6 +650,7 @@ fn agent_team_execution_fixed_argv_keeps_model_and_effort_literal_and_brief_on_s
             "--effort",
             effort,
             "--print",
+            "-y",
             "--input-format",
             "text",
             "--output-format",
@@ -645,7 +680,7 @@ fn agent_team_execution_fixed_argv_keeps_model_and_effort_literal_and_brief_on_s
     let input: Value = serde_json::from_str(&stdin).unwrap();
     assert_eq!(input, json!({"event":"user","message":{"content":brief}}));
     assert!(!args.iter().any(|arg| arg.contains("must-stay-input")));
-    assert!(crate::tool_runtime::fixed_cli_process("workbuddy", model, None, brief).is_err());
+    assert!(crate::tool_runtime::fixed_cli_process("workbuddy", model, None, brief).is_ok());
     assert!(
         crate::tool_runtime::fixed_cli_process("unknown-provider", model, Some(effort), brief)
             .is_err()
@@ -653,7 +688,7 @@ fn agent_team_execution_fixed_argv_keeps_model_and_effort_literal_and_brief_on_s
 }
 
 #[test]
-fn agent_team_execution_no_effort_is_allowed_only_for_catalogs_without_effort_options() {
+fn agent_team_execution_default_effort_is_allowed_with_or_without_override_options() {
     let mut observed = provider("antigravity");
     observed.efforts.clear();
     assert!(cli_selection_discovered(&observed, "explicit-model", None));
@@ -664,7 +699,7 @@ fn agent_team_execution_no_effort_is_allowed_only_for_catalogs_without_effort_op
         Some("none")
     ));
     observed.efforts.push("high".into());
-    assert!(!cli_selection_discovered(&observed, "explicit-model", None));
+    assert!(cli_selection_discovered(&observed, "explicit-model", None));
     assert!(cli_selection_discovered(
         &observed,
         "explicit-model",
@@ -708,7 +743,7 @@ fn agent_team_execution_catalog_projection_omits_private_resources_controls_and_
         json!(["explicit-host-profile"])
     );
     assert_eq!(output["account_availability_verified"], false);
-    assert_eq!(output["selection_required"], true);
+    assert_eq!(output["selection_required"], false);
     assert_eq!(output["providers"][0]["execution_controls_verified"], false);
     assert!(output["providers"][0].get("controls").is_none());
     let serialized = serde_json::to_string(&output).unwrap();
@@ -856,11 +891,13 @@ fn agent_team_execution_worker_observation_exposes_cas_without_private_completio
         projection,
         json!({
             "task_id":"original-worker-task", "state":"failed",
-            "revision":8, "completion_expected_revision":7
+            "revision":8, "completion_expected_revision":7,
+            "result":"private-result", "reason":"private-reason"
         })
     );
     let serialized = projection.to_string();
-    assert!(!serialized.contains("private"));
+    assert!(serialized.contains("private-result"));
+    assert!(!serialized.contains("private-worker-agent"));
     assert!(projection.get("stopped_confirmed").is_none());
     assert!(projection.get("job").is_none());
 }
@@ -874,7 +911,7 @@ fn agent_team_execution_input_material_changes_launch_hash_and_is_not_argv() {
         sha256: "a".repeat(64),
     }];
     let prompt = cli_worker_input_prompt("Review material", &inputs, None).unwrap();
-    assert!(prompt.contains("workspace starts empty"));
+    assert!(prompt.contains("normal project working directory"));
     let (_, args, stdin) =
         crate::tool_runtime::fixed_cli_process("antigravity", "gemini-fixed", None, &prompt)
             .unwrap();
@@ -896,4 +933,46 @@ fn agent_team_execution_input_material_changes_launch_hash_and_is_not_argv() {
         h,
         compute_launch_intent_hash(&process, Some(&second), 900).unwrap()
     );
+}
+
+#[test]
+fn cli_default_selection_keeps_supported_effort_without_model_discovery() {
+    let mut observed = provider("workbuddy");
+    observed.models.clear();
+    observed.efforts.clear();
+    observed.model_efforts.clear();
+    observed.source = "configured_default".into();
+    let default = webcodex_core::cli_adapter::CliModelSelection::default();
+    assert!(cli_selection_discovered(&observed, &default, None));
+    assert!(cli_selection_discovered(&observed, &default, Some("high")));
+    assert!(!cli_selection_discovered(&observed, "default", None));
+    let (_, args, stdin) = crate::tool_runtime::fixed_cli_process(
+        "workbuddy",
+        &default,
+        Some("high"),
+        "Independent delegated task",
+    )
+    .unwrap();
+    assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]));
+    assert!(!args.iter().any(|arg| arg == "--model"));
+    assert_eq!(stdin, "Independent delegated task");
+}
+
+#[test]
+fn cli_default_effort_support_is_checked_by_the_execution_adapter() {
+    let mut adapter = webcodex_core::cli_adapter::cli_adapters(&[])
+        .unwrap()
+        .into_iter()
+        .find(|adapter| adapter.id == "workbuddy")
+        .unwrap();
+    adapter.invocation.as_mut().unwrap().effort_flag = None;
+    let error = crate::tool_runtime::cli_process_with_adapter(
+        Some(&adapter),
+        "workbuddy",
+        webcodex_core::cli_adapter::CliModelSelection::default(),
+        Some("high"),
+        "Independent delegated task",
+    )
+    .unwrap_err();
+    assert_eq!(error.output["error_kind"], "cli_adapter_effort_unsupported");
 }

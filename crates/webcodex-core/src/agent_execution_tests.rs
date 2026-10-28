@@ -197,8 +197,8 @@ fn agent_execution_v1_worker_identity_is_independent_and_bounded() {
     assert!(value.validate().is_err());
     value.executor.run.generation = 1;
     value.requester.call_index = 32;
-    assert!(value.validate().is_err());
-    value.requester.call_index = 31;
+    value.validate().unwrap();
+    value.requester.call_index = u32::MAX;
     value.executor.cli_session_scope_id = "x".repeat(AGENT_EXECUTION_ID_MAX_BYTES);
     value.validate().unwrap();
 }
@@ -555,6 +555,7 @@ fn agent_execution_v1_capability_is_an_explicit_non_baseline_registration_bit() 
 #[test]
 fn agent_execution_resource_facts_are_closed_and_use_opaque_executable_identity() {
     let fact = AgentExecutionResourceDescriptor {
+        host_cli: None,
         project_workspace_copy: false,
         reviewed_controls: None,
         provider: None,

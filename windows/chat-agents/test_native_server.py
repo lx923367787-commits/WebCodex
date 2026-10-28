@@ -107,11 +107,17 @@ class NativeServerTests(unittest.TestCase):
 
     def test_extra_fields_and_missing_fields_do_not_reach_service(self):
         invalid = [{**SPAWN, key: "arbitrary"} for key in ("path", "url", "javascript")]
-        invalid += [{key: value for key, value in SPAWN.items() if key != missing} for missing in SPAWN]
+        invalid += [{key: value for key, value in SPAWN.items() if key != missing} for missing in SPAWN if missing != "thinking_profile_id"]
         for args in invalid:
             with self.subTest(args=args):
                 self.assertEqual(self.call("spawn_chat_task", args)["error"]["code"], -32602)
                 self.assertEqual(self.service.calls, [])
+
+    def test_spawn_can_omit_thinking_profile(self):
+        args = {key: value for key, value in SPAWN.items() if key != "thinking_profile_id"}
+        self.assertIn("result", self.call("spawn_chat_task", args))
+        spec = next(spec for spec in native.TOOL_SPECS if spec["name"] == "spawn_chat_task")
+        self.assertNotIn("thinking_profile_id", spec["inputSchema"]["required"])
 
     def test_spawn_text_bounds_and_types(self):
         for key, maximum in (("task", 12000), ("parent_task_id", 128), ("idempotency_key", 128), ("thinking_profile_id", 128)):

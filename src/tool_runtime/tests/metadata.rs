@@ -391,6 +391,7 @@ async fn register_agent_projects_for_auth(
                         internal_posix_script: false,
                         structured_execution_jobs: false,
                         agent_isolated_execution_v1: false,
+                        agent_program_execution_v1: false,
                         detached_process_jobs: false,
                         lsp_read_only_navigation: false,
                         lsp_call_hierarchy: false,
@@ -419,6 +420,7 @@ async fn register_agent_projects_for_auth(
                         native_tool_plugins: false,
                         managed_ssh_resources: false,
                         runner_config_control: false,
+                        tool_connections: false,
                     },
                 ),
                 policy: None,
@@ -1239,6 +1241,7 @@ async fn list_projects_shows_shell_profile_resolution() {
         shell_profiles: Some(summary),
         tool_providers: None,
         mcp_gateway_providers: None,
+        mcp_gateway_revision: None,
     };
     let mut configured = registered_project("rust-proj", "/root/git/rust");
     configured.shell_profile = Some("rust".to_string());
@@ -1389,6 +1392,7 @@ async fn runtime_status_shell_profiles_summary_is_sanitized() {
                 shell_profiles: Some(summary),
                 tool_providers: None,
                 mcp_gateway_providers: None,
+                mcp_gateway_revision: None,
             }),
         })
         .await
@@ -2832,6 +2836,7 @@ async fn runtime_status_includes_sanitized_policy_summary() {
             config_reload: RunnerConfigReloadStatus::default(),
         }),
         mcp_gateway_providers: None,
+        mcp_gateway_revision: None,
     });
     registry.register(registration).await.unwrap();
     let current_provider = ToolProvidersStatus {
@@ -3265,6 +3270,7 @@ async fn list_runners_includes_sanitized_policy_summary() {
         shell_profiles: None,
         tool_providers: None,
         mcp_gateway_providers: None,
+        mcp_gateway_revision: None,
     });
     registry.register(registration).await.unwrap();
     let runtime = ToolRuntime::new(registry, Arc::new(RuntimeInfo::default()));

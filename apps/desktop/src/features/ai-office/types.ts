@@ -7,8 +7,11 @@ export interface CliInstallation {
   adapterAvailable: boolean;
   status: string;
   message: string;
+  executionReady?: boolean;
+  executionMode?: string;
+  reasonCode?: string;
 }
-export type TeamAction = "policy-get" | "policy-save" | "plan-list" | "plan-read" | "task-create";
+export type TeamAction = "policy-get" | "policy-save" | "plan-list" | "plan-read" | "task-create" | "cli-discover" | "cli-models";
 export type OfficeEnforcement = "demo_plan_only" | "managed_tasks";
 export interface CountRange { min: number; max: number }
 export interface OfficeProvider {
@@ -68,7 +71,7 @@ export interface CliCatalog {
   checkedAt: string;
   accountAvailabilityVerified: boolean;
 }
-export interface OfficeCliCall { provider_id: CliProviderId; model: string; effort?: string | null; instruction?: string | null }
+export interface OfficeCliCall { provider_id: CliProviderId; model?: string | null; effort?: string | null; instruction?: string | null }
 export interface OfficePlanAgent { id: string; task: string; cli_calls: OfficeCliCall[] }
 export interface OfficePlan { manager: OfficePlanAgent; subagents: OfficePlanAgent[] }
 export interface OfficePlanEvaluation {
@@ -83,7 +86,7 @@ export interface AiOfficeApi {
   team?(action: TeamAction, params: Record<string, unknown>): Promise<unknown>;
   snapshot(projectId?: string): Promise<OfficeSnapshot>;
   savePolicy(projectId: string, expectedRevision: number, policy: OfficePolicyInput): Promise<OfficePolicy>;
-  discoverCli(): Promise<CliInstallation[]>;
-  refreshCli(providerId: CliProviderId): Promise<CliCatalog>;
+  discoverCli(projectId?: string): Promise<CliInstallation[]>;
+  refreshCli(providerId: CliProviderId, projectId?: string): Promise<CliCatalog>;
   evaluatePlan(projectId: string, expectedRevision: number, plan: OfficePlan): Promise<OfficePlanEvaluation>;
 }

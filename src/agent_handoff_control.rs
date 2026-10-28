@@ -88,18 +88,6 @@ fn timeout() -> Result<u64, String> {
     }
 }
 
-fn failure_code(value: Option<&str>) -> Option<&'static str> {
-    match value {
-        Some("launch_failed") => Some("launch_failed"),
-        Some("thinking_policy_changed") => Some("thinking_policy_changed"),
-        Some("goal_not_active") => Some("goal_not_active"),
-        Some("old_execution_not_quiescent") => Some("old_execution_not_quiescent"),
-        Some("All four handoff startup attempts failed or timed out") => Some("attempts_exhausted"),
-        Some(_) => Some("handoff_failed"),
-        None => None,
-    }
-}
-
 fn reason(value: Option<&str>) -> Result<&str, String> {
     let value = value.unwrap_or("handoff_aborted");
     if matches!(
@@ -160,7 +148,7 @@ fn projection(db: &Database, owner: &str, h: &HostGoalHandoff) -> Result<Value, 
             "plan_version":h.plan_version,"status":h.status,"attempt_count":h.attempt_count,
             "attempt_id":h.attempt_id,"candidate_context_epoch":h.candidate_context_epoch,
             "deadline_at":h.deadline_at,"timeout_secs":h.timeout_secs,"prepared_at":h.prepared_at,
-            "execution_owner_epoch":h.execution_owner_epoch,"failure_reason":failure_code(h.failure_reason.as_deref()),
+            "execution_owner_epoch":h.execution_owner_epoch,"failure_reason":Database::host_goal_handoff_failure_code(h.failure_reason.as_deref()),
             "created_at":h.created_at,"committed_at":h.committed_at,"agent_id":h.agent_id},
         "execution_granted":false,
         "notice":if h.status=="failed" {Some("交接失败，已停止执行，已保留可人工恢复的状态。只有用户明确要求恢复后才能重新启动。")} else {None}

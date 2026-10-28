@@ -267,7 +267,15 @@ fn team_agent_only_one_concurrent_claim_can_send() {
     );
     assert_eq!(a.record.dispatch_attempt_id, b.record.dispatch_attempt_id);
     assert_eq!(a.record.dispatch_count, 1);
-    assert!(a.task.contains("team_cli_start"));
+    assert!(a.task.contains("Subagents and CLI calls are optional"));
+    assert!(a
+        .task
+        .contains("soft convention, not a technical guarantee"));
+    assert!(a
+        .task
+        .contains("Project/workspace files, deliverables, logs, stdout/stderr"));
+    assert!(a.task.contains("Read agent_assignment"));
+    assert!(!a.task.contains("do not bypass its budget"));
     assert!(a.task.contains("Authoritative instruction child"));
 }
 
@@ -802,4 +810,50 @@ fn team_agent_profile_preflight_preserves_selection_and_busy_budget_but_never_re
         .unwrap();
     assert_eq!(cancelled.state, TeamAgentState::Cancelled);
     assert_eq!(cancelled.dispatch_count, 0);
+}
+
+#[test]
+fn team_agent_no_profile_reserves_and_claims_once_with_identity_checks() {
+    let f = Fixture::new();
+    let first =
+        f.db.reserve_team_agent_attempt(&f.owner, PROJECT, &f.root, &f.child, "no-profile", "")
+            .unwrap();
+    assert!(first.created);
+    assert!(first.record.thinking_profile_id.is_empty());
+    let replay =
+        f.db.reserve_team_agent_attempt(&f.owner, PROJECT, &f.root, &f.child, "no-profile", "")
+            .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(first.record, replay.record);
+    assert!(f
+        .db
+        .reserve_team_agent_attempt(
+            &principal('b'),
+            PROJECT,
+            &f.root,
+            &f.child,
+            "no-profile",
+            ""
+        )
+        .is_err());
+    assert!(f
+        .db
+        .reserve_team_agent_attempt(
+            &f.owner,
+            PROJECT,
+            &f.root,
+            &f.child,
+            "no-profile",
+            "different-profile"
+        )
+        .is_err());
+    let claim =
+        f.db.claim_team_agent_attempt(&f.owner, &first.record.team_agent_attempt_id)
+            .unwrap();
+    assert!(claim.dispatch_permitted);
+    assert!(claim.record.thinking_profile_id.is_empty());
+    let again =
+        f.db.claim_team_agent_attempt(&f.owner, &first.record.team_agent_attempt_id)
+            .unwrap();
+    assert!(!again.dispatch_permitted);
 }

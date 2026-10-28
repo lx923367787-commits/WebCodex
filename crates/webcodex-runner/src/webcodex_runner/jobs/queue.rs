@@ -94,6 +94,16 @@ impl JobManager {
                 None
             };
             if immediate_failure.is_none() {
+                if let RunnerJobOperation::StartProcess(operation) = &start.operation {
+                    if operation.context.agent_program.is_some() {
+                        immediate_failure =
+                            webcodex_core::agent_program::AgentProgramStart::from_job(operation)
+                                .and_then(|program| {
+                                    self.admit_agent_program_locked(&program, &sink)
+                                })
+                                .err();
+                    }
+                }
                 if let RunnerJobOperation::StartIsolatedProcess(operation) = &start.operation {
                     // The durable binding is frozen before queue insertion.
                     // The same lifecycle fence covers later dequeue/spawn/close.

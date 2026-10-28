@@ -45,103 +45,6 @@ pub(crate) fn decorate_structured_execution_prestart_denial(
     result.output = Value::Object(output);
 }
 
-/// Remove facts that are fully implied by a successful synchronous terminal
-/// structured execution, but only after the complete ToolResult has already
-/// been recorded into the Session ledger. Failure/uncertain/Job projections
-/// remain explicit because they participate in retry and reconciliation safety.
-pub(super) fn sparsify_terminal_structured_execution_success(
-    tool_name: &str,
-    result: &mut ToolResult,
-) {
-    if !matches!(tool_name, "run_process" | "run_script") || !result.success {
-        return;
-    }
-    let Some(output) = result.output.as_object_mut() else {
-        return;
-    };
-    let terminal_success = output.get("execution_state").and_then(Value::as_str)
-        == Some("completed")
-        && output.get("command_started").and_then(Value::as_bool) == Some(true)
-        && output.get("command_completed").and_then(Value::as_bool) == Some(true)
-        && output.get("command_ok").and_then(Value::as_bool) == Some(true)
-        && output.get("promoted_to_job").and_then(Value::as_bool) == Some(false)
-        && output.get("terminal").and_then(Value::as_bool) == Some(true)
-        && output.get("job_id").map(Value::is_null).unwrap_or(true)
-        && output.get("job_status").map(Value::is_null).unwrap_or(true)
-        && output
-            .get("observation_token")
-            .map(Value::is_null)
-            .unwrap_or(true);
-    if !terminal_success {
-        return;
-    }
-
-    for key in [
-        "promoted_to_job",
-        "terminal",
-        "job_id",
-        "job_status",
-        "observation_token",
-        "effective_timeout_secs",
-        "sync_wait_secs",
-        "execution_state",
-        "command_started",
-        "command_completed",
-        "command_ok",
-        "exit_code",
-        "duration_ms",
-        "purpose",
-        "cwd",
-        "executor",
-    ] {
-        output.remove(key);
-    }
-    if output
-        .get("async_handoff_available")
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        output.remove("async_handoff_available");
-    }
-    if output.get("failure_kind").is_some_and(Value::is_null) {
-        output.remove("failure_kind");
-    }
-    if output.get("tool_failure").and_then(Value::as_bool) == Some(false) {
-        output.remove("tool_failure");
-    }
-    for key in ["stdout_tail", "stderr_tail"] {
-        if output.get(key).and_then(Value::as_str) == Some("") {
-            output.remove(key);
-        }
-    }
-    for key in ["stdout_lines", "stderr_lines"] {
-        if output.get(key).and_then(Value::as_u64) == Some(0) {
-            output.remove(key);
-        }
-    }
-    for key in ["stdout_truncated", "stderr_truncated"] {
-        if output.get(key).and_then(Value::as_bool) == Some(false) {
-            output.remove(key);
-        }
-    }
-
-    let summary_key = match tool_name {
-        "run_process" => "process_summary",
-        "run_script" => "script_summary",
-        _ => unreachable!("structured execution sparsifier is tool-gated"),
-    };
-    let canonical_source =
-        output.get("execution_source").and_then(Value::as_str) == Some(tool_name);
-    let canonical_summary = output
-        .get(summary_key)
-        .and_then(Value::as_str)
-        .is_some_and(|summary| !summary.is_empty());
-    if canonical_source && canonical_summary {
-        output.remove(summary_key);
-        output.remove("execution_source");
-    }
-}
-
 /// Strip successful wrapper/audit facts only after every authority and Session
 /// recorder that needs them has consumed the canonical ToolResult.
 /// Failure projection is handled separately and preserves every fact required
@@ -163,7 +66,7 @@ pub(crate) fn sparsify_success_model_result_metadata(tool_name: &str, result: &m
 /// canonical ToolResult has been consumed by permission and Session recorders.
 /// Retry/recovery, uncertainty, process output, exit state, Job handoff, and
 /// authorization-denial evidence remain explicit.
-pub(crate) fn sparsify_failure_model_result_metadata(tool_name: &str, result: &mut ToolResult) {
+pub(crate) fn sparsify_failure_model_result_metadata(_tool_name: &str, result: &mut ToolResult) {
     if result.success {
         return;
     }
@@ -180,22 +83,6 @@ pub(crate) fn sparsify_failure_model_result_metadata(tool_name: &str, result: &m
     }
     output.remove("session_recorded");
     output.remove("session_event_id");
-    if matches!(tool_name, "run_process" | "run_script") {
-        for key in [
-            "executor",
-            "duration_ms",
-            "purpose",
-            "cwd",
-            "execution_source",
-        ] {
-            output.remove(key);
-        }
-        output.remove(match tool_name {
-            "run_process" => "process_summary",
-            "run_script" => "script_summary",
-            _ => unreachable!("structured failure sparsifier is tool-gated"),
-        });
-    }
 }
 
 enum SearchModelProjection {
@@ -771,35 +658,15 @@ mod structured_execution_sparse_projection_tests {
     }
 
     #[test]
-    fn terminal_execution_only_omits_summary_and_source_for_exact_canonical_source() {
-        let mut canonical = terminal_process_result("run_process");
-        sparsify_terminal_structured_execution_success("run_process", &mut canonical);
-        for omitted in [
-            "process_summary",
-            "execution_source",
-            "execution_state",
-            "command_started",
-            "command_completed",
-            "command_ok",
-            "exit_code",
-            "duration_ms",
-            "purpose",
-            "cwd",
-            "executor",
-        ] {
-            assert!(canonical.output.get(omitted).is_none(), "{omitted}");
+    fn terminal_execution_preserves_real_result_metadata_and_streams() {
+        for source in ["run_process", "alternate_process_source"] {
+            let mut result = terminal_process_result(source);
+            let expected = result.output.clone();
+            sparsify_success_model_result_metadata("run_process", &mut result);
+            assert_eq!(result.output, expected);
+            assert_eq!(result.output["exit_code"], 0);
+            assert_eq!(result.output["execution_state"], "completed");
         }
-
-        let mut alternate = terminal_process_result("alternate_process_source");
-        sparsify_terminal_structured_execution_success("run_process", &mut alternate);
-        assert_eq!(alternate.output["process_summary"], "tool --arg");
-        assert_eq!(
-            alternate.output["execution_source"],
-            "alternate_process_source"
-        );
-        assert!(alternate.output.get("cwd").is_none());
-        assert!(alternate.output.get("executor").is_none());
-        assert!(alternate.output.get("execution_state").is_none());
     }
 
     #[test]
@@ -831,17 +698,7 @@ mod structured_execution_sparse_projection_tests {
         );
         sparsify_failure_model_result_metadata("run_process", &mut result);
 
-        for omitted in [
-            "permission",
-            "session_recorded",
-            "session_event_id",
-            "executor",
-            "duration_ms",
-            "purpose",
-            "cwd",
-            "execution_source",
-            "process_summary",
-        ] {
+        for omitted in ["permission", "session_recorded", "session_event_id"] {
             assert!(
                 result.output.get(omitted).is_none(),
                 "{omitted}: {}",
@@ -849,6 +706,12 @@ mod structured_execution_sparse_projection_tests {
             );
         }
         for retained in [
+            "executor",
+            "duration_ms",
+            "purpose",
+            "cwd",
+            "execution_source",
+            "process_summary",
             "failure_kind",
             "execution_state",
             "command_started",

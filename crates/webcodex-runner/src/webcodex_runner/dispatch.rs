@@ -409,9 +409,31 @@ pub(crate) fn dispatch_request_with_outcome(
             sink.submit_result_with_metadata(request_id, result, config, runtime)
                 .map(|_| true)
         }
+        RunnerOperation::AgentBrowser(query) => {
+            let result = super::agent_cli::bounded_json_result(
+                jobs.agent_local_browser_response(&sink, &query, runtime.local_browser()),
+                webcodex_core::agent_browser::MAX_BROWSER_RESULT_BYTES,
+            );
+            sink.submit_result_with_metadata(request_id, result, config, runtime)
+                .map(|_| true)
+        }
+        RunnerOperation::AgentProgramInspect(query) => {
+            let result = super::agent_cli::bounded_json_result(
+                jobs.inspect_agent_program(&sink, &query),
+                1024 * 1024,
+            );
+            sink.submit_result_with_metadata(request_id, result, config, runtime)
+                .map(|_| true)
+        }
         RunnerOperation::AgentCliInventory(query) => {
             let result = super::agent_cli::bounded_json_result(
-                jobs.agent_cli_inventory(&sink, &query),
+                super::agent_cli::inventory_with_resource_errors(
+                    super::agent_cli::inventory_with_load_status(
+                        jobs.agent_cli_inventory(&sink, &query),
+                        runtime.agent_execution_load_error(),
+                    ),
+                    &runtime.cli_resource_load_errors(),
+                ),
                 webcodex_core::agent_cli::AGENT_CLI_CATALOG_MAX_BYTES,
             );
             sink.submit_result_with_metadata(request_id, result, config, runtime)
@@ -419,7 +441,10 @@ pub(crate) fn dispatch_request_with_outcome(
         }
         RunnerOperation::AgentCliCatalog(query) => {
             let result = super::agent_cli::bounded_json_result(
-                jobs.agent_cli_catalog(&sink, &query),
+                match runtime.agent_execution_load_error() {
+                    Some(error) => Err(error),
+                    None => jobs.agent_cli_catalog(&sink, &query),
+                },
                 webcodex_core::agent_cli::AGENT_CLI_CATALOG_MAX_BYTES,
             );
             sink.submit_result_with_metadata(request_id, result, config, runtime)
@@ -478,6 +503,18 @@ pub(crate) fn dispatch_request_with_outcome(
                 other => runtime.plugins().handle(other),
             };
             sink.submit_plugin_gateway_result(request_id, result)
+                .map(|_| true)
+        }
+        RunnerOperation::ToolConnection(operation) => {
+            let response = runtime.manage_tool_connection(operation);
+            let result = CommandResult {
+                exit_code: Some(0),
+                stdout: Some(serde_json::to_string(&response).expect("connection response")),
+                stderr: None,
+                duration_ms: Some(0),
+                error: None,
+            };
+            sink.submit_result_with_metadata(request_id, result, &runtime.snapshot(), runtime)
                 .map(|_| true)
         }
         RunnerOperation::RunnerConfig(operation) => {

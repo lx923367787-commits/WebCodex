@@ -13,7 +13,7 @@ pub(crate) fn validate_detached_recovery_context(
     context: &ShellJobContext,
     client_id: &str,
 ) -> Result<(), String> {
-    if context.agent_execution.is_some() {
+    if context.agent_execution.is_some() || context.agent_program.is_some() {
         return Err("agent_execution_detached_recovery_unavailable".into());
     }
     const MAX_CONTEXT_FIELD_CHARS: usize = 1_024;
@@ -145,6 +145,15 @@ pub(crate) fn validate_runner_job_context_operation(
             return Err("agent_execution_context_mismatch".into());
         }
         return Ok(());
+    }
+    if let RunnerJobOperation::StartProcess(process) = operation {
+        if context.agent_program.is_some() {
+            let start = webcodex_core::agent_program::AgentProgramStart::from_job(process)?;
+            if start.binding.target.client_id != client_id {
+                return Err("agent_program_target_mismatch".into());
+            }
+            return Ok(());
+        }
     }
     if context.agent_execution.is_some() {
         return Err("agent_execution_requires_isolated_carrier".into());

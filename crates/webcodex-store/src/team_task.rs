@@ -14,10 +14,6 @@ use webcodex_core::runner_protocol::ShellCommandExecutionState;
 pub const TEAM_CLI_ATTEMPT_ID_PREFIX: &str = "wc_team_cli_attempt_";
 pub const MAX_TEAM_LIST_LIMIT: usize = 20;
 const MAX_POLICIES: i64 = 4096;
-const MAX_PLANS: i64 = 4096;
-const MAX_ATTEMPTS: i64 = 65536;
-const MAX_SUBAGENTS: usize = 32;
-const MAX_CLI_CALLS: usize = 32;
 
 type Result<T> = std::result::Result<T, CommunicationStoreError>;
 
@@ -58,8 +54,14 @@ impl Default for TeamPolicyInput {
     fn default() -> Self {
         Self {
             mode: TeamPolicyMode::Auto,
-            subagents: TeamCountRange { min: 0, max: 4 },
-            cli_per_agent: TeamCountRange { min: 0, max: 2 },
+            subagents: TeamCountRange {
+                min: 0,
+                max: u32::MAX,
+            },
+            cli_per_agent: TeamCountRange {
+                min: 0,
+                max: u32::MAX,
+            },
             providers: Vec::new(),
         }
     }
@@ -76,10 +78,11 @@ pub struct TeamPolicy {
 #[serde(deny_unknown_fields)]
 pub struct TeamCliCall {
     pub provider_id: String,
-    pub model: String,
+    #[serde(default)]
+    pub model: webcodex_core::cli_adapter::CliModelSelection,
     pub effort: Option<String>,
     /// Manager-assigned subtask text, never an executable or authority grant.
-    /// A member with multiple calls must explicitly assign every call's work.
+    /// Every CLI receives an explicit independent assignment; never inherit the parent goal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
     /// Explicit immutable text material; never a host path or filesystem grant.
@@ -168,7 +171,8 @@ pub struct TeamCliAttemptRecord {
     pub source_task_id: String,
     pub call_index: u32,
     pub provider_id: String,
-    pub model: String,
+    #[serde(default)]
+    pub model: webcodex_core::cli_adapter::CliModelSelection,
     pub effort: Option<String>,
     /// Frozen explicit CLI subtask, or the AgentTask instruction for a sole call.
     /// This text does not grant execution authority or supply native commands.
@@ -237,19 +241,60 @@ pub(crate) fn init_team_task_tables(conn: &Connection) -> anyhow::Result<()> {
         attempt_id TEXT PRIMARY KEY, root_task_id TEXT NOT NULL REFERENCES wc_team_plans(root_task_id),
         source_task_id TEXT NOT NULL REFERENCES wc_agent_tasks(task_id), project_id TEXT NOT NULL,
         owner_principal_kind TEXT NOT NULL, owner_principal_digest TEXT NOT NULL,
-        call_index INTEGER NOT NULL CHECK(call_index>=0 AND call_index<32),
+        call_index INTEGER NOT NULL CHECK(call_index>=0),
         request_key_hash TEXT NOT NULL, request_fingerprint TEXT NOT NULL,
         record_json TEXT NOT NULL, created_at_unix_ms INTEGER NOT NULL,
         UNIQUE(root_task_id,source_task_id,call_index),
         UNIQUE(owner_principal_kind,owner_principal_digest,request_key_hash));
         CREATE INDEX IF NOT EXISTS idx_wc_team_cli_scope ON wc_team_cli_attempts(owner_principal_kind,owner_principal_digest,project_id,created_at_unix_ms,attempt_id);")?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS wc_team_cli_rounds (
-        root_task_id TEXT NOT NULL REFERENCES wc_team_plans(root_task_id), round INTEGER NOT NULL CHECK(round>0 AND round<=15),
+        root_task_id TEXT NOT NULL REFERENCES wc_team_plans(root_task_id), round INTEGER NOT NULL CHECK(round>0),
         request_key_hash TEXT NOT NULL, request_fingerprint TEXT NOT NULL, record_json TEXT NOT NULL,
         PRIMARY KEY(root_task_id,round), UNIQUE(root_task_id,request_key_hash));
         CREATE TRIGGER IF NOT EXISTS wc_team_round_immutable BEFORE UPDATE ON wc_team_cli_rounds BEGIN SELECT RAISE(ABORT,'CLI rounds are immutable'); END;
         CREATE TRIGGER IF NOT EXISTS wc_team_round_preserved BEFORE DELETE ON wc_team_cli_rounds BEGIN SELECT RAISE(ABORT,'CLI round history is preserved'); END;")?;
+    remove_legacy_team_count_constraints(conn)?;
     execution_factory::ensure_factory_schema(conn)?;
+    Ok(())
+}
+
+// Rebuild only legacy tables, preserving every row, unique key and index.
+// No payload or request fingerprint is rewritten.
+fn remove_legacy_team_count_constraints(conn: &Connection) -> anyhow::Result<()> {
+    for (table, constraint) in [
+        ("wc_team_cli_attempts", " AND call_index<32"),
+        ("wc_team_cli_rounds", " AND round<=15"),
+    ] {
+        let sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |r| r.get(0),
+        )?;
+        if !sql.contains(constraint) {
+            continue;
+        }
+        let mut query = conn.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=?1 AND type IN ('index','trigger') AND sql IS NOT NULL")?;
+        let objects = query
+            .query_map([table], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(query);
+        let replacement = format!("{table}_unrestricted");
+        let create = sql.replacen(table, &replacement, 1).replace(constraint, "");
+        conn.execute_batch("SAVEPOINT simplify_team_counts")?;
+        let result = (|| -> anyhow::Result<()> {
+            conn.execute_batch(&create)?;
+            conn.execute_batch(&format!("INSERT INTO {replacement} SELECT * FROM {table}; DROP TABLE {table}; ALTER TABLE {replacement} RENAME TO {table};"))?;
+            for object in objects {
+                conn.execute_batch(&object)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            conn.execute_batch("ROLLBACK TO simplify_team_counts; RELEASE simplify_team_counts")?;
+            return Err(error);
+        }
+        conn.execute_batch("RELEASE simplify_team_counts")?;
+    }
     Ok(())
 }
 
@@ -310,15 +355,6 @@ fn attempt_id(value: &str) -> Result<()> {
 }
 
 fn validate_policy(settings: &TeamPolicyInput) -> Result<()> {
-    if settings.subagents.min > settings.subagents.max
-        || settings.subagents.max > 32
-        || settings.cli_per_agent.min > settings.cli_per_agent.max
-        || settings.cli_per_agent.max > 32
-    {
-        return Err(invalid(
-            "Team count ranges must be ordered and no greater than 32",
-        ));
-    }
     let mut ids = BTreeSet::new();
     if settings.providers.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS
         || settings.providers.iter().any(|p| {
@@ -332,30 +368,11 @@ fn validate_policy(settings: &TeamPolicyInput) -> Result<()> {
     {
         return Err(invalid("Invalid or duplicate team provider preferences"));
     }
-    if settings.mode == TeamPolicyMode::Custom
-        && settings.cli_per_agent.min > 0
-        && !settings.providers.iter().any(|p| p.enabled)
-    {
-        return Err(invalid(
-            "A positive CLI minimum requires an enabled provider",
-        ));
-    }
     Ok(())
 }
 
 fn validate_policy_for_admission(settings: &TeamPolicyInput) -> Result<()> {
-    validate_policy(settings)?;
-    // New execution constraints must not prevent reading or revising policies
-    // that were valid when persisted by an earlier version.
-    if settings.mode == TeamPolicyMode::Custom
-        && (settings.subagents.min + 1) * settings.cli_per_agent.min > 32
-    {
-        return Err(error(
-            "team_cli_budget_unsatisfiable",
-            "The minimum team, including the manager, requires more than 32 total CLI calls",
-        ));
-    }
-    Ok(())
+    validate_policy(settings)
 }
 
 fn members(plan: &TeamPlanInput) -> impl Iterator<Item = &TeamAgentPlan> {
@@ -373,7 +390,7 @@ fn resolve_saved_policy_efforts(policy: &TeamPolicy, plan: &mut TeamPlanInput) -
                     .find(|p| {
                         p.provider_id == call.provider_id
                             && p.enabled
-                            && p.model.as_deref() == Some(call.model.as_str())
+                            && p.model.as_deref() == call.model.named()
                     })
                     .ok_or_else(|| {
                         error(
@@ -388,38 +405,22 @@ fn resolve_saved_policy_efforts(policy: &TeamPolicy, plan: &mut TeamPlanInput) -
     Ok(())
 }
 
+fn delegated_cli_instruction(call: &TeamCliCall) -> Result<&str> {
+    call.instruction.as_deref().filter(|instruction| !instruction.trim().is_empty()).ok_or_else(|| {
+        error("team_cli_instruction_required", "Supply an independent task instruction for this CLI; the source Agent's private execution goal is never copied automatically")
+    })
+}
+
 fn validate_plan(root: &str, policy: &TeamPolicy, plan: &TeamPlanInput) -> Result<()> {
     validate_policy_for_admission(&policy.settings)?;
-    if plan.manager.task_id != root
-        || plan.subagents.len() > MAX_SUBAGENTS
-        || members(plan).any(|m| m.cli_calls.len() > MAX_CLI_CALLS)
-    {
+    if plan.manager.task_id != root {
         return Err(invalid("Invalid manager or oversized ordinary team plan"));
-    }
-    let custom = policy.settings.mode == TeamPolicyMode::Custom;
-    if custom
-        && !(policy.settings.subagents.min..=policy.settings.subagents.max)
-            .contains(&(plan.subagents.len() as u32))
-    {
-        return Err(error(
-            "team_subagent_quota",
-            "Ordinary child assignments do not satisfy the project policy",
-        ));
     }
     let mut ids = BTreeSet::new();
     for member in members(plan) {
         task_id(&member.task_id)?;
         if !ids.insert(&member.task_id) {
             return Err(invalid("A task may appear only once in a team plan"));
-        }
-        if custom
-            && !(policy.settings.cli_per_agent.min..=policy.settings.cli_per_agent.max)
-                .contains(&(member.cli_calls.len() as u32))
-        {
-            return Err(error(
-                "team_cli_quota",
-                "A team member's planned CLI calls do not satisfy the policy",
-            ));
         }
         for call in &member.cli_calls {
             let mut input_names = BTreeSet::new();
@@ -445,37 +446,14 @@ fn validate_plan(root: &str, policy: &TeamPolicy, plan: &TeamPlanInput) -> Resul
             }) {
                 return Err(invalid("CLI subtask instruction must be nonblank, at most 8192 UTF-8 bytes and contain no NUL"));
             }
-            if member.cli_calls.len() > 1 && call.instruction.is_none() {
-                return Err(error("team_cli_instruction_required", "Each CLI call needs an explicit subtask instruction when a member has multiple calls"));
-            }
+            delegated_cli_instruction(call)?;
             if !provider(&call.provider_id)
-                || !text(&call.model, 256)
+                || call.model.named().is_some_and(|m| !text(m, 256))
                 || call.effort.as_deref().is_some_and(|v| !text(v, 64))
             {
                 return Err(invalid(
-                    "Each planned CLI call needs a supported provider, explicit model and a nonblank effort when supplied",
+                    "Each planned CLI call needs a supported provider and nonblank model/effort when supplied",
                 ));
-            }
-            if custom {
-                let preference = policy
-                    .settings
-                    .providers
-                    .iter()
-                    .find(|p| p.enabled && p.provider_id == call.provider_id)
-                    .ok_or_else(|| {
-                        error("team_provider_disabled", "Planned CLI provider is disabled")
-                    })?;
-                if preference.model.as_deref().is_some_and(|m| m != call.model)
-                    || preference
-                        .effort
-                        .as_ref()
-                        .is_some_and(|e| call.effort.as_ref() != Some(e))
-                {
-                    return Err(error(
-                        "team_model_policy_mismatch",
-                        "Planned model or effort differs from the project policy",
-                    ));
-                }
             }
         }
     }
@@ -593,8 +571,7 @@ fn cli_reservation_identity(
     project_id(project)?;
     task_id(root_task_id)?;
     task_id(source_task_id)?;
-    if call_index >= 32
-        || !identifier(fallback_thinking_profile_id, 128)
+    if !identifier(fallback_thinking_profile_id, 128)
         || timeout_secs.is_some_and(|s| s == 0 || s > 3600)
     {
         return Err(invalid("Invalid CLI slot, fallback profile or timeout"));
@@ -680,7 +657,7 @@ fn capacity(conn: &Connection, table: &str, limit: i64) -> Result<()> {
     }
 }
 fn page_bounds(offset: usize, limit: usize) -> Result<()> {
-    if limit == 0 || limit > MAX_TEAM_LIST_LIMIT || offset > MAX_ATTEMPTS as usize {
+    if limit == 0 || limit > MAX_TEAM_LIST_LIMIT || offset > i64::MAX as usize {
         Err(invalid("Invalid team list bounds"))
     } else {
         Ok(())
@@ -711,7 +688,10 @@ pub(crate) fn load_team_cli_attempt_for_fallback(
         || call.model != record.model
         || call.effort != record.effort
         || call.inputs != record.inputs
-        || call.instruction.as_deref().unwrap_or(&source.instruction) != record.instruction
+        || call
+            .instruction
+            .as_deref()
+            .is_some_and(|instruction| instruction != record.instruction)
     {
         return Err(error(
             "team_store_invalid",
@@ -782,7 +762,6 @@ fn register_team_plan_on_connection(
     for member in members(&plan) {
         require_live(&owned_task(conn, principal, project, &member.task_id)?)?;
     }
-    capacity(conn, "plan", MAX_PLANS)?;
     let now = now_unix_ms();
     let record = TeamPlanRecord {
         project_id: project.into(),
@@ -1270,7 +1249,6 @@ pub(crate) fn reserve_team_cli_attempt_on_connection(
             "This planned CLI slot already has its one logical call",
         ));
     }
-    capacity(tx, "attempt", MAX_ATTEMPTS)?;
     let now = now_unix_ms();
     let record = TeamCliAttemptRecord {
         attempt_id: new_id(TEAM_CLI_ATTEMPT_ID_PREFIX),
@@ -1281,7 +1259,7 @@ pub(crate) fn reserve_team_cli_attempt_on_connection(
         provider_id: call.provider_id.clone(),
         model: call.model.clone(),
         effort: call.effort.clone(),
-        instruction: call.instruction.clone().unwrap_or(source.instruction),
+        instruction: delegated_cli_instruction(&call)?.to_owned(),
         inputs: call.inputs.clone(),
         fallback_thinking_profile_id: fallback_thinking_profile_id.into(),
         timeout_secs,

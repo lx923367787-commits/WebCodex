@@ -115,6 +115,9 @@ pub(super) struct AgentExecutionJobState {
     pub(super) binding: AgentExecutionBinding,
     pub(super) resource_set_id: Option<String>,
     pub(super) prepared_start: Option<AgentExecutionStart>,
+    pub(super) launch_args: Vec<String>,
+    pub(super) launch_cwd: Option<String>,
+    pub(super) stdin_bytes: usize,
     pub(super) requested_by: String,
     pub(super) enqueued: bool,
     pub(super) transport_dispatched: bool,
@@ -223,6 +226,12 @@ fn require_resource(runner: &RunnerRecord, start: &AgentExecutionStart) -> Resul
     {
         return Err("agent_execution_resource_changed".into());
     }
+    if let Some(host) = &resource.host_cli {
+        // The exact authenticated resource and executable hashes were checked
+        // above. Native host execution uses its own argv contract, not the old
+        // copied-resource review gate.
+        return host.validate_args(&start.process.args);
+    }
     match (&resource.provider, &resource.reviewed_controls) {
         (Some(_), None) => return Err("agent_cli_reviewed_controls_required".into()),
         (_, Some(controls)) => webcodex_core::agent_cli_controls::validate_reviewed_cli_argv(
@@ -328,6 +337,34 @@ impl RunnerRegistry {
     ) -> Result<ShellJobInfo, String> {
         let inner = self.inner.lock().await;
         Ok(job_view(exact_job(&inner, access, binding)?))
+    }
+
+    /// Ordinary process output is readable without a publication or review.
+    /// The caller retains the existing owner/attempt authorization checks.
+    pub async fn observe_agent_execution_output(
+        &self,
+        access: &RunnerAccess,
+        binding: &AgentExecutionBinding,
+    ) -> Result<serde_json::Value, String> {
+        let inner = self.inner.lock().await;
+        let job = exact_job(&inner, access, binding)?;
+        let state = job.agent_execution.as_ref().expect("exact execution Job");
+        let mut value = serde_json::to_value(job_view(job))
+            .map_err(|_| "agent_execution_observation_encoding_failed")?;
+        value["execution_state"] = serde_json::json!(job.command_execution_state);
+        value["business_verified"] = serde_json::json!(false);
+        value["stdout"] = serde_json::json!(job.stdout.tail);
+        value["stderr"] = serde_json::json!(job.stderr.tail);
+        value["launch"] = serde_json::json!({
+            "source":"frozen_runner_request", "args":state.launch_args,
+            "cwd":state.launch_cwd, "stdin_bytes":state.stdin_bytes,
+            "executable_identity":state.frozen_resource.executable_identity,
+            "resource_set_id":state.resource_set_id,
+            "launch_intent_hash":binding.launch_intent_hash,
+            "transport_dispatched":state.transport_dispatched,
+            "private_directory_env":["WEBCODEX_MEMORY_DIR","WEBCODEX_OBJECTIVES_DIR","WEBCODEX_ACCEPTANCE_DIR"]
+        });
+        Ok(value)
     }
 
     /// Recover only this Registry's original prepared handle after an HTTP
@@ -463,6 +500,7 @@ impl RunnerRegistry {
         }
         let context = isolated_job_context(&start);
         let job = ShellJobRecord {
+            agent_program: None,
             agent_execution: Some(AgentExecutionJobState {
                 frozen_resource: inner.runners[&start.binding.target.client_id]
                     .agent_execution_resources
@@ -473,6 +511,12 @@ impl RunnerRegistry {
                 binding: start.binding.clone(),
                 resource_set_id: Some(start.resource_set_id.clone()),
                 prepared_start: Some(start.clone()),
+                launch_args: start.process.args.clone(),
+                launch_cwd: start
+                    .workspace_source
+                    .as_ref()
+                    .map(|source| source.root.clone()),
+                stdin_bytes: start.stdin.as_ref().map_or(0, String::len),
                 requested_by,
                 enqueued: false,
                 transport_dispatched: false,
@@ -511,7 +555,7 @@ impl RunnerRegistry {
             validation: None,
             validation_progress: None,
             activity: None,
-            visibility: ShellJobVisibility::HiddenUntilHandoff,
+            visibility: ShellJobVisibility::Public,
             last_update_seq: 0,
             recovery: JobRecoveryState::default(),
             observation: JobObservationState::new(self.observation_epoch.clone()),

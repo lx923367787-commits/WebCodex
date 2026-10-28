@@ -1,6 +1,7 @@
 pub(crate) mod agent_cli;
 pub(crate) mod cli;
 pub(crate) mod jobs;
+pub(crate) mod native_cli_setup;
 pub(crate) mod registration;
 
 pub(crate) mod artifacts;
@@ -24,6 +25,7 @@ pub(crate) mod patches;
 pub(crate) mod persistent_shell;
 pub(crate) mod plugin;
 pub(crate) mod projects;
+mod tool_connection;
 // Remote persistent shells always run POSIX sh/bash on the SSH target. Their
 // local child ownership is platform-specific: Unix uses a private process group,
 // while Windows owns ssh.exe through ManagedChild's Job Object.

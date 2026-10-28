@@ -110,7 +110,8 @@ impl AuthContext {
             || self.native_host.is_some()
         {
             return self.agent_run.is_some()
-                && matches!(scope, "runtime:read" | "project:read" | "project:write");
+                && (matches!(scope, "runtime:read" | "project:read" | "project:write")
+                    || self.scopes.iter().any(|granted| granted == scope));
         }
         self.is_bootstrap
             || self

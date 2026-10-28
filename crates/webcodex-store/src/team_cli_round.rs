@@ -1,4 +1,4 @@
-//! Explicit operator-authorized additional CLI work for the same team.
+//! Explicit additional CLI work from the current manager or authorized operator.
 //! Original plans, attempts, assignments and receipts remain immutable.
 use super::*;
 
@@ -91,59 +91,73 @@ pub(super) fn planned_call_on(
     call
 }
 
-/// An operator's bounded round grant supplements, never changes, enrollment.
+/// Count policies no longer gate execution. Validate the exact planned slot.
 pub(super) fn cli_slot_budget_on(
     conn: &Connection,
     root: &str,
     source: &str,
     index: u32,
-    original_budget: u32,
+    _original_budget: u32,
 ) -> Result<()> {
-    if index >= 32 {
-        return Err(not_found());
-    }
-    for round in rounds_on(conn, root)? {
-        if let (Some(first), Some(member)) = (
-            round.first_call_indices.get(source),
-            members(&round.plan).find(|m| m.task_id == source),
-        ) {
-            if (*first..*first + member.cli_calls.len() as u32).contains(&index) {
-                if member.cli_calls.len() <= original_budget as usize {
-                    return Ok(());
-                }
-                return Err(error(
-                    "agent_team_budget_exceeded",
-                    "Round exceeds immutable assignment budget",
-                ));
-            }
-        }
-    }
-    let local_calls = crate::local_cli::call_count(conn, source).map_err(store_error)?;
-    let replay: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_team_cli_attempts WHERE root_task_id=?1 AND source_task_id=?2 AND call_index=?3)",
-        params![root,source,index], |r|r.get(0)).map_err(store_error)?;
-    let (family_native, family_legacy) =
-        crate::local_cli::family_counts(conn, root).map_err(store_error)?;
-    if !replay && family_native > 0 && family_native.saturating_add(family_legacy) >= 32 {
-        return Err(error(
-            "agent_team_budget_exceeded",
-            "Native and isolated calls share the original team budget",
-        ));
-    }
-    if replay || index.saturating_add(local_calls) < original_budget {
-        Ok(())
-    } else {
-        Err(error(
-            "agent_team_budget_exceeded",
-            "No explicit round grant exists",
-        ))
-    }
+    let (kind, digest): (String, String) = conn.query_row(
+        "SELECT owner_principal_kind,owner_principal_digest FROM wc_team_plans WHERE root_task_id=?1", [root], |r| Ok((r.get(0)?,r.get(1)?)))
+        .optional().map_err(store_error)?.ok_or_else(|| error("team_plan_required", "Register the requested work before dispatch"))?;
+    planned_call_on(
+        conn,
+        &CommunicationPrincipal { kind, digest },
+        root,
+        source,
+        index,
+    )
+    .map(|_| ())
 }
 
 impl Database {
-    /// Trusted operator control only. This is never an Agent/model tool.
-    /// A new request must explicitly fund one bounded round and fence its predecessor.
+    /// Append independent work without replaying or requiring earlier slots.
+    pub fn register_agent_team_cli_round(
+        &self,
+        current: &crate::VerifiedAgentRun,
+        root: &str,
+        expected_round: u32,
+        expected_policy_revision: i64,
+        plan: TeamPlanInput,
+        idempotency_key: &str,
+    ) -> Result<TeamCliRound> {
+        self.register_team_cli_round(
+            Some(current),
+            current.owner_user(),
+            root,
+            expected_round,
+            expected_policy_revision,
+            plan,
+            idempotency_key,
+        )
+    }
+
     pub fn register_operator_team_cli_round(
         &self,
+        owner: &str,
+        root: &str,
+        expected_round: u32,
+        expected_policy_revision: i64,
+        plan: TeamPlanInput,
+        idempotency_key: &str,
+    ) -> Result<TeamCliRound> {
+        self.register_team_cli_round(
+            None,
+            owner,
+            root,
+            expected_round,
+            expected_policy_revision,
+            plan,
+            idempotency_key,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register_team_cli_round(
+        &self,
+        current: Option<&crate::VerifiedAgentRun>,
         owner: &str,
         root: &str,
         expected_round: u32,
@@ -155,6 +169,17 @@ impl Database {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(store_error)?;
+        if let Some(current) = current {
+            crate::agent_isolation::authorize_agent_assignment_on_connection(
+                &tx,
+                current,
+                root,
+                crate::AgentAssignmentOperation::PlanManage,
+            )
+            .map_err(|e| error(e.code(), "Current manager assignment is unavailable"))?;
+            crate::agent_isolation::agent_run_business_gate_on_connection(&tx, current)
+                .map_err(|e| error(e.code(), "Current manager execution state is unavailable"))?;
+        }
         let principal = crate::agent_isolation::enrollment_principal_for_execution(owner);
         let original = live_plan(&tx, &principal, root)?;
         let key = key_hash(idempotency_key)?;
@@ -170,20 +195,24 @@ impl Database {
             return decode(&value);
         }
         let rounds = rounds_on(&tx, root)?;
-        if rounds.len() != expected_round as usize || expected_round >= 15 {
+        if rounds.len() != expected_round as usize || expected_round == u32::MAX {
             return Err(error(
                 "team_round_revision_conflict",
                 "Read the current round before authorizing another",
             ));
         }
-        let (agent, run): (String, String) = tx.query_row("SELECT e.agent_id,r.run_id FROM wc_agent_enrollments e JOIN wc_agent_runs r ON r.agent_id=e.agent_id AND r.state='active' WHERE e.task_id=?1 AND e.owner_user=?2 AND e.purpose='manager' AND e.state='claimed'", params![root,owner], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(store_error)?.ok_or_else(not_found)?;
-        let binding = crate::agent_isolation::verify_agent_run_context_on_connection(
-            &tx,
-            &crate::agent_isolation::host_goal_owner_key(&original.project_id, &agent),
-            &run,
-        )
-        .map_err(|e| error(e.code(), "Manager identity is unavailable"))?;
-        let authority = crate::agent_isolation::authorize_agent_assignment_on_connection(
+        let binding = if let Some(current) = current {
+            current.clone()
+        } else {
+            let (agent, run): (String, String) = tx.query_row("SELECT e.agent_id,r.run_id FROM wc_agent_enrollments e JOIN wc_agent_runs r ON r.agent_id=e.agent_id AND r.state='active' WHERE e.task_id=?1 AND e.owner_user=?2 AND e.purpose='manager' AND e.state='claimed'", params![root,owner], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(store_error)?.ok_or_else(not_found)?;
+            crate::agent_isolation::verify_agent_run_context_on_connection(
+                &tx,
+                &crate::agent_isolation::host_goal_owner_key(&original.project_id, &agent),
+                &run,
+            )
+            .map_err(|e| error(e.code(), "Manager identity is unavailable"))?
+        };
+        crate::agent_isolation::authorize_agent_assignment_on_connection(
             &tx,
             &binding,
             root,
@@ -207,67 +236,36 @@ impl Database {
         let effective = execution_plan_on(&tx, &principal, root)?;
         let before: BTreeSet<_> = members(&original.plan).map(|m| &m.task_id).collect();
         let after: BTreeSet<_> = members(&plan).map(|m| &m.task_id).collect();
-        if before != after
-            || plan.subagents.len() > authority.policy.max_subagents as usize
-            || members(&plan).map(|m| m.cli_calls.len()).sum::<usize>()
-                > authority.policy.max_cli_calls as usize
-        {
+        if before != after {
             return Err(error(
                 "agent_team_budget_exceeded",
-                "A round cannot replace the team or exceed its assignment budget",
+                "A round cannot replace the team",
             ));
         }
         let mut first_call_indices = std::collections::BTreeMap::new();
         for member in members(&plan) {
-            require_live(&owned_task(
-                &tx,
-                &principal,
-                &original.project_id,
-                &member.task_id,
-            )?)?;
-            let budget = if member.task_id == root {
-                authority.policy.max_cli_calls
-            } else {
+            let source = owned_task(&tx, &principal, &original.project_id, &member.task_id)?;
+            if member.task_id == root || !member.cli_calls.is_empty() {
+                require_live(&source)?;
+            }
+            if member.task_id != root && !member.cli_calls.is_empty() {
+                // Still require one exact live delegated assignment. Its old
+                // budget remains history; this operator round is a new grant.
+                // An unchanged peer receiving no slots may still be waiting
+                // on its original enrollment. It gains no CLI authority here.
                 crate::agent_isolation::delegated_cli_budget_on_connection(
                     &tx,
                     &binding,
                     &member.task_id,
                 )
-                .map_err(|e| error(e.code(), "Member assignment is unavailable"))?
-            };
+                .map_err(|e| error(e.code(), "Member assignment is unavailable"))?;
+            }
             let previous = members(&effective.plan)
                 .find(|m| m.task_id == member.task_id)
                 .ok_or_else(not_found)?;
-            if member.cli_calls.is_empty()
-                || member.cli_calls.len() > budget as usize
-                || previous.cli_calls.len() + member.cli_calls.len() > 32
-            {
-                return Err(error(
-                    "agent_team_budget_exceeded",
-                    "Round slot limit exceeded",
-                ));
-            }
-            for index in 0..previous.cli_calls.len() {
-                let raw: Option<String> = tx.query_row("SELECT record_json FROM wc_team_cli_attempts WHERE root_task_id=?1 AND source_task_id=?2 AND call_index=?3", params![root,member.task_id,index], |r| r.get(0)).optional().map_err(store_error)?;
-                let attempt: TeamCliAttemptRecord = decode(&raw.ok_or_else(|| {
-                    error(
-                        "team_round_previous_pending",
-                        "Prior slots must be terminal before another round",
-                    )
-                })?)?;
-                let stopped = match &attempt.execution_binding {
-                    Some(b) => crate::agent_execution_close::agent_execution_binding_stop_proven_on_connection(&tx,b)
-                        .map_err(|e| error(e.code(), "Prior execution stop is unproven"))?,
-                    None => attempt.execution_state == Some(ShellCommandExecutionState::NotStarted),
-                };
-                if attempt.dispatch_state != TeamCliDispatchState::Terminal || !stopped {
-                    return Err(error(
-                        "team_round_previous_pending",
-                        "Prior slots need terminal and stopped evidence",
-                    ));
-                }
-            }
             first_call_indices.insert(member.task_id.clone(), previous.cli_calls.len() as u32);
+            // Every additional call receives a fresh index. Existing slots may
+            // be unused, running, failed or unknown; none is retried or mutated.
         }
         let record = TeamCliRound {
             round: expected_round + 1,

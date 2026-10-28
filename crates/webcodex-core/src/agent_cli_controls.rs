@@ -17,6 +17,7 @@ pub const RESOURCE_PAYLOAD_HASH_DOMAIN: &[u8] = b"webcodex.agent_execution.resou
 pub const REVIEWED_CONTROLS_HASH_DOMAIN: &[u8] = b"webcodex.agent_cli.reviewed_controls.v1\0";
 pub const REVIEWED_MANIFEST_HASH_DOMAIN: &[u8] = b"webcodex.agent_execution.reviewed_manifest.v1\0";
 pub const CODEBUDDY_FILES_LOADING: &str = "codebuddy-2.162.0-files-v1";
+pub const CODEBUDDY_FILES_LOADING_V2: &str = "codebuddy-2.162.0-files-v2";
 pub const CODEBUDDY_FILES_VERSION: &str = "2.162.0";
 pub const CODEBUDDY_FILES_EXE_SHA256: &str =
     "5d06f03f55fe07aa2748a1b02d6898fca5932c52cd85db05487765851282f94a";
@@ -36,6 +37,12 @@ pub const ANTIGRAVITY_FILES_LOADING: &str = "antigravity-1.4.7-files-v1";
 pub const ANTIGRAVITY_FILES_VERSION: &str = "1.4.7";
 pub const ANTIGRAVITY_FILES_EXE_SHA256: &str =
     "22588b6d5a6f6d2d66091c73dfb9255edc7bdafe9aff9dd20d958ce116496695";
+// Read-only 1.4.8 discovery loaded the same fixed agent template in a fresh,
+// credential-free home. Mapping recognition is not account/model verification.
+pub const ANTIGRAVITY_148_FILES_LOADING: &str = "antigravity-1.4.8-files-v1";
+pub const ANTIGRAVITY_148_FILES_VERSION: &str = "1.4.8";
+pub const ANTIGRAVITY_148_FILES_EXE_SHA256: &str =
+    "074c7b99b7727dcd2c7437973454d0856181a1006c97a4fad91a1ed23c10ad44";
 pub const ANTIGRAVITY_NATIVE_AUTH_RELATIVE: &str =
     ".gemini/antigravity-cli/antigravity-oauth-token";
 pub const ANTIGRAVITY_SETTINGS_PATH: &str = "input/antigravity-settings.json";
@@ -131,6 +138,18 @@ pub fn codebuddy_file_worker_args() -> Vec<ReviewedControlArg> {
         value: value.map(str::to_owned),
     })
     .collect()
+}
+
+/// The installed 2.162.0 parser treats an empty settingSources as absent.
+/// Its explicit `none` selector disables external settings sources. Keep v1
+/// records readable without silently changing their approved argv or hashes.
+pub fn codebuddy_file_worker_args_v2() -> Vec<ReviewedControlArg> {
+    let mut args = codebuddy_file_worker_args();
+    args.iter_mut()
+        .find(|arg| arg.flag == "--setting-sources")
+        .expect("compiled settings selector")
+        .value = Some("none".into());
+    args
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,7 +381,9 @@ impl ReviewedAgentCliControls {
                 let fixed_file_tools = self.provider == AgentCliProvider::WorkBuddy
                     && matches!(
                         self.loading_method.as_str(),
-                        CODEBUDDY_FILES_LOADING | CODEBUDDY_NODE_FILES_LOADING
+                        CODEBUDDY_FILES_LOADING
+                            | CODEBUDDY_FILES_LOADING_V2
+                            | CODEBUDDY_NODE_FILES_LOADING
                     )
                     && arg.flag == "--tools"
                     && value == CODEBUDDY_FILES_TOOLS;
@@ -436,10 +457,25 @@ impl ReviewedAgentCliControls {
             return Err("agent_cli_controls_legacy_adapter_override".into());
         }
         if self.provider == AgentCliProvider::Antigravity {
-            if self.cli_version != ANTIGRAVITY_FILES_VERSION
-                || self.executable_sha256 != ANTIGRAVITY_FILES_EXE_SHA256
-                || self.loading_method != ANTIGRAVITY_FILES_LOADING
-            {
+            let recognized = [
+                (
+                    ANTIGRAVITY_FILES_VERSION,
+                    ANTIGRAVITY_FILES_EXE_SHA256,
+                    ANTIGRAVITY_FILES_LOADING,
+                ),
+                (
+                    ANTIGRAVITY_148_FILES_VERSION,
+                    ANTIGRAVITY_148_FILES_EXE_SHA256,
+                    ANTIGRAVITY_148_FILES_LOADING,
+                ),
+            ]
+            .iter()
+            .any(|(version, binary, loader)| {
+                self.cli_version == *version
+                    && self.executable_sha256 == *binary
+                    && self.loading_method == *loader
+            });
+            if !recognized {
                 return Err("agent_cli_controls_mechanism_unverified".into());
             }
             if self.fixed_args != antigravity_file_worker_args()
@@ -451,14 +487,22 @@ impl ReviewedAgentCliControls {
         }
         let native = self.cli_version == CODEBUDDY_FILES_VERSION
             && self.executable_sha256 == CODEBUDDY_FILES_EXE_SHA256
-            && self.loading_method == CODEBUDDY_FILES_LOADING;
+            && matches!(
+                self.loading_method.as_str(),
+                CODEBUDDY_FILES_LOADING | CODEBUDDY_FILES_LOADING_V2
+            );
         let node = self.cli_version == CODEBUDDY_NODE_FILES_VERSION
             && self.executable_sha256 == CODEBUDDY_NODE_EXE_SHA256
             && self.loading_method == CODEBUDDY_NODE_FILES_LOADING;
         if self.provider != AgentCliProvider::WorkBuddy || !(native || node) {
             return Err("agent_cli_controls_mechanism_unverified".into());
         }
-        if self.fixed_args != codebuddy_file_worker_args()
+        let expected_args = if self.loading_method == CODEBUDDY_FILES_LOADING_V2 {
+            codebuddy_file_worker_args_v2()
+        } else {
+            codebuddy_file_worker_args()
+        };
+        if self.fixed_args != expected_args
             || self.control_files != codebuddy_file_worker_control_files()
         {
             return Err("agent_cli_controls_fixed_policy_mismatch".into());
@@ -484,13 +528,18 @@ fn base_len(record: &ReviewedAgentCliControls, args: &[String]) -> Result<usize,
         .invocation
         .as_ref()
         .ok_or("agent_cli_controls_adapter_required")?;
-    let effort_index = invocation.prefix_args.len() + 2;
+    let model_count = if args.get(invocation.prefix_args.len()) == Some(&invocation.model_flag) {
+        2
+    } else {
+        0
+    };
+    let effort_index = invocation.prefix_args.len() + model_count;
     let explicit_effort = invocation
         .effort_flag
         .as_ref()
         .is_some_and(|flag| args.get(effort_index) == Some(flag));
     Ok(invocation.prefix_args.len()
-        + 2
+        + model_count
         + if explicit_effort { 2 } else { 0 }
         + invocation.fixed_args.len())
 }
@@ -501,19 +550,27 @@ fn validate_base(record: &ReviewedAgentCliControls, args: &[String]) -> Result<(
         .as_ref()
         .ok_or("agent_cli_controls_adapter_required")?;
     let index = invocation.prefix_args.len();
-    if args.len() != base_len(record, args)? || args.get(index) != Some(&invocation.model_flag) {
+    if args.len() != base_len(record, args)? {
         return Err("agent_cli_controls_invalid_business_argv".into());
     }
-    let model = args
-        .get(index + 1)
-        .ok_or("agent_cli_controls_invalid_business_argv")?;
+    let explicit_model = args.get(index) == Some(&invocation.model_flag);
+    let model = if explicit_model {
+        Some(
+            args.get(index + 1)
+                .ok_or("agent_cli_controls_invalid_business_argv")?
+                .as_str(),
+        )
+    } else {
+        None
+    };
+    let effort_index = index + if explicit_model { 2 } else { 0 };
     let explicit_effort = invocation
         .effort_flag
         .as_ref()
-        .is_some_and(|flag| args.get(index + 2) == Some(flag));
+        .is_some_and(|flag| args.get(effort_index) == Some(flag));
     let effort = if explicit_effort {
         let raw = args
-            .get(index + 3)
+            .get(effort_index + 1)
             .ok_or("agent_cli_controls_invalid_business_argv")?;
         Some(if let Some(key) = &invocation.effort_config_key {
             let encoded = raw
@@ -527,13 +584,13 @@ fn validate_base(record: &ReviewedAgentCliControls, args: &[String]) -> Result<(
     } else {
         None
     };
-    for value in std::iter::once(model.as_str()).chain(effort.as_deref()) {
+    for value in model.into_iter().chain(effort.as_deref()) {
         if value.starts_with(['-', '@']) {
             return Err("agent_cli_controls_invalid_business_value".into());
         }
     }
     let (expected, _) = adapter
-        .invocation(model, effort.as_deref(), "validate")
+        .invocation_selected(model, effort.as_deref(), "validate")
         .map_err(|_| "agent_cli_controls_invalid_business_argv")?;
     if expected != args {
         return Err("agent_cli_controls_invalid_business_argv".into());

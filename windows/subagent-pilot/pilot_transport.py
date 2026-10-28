@@ -194,7 +194,7 @@ def run(config, evidence_root=ROOT / "evidence", *, collect_response=False,
             browser = edge.create("https://chatgpt.com/")
             browser.activate()
             failure_stage = "configure_chat"
-            setup = edge_handoff.configure_chat(browser, config, browser.keys)
+            setup = configure_task_chat(browser, config)
             create_record(folder / "browser.json", {**identity, **setup, **browser.identity()})
             failure_stage = "prepare_composer"
             state = edge_handoff.wait_composer(browser, config, min(deadline, time.monotonic() + 30))
@@ -284,6 +284,32 @@ def run(config, evidence_root=ROOT / "evidence", *, collect_response=False,
             except OSError:
                 outcome["reason"] = "receipt_persistence_unknown"
         return outcome
+
+
+def configure_task_chat(browser, config):
+    """Optional adjustment before send; never use main-Goal Pro policy here."""
+    selection = config.get("thinking_profile")
+    if selection is None or selection.get("mode") == "default":
+        return {"thinking_adjustment": {"status": "not_requested"}}
+    if selection.get("setting_error"):
+        return {"thinking_adjustment": {"status": "not_adjusted",
+                                       "reason": "thinking_profile_unavailable"}}
+    try:
+        result = edge_handoff.configure_chat(browser, config, browser.keys)
+        if result.get("thinking_profile") != selection:
+            raise ValueError("unconfirmed_setting")
+        return {**result, "thinking_adjustment": {"status": "applied"}}
+    except Exception as error:
+        # A partial UI change cannot be claimed as applied or rolled back.
+        # Dismiss the menu, then the normal fresh composer/stop checks still
+        # guard delivery. Never retry this send because of a setting error.
+        try:
+            if not handoff_flow.cancelled(config):
+                browser.keys("{ESC}", contains_hotkey=True, delay_after=0)
+        except Exception:
+            pass
+        return {"thinking_adjustment": {"status": "not_adjusted",
+                                       "reason": "setting_" + type(error).__name__}}
 
 
 def main():

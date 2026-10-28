@@ -9,6 +9,7 @@ async fn http_runner_reload_enforces_restricted_authority() {
         root.path(),
         Some(crate::runner_protocol::RunnerCapabilities {
             runner_config_control: true,
+            tool_connections: false,
             ..Default::default()
         }),
     )

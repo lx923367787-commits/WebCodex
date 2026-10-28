@@ -74,6 +74,7 @@ fn internal_mode_subprocess_entrypoint() {
 
 fn safe_context() -> ShellJobContext {
     ShellJobContext {
+        agent_program: None,
         agent_execution: None,
         document: None,
         runtime_project_id: Some("agent:test:project".to_string()),

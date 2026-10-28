@@ -216,13 +216,12 @@ impl Database {
         validate_agent_run_on_connection(&tx, binding).map_err(|_| anyhow::anyhow!(UNAVAILABLE))?;
         let mut statement = tx.prepare(
             "SELECT r.room_id, r.project, r.brief, r.created_at_unix_ms FROM wc_agent_meeting_rooms r
-             JOIN wc_agent_meeting_members m ON m.room_id = r.room_id
-             WHERE m.agent_id = ?1 AND r.project = ?2 ORDER BY r.created_at_unix_ms, r.room_id LIMIT ?3",
+             WHERE r.project = ?2 AND EXISTS (SELECT 1 FROM wc_agent_meeting_members m JOIN wc_isolated_agents a ON a.agent_id=m.agent_id WHERE m.room_id=r.room_id AND a.owner_user=?1) ORDER BY r.created_at_unix_ms, r.room_id LIMIT ?3",
         )?;
         let rooms = statement
             .query_map(
                 params![
-                    binding.agent_id(),
+                    binding.owner_user(),
                     binding.project(),
                     limit.clamp(1, MAX_AGENT_MEETING_PAGE_SIZE) as i64
                 ],
@@ -286,14 +285,13 @@ pub(crate) fn authorize_room(
     binding: &VerifiedAgentRun,
     room_id: &str,
 ) -> anyhow::Result<AgentMeetingRoom> {
-    // Meeting membership belongs to the logical Agent and survives run/task
-    // handoff. Every access still requires its current active run and project.
+    // Published project work is shared across this owner's Agents. Private
+    // memory, goals and acceptance never enter this public content store.
     validate_agent_run_on_connection(conn, binding).map_err(|_| anyhow::anyhow!(UNAVAILABLE))?;
     let room = conn.query_row(
         "SELECT r.room_id, r.project, r.brief, r.created_at_unix_ms FROM wc_agent_meeting_rooms r
-         JOIN wc_agent_meeting_members m ON m.room_id = r.room_id
-         WHERE r.room_id = ?1 AND r.project = ?2 AND m.agent_id = ?3",
-        params![room_id, binding.project(), binding.agent_id()], row_to_room,
+         WHERE r.room_id = ?1 AND r.project = ?2 AND EXISTS (SELECT 1 FROM wc_agent_meeting_members m JOIN wc_isolated_agents a ON a.agent_id=m.agent_id WHERE m.room_id=r.room_id AND a.owner_user=?3)",
+        params![room_id, binding.project(), binding.owner_user()], row_to_room,
     ).optional()?;
     room.ok_or_else(|| anyhow::anyhow!(UNAVAILABLE))
 }
@@ -526,6 +524,10 @@ pub(crate) fn publish_agent_meeting_entry_on_connection(
 ) -> anyhow::Result<AgentMeetingEntry> {
     authorize_room(conn, binding, room_id)?;
     agent_run_business_gate_on_connection(conn, binding)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO wc_agent_meeting_members(room_id,agent_id) VALUES(?1,?2)",
+        params![room_id, binding.agent_id()],
+    )?;
     publish_agent_meeting_entry_as_run_on_connection(
         conn,
         binding.project(),

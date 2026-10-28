@@ -112,20 +112,25 @@ fn team_nested_authority_fields_and_invalid_call_bounds_are_rejected() {
     let mut plan = sample_tool_args("team_plan_register");
     plan["plan"]["manager"]["executable"] = json!("unauthorized");
     assert!(ToolCall::from_tool_name("team_plan_register", plan).is_err());
-    for (field, value) in [
-        ("call_index", json!(32)),
-        ("timeout_secs", json!(0)),
-        ("timeout_secs", json!(3601)),
-    ] {
+    for (field, value) in [("timeout_secs", json!(0)), ("timeout_secs", json!(3601))] {
         let mut args = sample_tool_args("team_cli_start");
         args[field] = value;
         assert!(ToolCall::from_tool_name("team_cli_start", args).is_err());
     }
+    let mut above_legacy_limit = sample_tool_args("team_cli_start");
+    above_legacy_limit["call_index"] = json!(32);
+    assert!(ToolCall::from_tool_name("team_cli_start", above_legacy_limit).is_ok());
     let mut args = sample_tool_args("team_cli_start");
     args.as_object_mut()
         .unwrap()
         .remove("fallback_thinking_profile_id");
-    assert!(ToolCall::from_tool_name("team_cli_start", args).is_err());
+    assert!(matches!(
+        ToolCall::from_tool_name("team_cli_start", args).unwrap(),
+        ToolCall::TeamCliStart {
+            fallback_thinking_profile_id: None,
+            ..
+        }
+    ));
     let mut args = sample_tool_args("team_policy_save");
     args["expected_revision"] = json!(-1);
     assert!(ToolCall::from_tool_name("team_policy_save", args).is_err());
@@ -140,6 +145,11 @@ fn team_plan_effort_contract_accepts_null_and_saved_policy_selector() {
         }]);
         assert!(ToolCall::from_tool_name("team_plan_register", args).is_ok());
     }
+    let mut args = sample_tool_args("team_plan_register");
+    args["plan"]["manager"]["cli_calls"] = json!([{
+        "provider_id":"workbuddy", "model":"discovered-model"
+    }]);
+    assert!(ToolCall::from_tool_name("team_plan_register", args).is_ok());
 }
 
 #[test]
@@ -220,7 +230,6 @@ fn plan_read_cli_pagination_is_bounded_and_does_not_expand_cancel_arguments() {
     assert_eq!(call.session_log_arguments()["attempts_offset"], 20);
     for (field, value) in [
         ("attempts_offset", json!(-1)),
-        ("attempts_offset", json!(65537)),
         ("attempts_limit", json!(0)),
         ("attempts_limit", json!(21)),
     ] {
@@ -231,5 +240,54 @@ fn plan_read_cli_pagination_is_bounded_and_does_not_expand_cancel_arguments() {
             "{field}"
         );
     }
+    let mut later_page = args.clone();
+    later_page["attempts_offset"] = json!(65537);
+    assert!(ToolCall::from_tool_name("team_plan_read", later_page).is_ok());
     assert!(ToolCall::from_tool_name("team_plan_cancel", args).is_err());
+}
+
+#[test]
+fn ordinary_agent_profile_can_be_omitted_without_synthesizing_a_selection() {
+    let mut args = sample_tool_args("team_agent_start");
+    args.as_object_mut().unwrap().remove("thinking_profile_id");
+    let call = ToolCall::from_tool_name("team_agent_start", args).unwrap();
+    assert!(matches!(
+        call,
+        ToolCall::TeamAgentStart {
+            thinking_profile_id: None,
+            ..
+        }
+    ));
+    let specs = registered_tool_specs();
+    let schema = &specs
+        .iter()
+        .find(|spec| spec.name == "team_agent_start")
+        .unwrap()
+        .input_schema;
+    assert!(!schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("thinking_profile_id")));
+}
+
+#[test]
+fn team_plan_model_contract_accepts_omission_or_null_and_declares_nonblank_names() {
+    for call in [
+        json!({"provider_id":"workbuddy"}),
+        json!({"provider_id":"workbuddy","model":null}),
+    ] {
+        let mut args = sample_tool_args("team_plan_register");
+        args["plan"]["manager"]["cli_calls"] = json!([call]);
+        assert!(ToolCall::from_tool_name("team_plan_register", args).is_ok());
+    }
+    // This carrier checks field boundaries; Store owns semantic validation.
+    // Verify the published constraint here and exercise blank refusal in Store.
+    let schema = (lookup_tool_definition("team_plan_register")
+        .unwrap()
+        .model_spec
+        .unwrap()
+        .input_schema)();
+    let model = &schema["properties"]["plan"]["properties"]["manager"]["properties"]["cli_calls"]
+        ["items"]["properties"]["model"];
+    assert_eq!(model["anyOf"][0]["minLength"], 1);
 }

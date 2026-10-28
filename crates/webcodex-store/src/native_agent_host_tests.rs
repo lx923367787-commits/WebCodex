@@ -424,18 +424,18 @@ fn named_workspace_team_uses_saved_policy_without_upgrading_existing_chats() {
     assert_eq!(old, old_again);
     assert_eq!(
         db.read_agent_enrollment(&old).unwrap().policy.max_subagents,
-        0
+        u32::MAX
     );
     assert_eq!(
-        db.agent_team_execution_project(&old).unwrap_err().code(),
-        "workspace_team_new_chat_required"
+        db.agent_team_execution_project(&old).unwrap(),
+        project.folders[0].project
     );
     let manager = db
         .ensure_native_host_window(&host, &"b".repeat(64), now)
         .unwrap();
     let assignment = db.read_agent_enrollment(&manager).unwrap();
-    assert_eq!(assignment.policy.max_subagents, 4);
-    assert_eq!(assignment.policy.max_cli_calls, 10);
+    assert_eq!(assignment.policy.max_subagents, u32::MAX);
+    assert_eq!(assignment.policy.max_cli_calls, u32::MAX);
     assert_eq!(
         db.agent_team_execution_project(&manager).unwrap(),
         project.folders[0].project
@@ -560,7 +560,7 @@ fn named_workspace_team_does_not_guess_a_folder_or_borrow_another_owners_policy(
             .unwrap()
             .policy
             .max_cli_calls,
-        0
+        u32::MAX
     );
 }
 
@@ -609,8 +609,8 @@ fn named_workspace_team_uses_explicit_folder_without_retargeting_existing_chats(
         .ensure_native_host_window(&host, &"a".repeat(64), now)
         .unwrap();
     let assignment = db.read_agent_enrollment(&docs).unwrap();
-    assert_eq!(assignment.policy.max_subagents, 2);
-    assert_eq!(assignment.policy.max_cli_calls, 3);
+    assert_eq!(assignment.policy.max_subagents, u32::MAX);
+    assert_eq!(assignment.policy.max_cli_calls, u32::MAX);
     assert_eq!(
         db.agent_team_policy(&docs, &assignment.task_id)
             .unwrap()
@@ -639,8 +639,8 @@ fn named_workspace_team_uses_explicit_folder_without_retargeting_existing_chats(
         .ensure_native_host_window(&host, &"b".repeat(64), now)
         .unwrap();
     let assignment = db.read_agent_enrollment(&code).unwrap();
-    assert_eq!(assignment.policy.max_subagents, 3);
-    assert_eq!(assignment.policy.max_cli_calls, 8);
+    assert_eq!(assignment.policy.max_subagents, u32::MAX);
+    assert_eq!(assignment.policy.max_cli_calls, u32::MAX);
     assert_eq!(
         db.agent_team_policy(&code, &assignment.task_id)
             .unwrap()
@@ -689,8 +689,8 @@ fn named_workspace_team_caps_total_cli_budget_without_rejecting_feasible_policy(
         )
         .unwrap();
     let assignment = db.read_agent_enrollment(&manager).unwrap();
-    assert_eq!(assignment.policy.max_subagents, 32);
-    assert_eq!(assignment.policy.max_cli_calls, 32);
+    assert_eq!(assignment.policy.max_subagents, u32::MAX);
+    assert_eq!(assignment.policy.max_cli_calls, u32::MAX);
     assert_eq!(
         db.agent_team_policy(&manager, &assignment.task_id)
             .unwrap()
@@ -1017,5 +1017,139 @@ fn native_auto_enrollment_concurrent_first_calls_create_one_agent() {
                 .get::<_, i64>(0))
             .unwrap(),
         1
+    );
+}
+
+#[test]
+fn canonical_coding_entry_selects_exact_authorized_folder_and_preserves_active_identity() {
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let a = workspace('a');
+    let b = workspace('b');
+    db.configure_native_workspaces(
+        host.host_id(),
+        "native-owner",
+        0,
+        vec![a.clone(), b.clone()],
+    )
+    .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let window = "a".repeat(64);
+    let first = db
+        .ensure_native_host_coding_window(&host, &window, "agent:runner:b", None, None, now)
+        .unwrap();
+    assert_eq!(first.project(), b.id);
+    let unchanged = db
+        .ensure_native_host_coding_window(&host, &window, "agent:runner:a", None, None, now)
+        .unwrap();
+    assert_eq!(unchanged, first);
+    let path = db
+        .ensure_native_host_coding_window(
+            &host,
+            &"b".repeat(64),
+            "",
+            Some("runner"),
+            Some("d:/A/child/../src"),
+            now,
+        )
+        .unwrap();
+    assert_eq!(path.project(), a.id);
+    for (project, client, path) in [
+        ("agent:runner:unlisted", None, None),
+        ("", Some("other-runner"), Some("D:/a")),
+        ("", Some("runner"), Some("D:/a-other")),
+        ("", Some("runner"), Some("D:/a/../outside")),
+    ] {
+        assert!(db
+            .ensure_native_host_coding_window(&host, &"c".repeat(64), project, client, path, now)
+            .is_err());
+    }
+    assert_eq!(
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM wc_agent_tasks", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn canonical_coding_entry_does_not_guess_or_reactivate_occupied_windows() {
+    for stale in ["revoked", "pending", "disabled", "foreign"] {
+        let (_dir, db, host) = auto_enrollment_fixture();
+        db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![workspace('a')])
+            .unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let window = "a".repeat(64);
+        let run = db
+            .ensure_native_host_coding_window(&host, &window, "agent:runner:a", None, None, now)
+            .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            match stale {
+                "disabled" => {
+                    conn.execute("UPDATE wc_agent_host_windows SET enabled=0", [])
+                        .unwrap();
+                }
+                "foreign" => {
+                    conn.execute(
+                        "UPDATE wc_agent_host_windows SET principal_key='another-host'",
+                        [],
+                    )
+                    .unwrap();
+                }
+                state => {
+                    conn.execute(
+                        "UPDATE wc_agent_runs SET state=?1 WHERE run_id=?2",
+                        params![state, run.run_id()],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        assert_eq!(
+            db.ensure_native_host_coding_window(&host, &window, "agent:runner:a", None, None, now)
+                .unwrap_err()
+                .code(),
+            "agent_host_window_not_active"
+        );
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM wc_agent_tasks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+    let (_dir, db, host) = auto_enrollment_fixture();
+    let a = workspace('a');
+    let mut b = workspace('b');
+    b.folders = a.folders.clone();
+    db.configure_native_workspaces(host.host_id(), "native-owner", 0, vec![a, b])
+        .unwrap();
+    assert_eq!(
+        db.ensure_native_host_coding_window(
+            &host,
+            &"a".repeat(64),
+            "agent:runner:a",
+            None,
+            None,
+            chrono::Utc::now().timestamp_millis()
+        )
+        .unwrap_err()
+        .code(),
+        "workspace_selection_required"
+    );
+    assert_eq!(
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM wc_agent_tasks", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
     );
 }

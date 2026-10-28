@@ -126,6 +126,12 @@ class GuardTests(unittest.TestCase):
         self.assertFalse(result["message_observed"])
         self.assertEqual(self.browser.clicks, [])
 
+    def test_request_text_cannot_enable_prior_launch_operator_exception(self):
+        guard.inspect(self.browser,{**REQUEST,'approved_prior_launch':True})
+        self.assertFalse(self.browser.probes[-1]['approved_prior_launch'])
+        guard.inspect(self.browser,REQUEST,approved_prior_launch=True)
+        self.assertTrue(self.browser.probes[-1]['approved_prior_launch'])
+
     def test_url_changes_after_binding_stop_before_click(self):
         self.browser.queue = [observation(), observation(url="https://chatgpt.com/c/another-chat")]
         result = self.run_guard()
@@ -342,6 +348,54 @@ class DescriptionCardDomTests(unittest.TestCase):
                 '允许 ChatGPT 使用 other-app?', 'Quoted: Allow ChatGPT to use webcodex?'):
             with self.subTest(title=title):
                 self.assertEqual(guard.candidate(self.probe(title))[1], 'unrecognized_approval')
+
+    def test_mixed_old_and_new_user_bubbles_are_counted_once_in_document_order(self):
+        self.probe('Allow ChatGPT to use webcodex?')
+        self.page.locator('[data-markdown-text-tone]').evaluate('(e) => e.textContent="Earlier user message"')
+        self.page.evaluate('''text => {
+            const parent=document.createElement('div');parent.setAttribute('data-message-author-role','user');
+            const bubble=document.createElement('div');bubble.setAttribute('data-user-message-bubble','true');
+            const inner=document.createElement('div');inner.setAttribute('data-markdown-text-tone','user-message');
+            inner.textContent=text;bubble.append(inner);parent.append(bubble);document.body.append(parent);
+        }''',REQUEST['launch_id']+' '+REQUEST['goal_id'])
+        args={**REQUEST,'expected_user_count':2}
+        value=self.page.evaluate('arg => ('+guard.PROBE_JS+')(null,arg)',json.dumps(args))
+        self.assertEqual(value['user_count'],2)
+        self.assertTrue(value['bound'])
+        self.page.locator('[data-message-author-role] [data-markdown-text-tone]').evaluate('(e) => e.removeAttribute("data-markdown-text-tone")')
+        value=self.page.evaluate('arg => ('+guard.PROBE_JS+')(null,arg)',json.dumps(args))
+        self.assertTrue(value['bound'])
+
+    def test_original_chat_continuation_binds_only_exact_last_notification_and_count(self):
+        self.probe('允许 ChatGPT 使用 webcodex?')
+        self.page.evaluate("""() => {
+            const earlier=document.createElement('div');
+            earlier.setAttribute('data-markdown-text-tone','user-message');
+            earlier.textContent='Earlier authorized task';
+            document.body.prepend(earlier);
+        }""")
+        self.assertFalse(self.read_probe()['bound'])
+        args={**REQUEST,'expected_user_count':2}
+        value=self.page.evaluate('arg => ('+guard.PROBE_JS+')(null,arg)',json.dumps(args))
+        self.assertTrue(value['bound'])
+        self.page.evaluate("""() => {
+            const later=document.createElement('div');
+            later.setAttribute('data-markdown-text-tone','user-message');
+            later.textContent='New human instruction';document.body.append(later);
+        }""")
+        args['expected_user_count']=3
+        value=self.page.evaluate('arg => ('+guard.PROBE_JS+')(null,arg)',json.dumps(args))
+        self.assertFalse(value['bound'])
+        args['approved_prior_launch']=True
+        value=self.page.evaluate('arg => ('+guard.PROBE_JS+')(null,arg)',json.dumps(args))
+        self.assertTrue(value['bound'])
+        args['expected_user_count']=2
+        value=self.page.evaluate('arg => ('+guard.PROBE_JS+')(null,arg)',json.dumps(args))
+        self.assertFalse(value['bound'])
+        args['expected_user_count']=4
+        self.page.evaluate("""() => document.body.append(document.querySelector('[data-markdown-text-tone="user-message"]').nextElementSibling.cloneNode(true))""")
+        value=self.page.evaluate('arg => ('+guard.PROBE_JS+')(null,arg)',json.dumps(args))
+        self.assertFalse(value['bound'])
 
     def test_hidden_matching_title_and_non_always_buttons_do_not_authorize(self):
         for button in ('允许一次', 'Allow once', 'Do not always allow'):

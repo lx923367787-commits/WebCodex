@@ -446,6 +446,7 @@ pub(crate) fn login_usage() -> &'static str {
      \x20\x20--no-system-proxy   Ignore proxy environment and connect directly\n\
      \x20\x20--device NAME        Name for this device [default: hostname + local suffix]\n\
      \x20\x20--allowed-root PATH  Repeatable location under which projects may be added later\n\
+  --no-default-root          Require explicit folder authorization; do not default to HOME\n\
      \x20\x20--project PATH       Existing workspace to register with this login\n\
      \x20\x20--transport NAME     websocket|polling|quic|auto [default: websocket]\n\
      \x20\x20--dir PATH           Where connections are stored [default: root /etc/webcodex;\n\

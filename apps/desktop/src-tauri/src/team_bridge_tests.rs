@@ -15,13 +15,15 @@ fn project(id: &str) -> RegisteredProject {
 }
 
 #[test]
-fn actions_are_only_the_five_human_office_operations() {
+fn human_office_actions_include_read_only_runner_cli_inventory() {
     for action in [
         "policy-get",
         "policy-save",
         "plan-list",
         "plan-read",
         "task-create",
+        "cli-discover",
+        "cli-models",
     ] {
         assert_eq!(TeamOfficeAction::parse(action).unwrap().as_str(), action);
     }

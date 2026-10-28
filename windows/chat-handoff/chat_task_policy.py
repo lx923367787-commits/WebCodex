@@ -60,6 +60,8 @@ def _digest(value):
 
 
 def _profile(value):
+    if value is None:
+        return None
     if not isinstance(value, dict):
         raise PolicyError("thinking_profile_required")
     profile_id = value.get("profile_id")
@@ -133,8 +135,16 @@ def _task_evidence(root, request_id):
     if browser.get("launch_id") != request_id or browser.get("task_id") != task_id:
         raise PolicyError("chat_task_browser_identity_mismatch")
     actual_profile = _profile(browser.get("thinking_profile"))
-    if actual_profile["profile_id"] != profile["profile_id"]:
+    adjustment = browser.get("thinking_adjustment", {}).get("status")
+    if profile is None or adjustment in {"not_requested", "not_adjusted"}:
+        # Carry the lack of an applied override, not an invented page value.
+        profile = None
+    elif actual_profile is None or actual_profile["profile_id"] != profile["profile_id"]:
         raise PolicyError("chat_task_profile_not_confirmed")
+    if profile is not None and profile.get("mode") == "default":
+        if actual_profile.get("mode") != "default" or not isinstance(actual_profile.get("observed_profile"), dict):
+            raise PolicyError("chat_task_profile_not_confirmed")
+        profile = actual_profile
     if _path(root, "tasks", request_id, "cancel.json").exists():
         raise PolicyError("chat_task_cancelled")
     return {"request_id": request_id, "task_id": task_id, "thinking_profile": profile,

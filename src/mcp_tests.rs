@@ -364,3 +364,6 @@ async fn oauth_mcp_request(
     let body = resp.take_json::<Value>().await.unwrap();
     (status, body, challenge)
 }
+
+#[path = "mcp_tests/browser_images.rs"]
+mod browser_images;

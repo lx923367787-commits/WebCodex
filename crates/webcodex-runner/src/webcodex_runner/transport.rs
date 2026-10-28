@@ -196,31 +196,36 @@ impl RunnerRuntimeState {
         #[cfg(windows)]
         {
             let requested = !cfg.agent_execution_resources.profiles.is_empty();
-            if let Ok(durable_root) =
-                DetachedJobStore::default_root_for_runner(&cfg.client_id, &cfg.server_url)
-            {
-                let configured = requested
-                    && super::jobs::agent_resources::validate_profiles(
-                        &cfg.agent_execution_resources,
-                    )
-                    .and_then(|profiles| {
-                        jobs.configure_agent_execution_resources(profiles, durable_root.clone())
-                    })
-                    .is_ok();
-                if configured {
-                    config.set_agent_execution_ready(jobs.agent_execution_ready());
-                } else {
-                    // Existing closed work remains readable after a provider is
-                    // removed/upgraded. This cannot create metadata or enable execution.
-                    let _ = jobs.configure_agent_delivery_history(durable_root);
-                    if requested {
-                        tracing::warn!("isolated Agent execution disabled: local backend/resources unavailable");
+            match DetachedJobStore::default_root_for_runner(&cfg.client_id, &cfg.server_url) {
+                Ok(durable_root) => {
+                    let configured = if requested {
+                        match super::jobs::agent_resources::validate_profiles(
+                            &cfg.agent_execution_resources,
+                        )
+                        .and_then(|profiles| {
+                            jobs.configure_agent_execution_resources(profiles, durable_root.clone())
+                        }) {
+                            Ok(()) => {
+                                config.set_agent_execution_ready(jobs.agent_execution_ready());
+                                true
+                            }
+                            Err(error) => {
+                                config.set_agent_execution_load_error("configuration", &error);
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if !configured {
+                        // Historical results remain readable without claiming new execution readiness.
+                        let _ = jobs.configure_agent_delivery_history(durable_root);
                     }
                 }
-            } else if requested {
-                tracing::warn!(
-                    "isolated Agent execution disabled: local durable identity unavailable"
-                );
+                Err(error) if requested => {
+                    config.set_agent_execution_load_error("state_root", &error)
+                }
+                Err(_) => {}
             }
         }
         // Persistent shells reuse the same authenticated OpenSSH multiplex pool

@@ -54,6 +54,9 @@ fn sample_tool_args_for_spec(spec: &ToolSpec) -> Value {
         })
         .collect();
     match spec.name.as_str() {
+        "tool_connection" => {
+            args.insert("action".to_string(), json!("status"));
+        }
         "work_on_project" => {
             args.insert("project".to_string(), json!(SAMPLE_PROJECT));
         }

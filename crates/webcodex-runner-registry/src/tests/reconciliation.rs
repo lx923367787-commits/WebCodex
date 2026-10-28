@@ -2427,6 +2427,7 @@ fn standalone_snapshot(job_id: &str, status: &str) -> ShellJobSnapshot {
         error: None,
         command_execution_state: None,
         context: ShellJobContext {
+            agent_program: None,
             agent_execution: None,
             document: None,
             runtime_project_id: None,

@@ -1769,17 +1769,20 @@ async fn managed_worktree_invalid_arguments_and_authority_fail_before_runner_mut
         .to_string_lossy()
         .to_string();
     let invalid = runtime
-        .dispatch(ToolCall::WorkOnProject {
-            project: String::new(),
-            client_id: Some("unresolved-runner".to_string()),
-            path: Some(source_path.clone()),
-            mode: Some("checkout".to_string()),
-            base_ref: Some("main".to_string()),
-            instruction: "must fail before resolution".to_string(),
-            include_project_instructions: true,
-            include_workflow_guidance: true,
-            session_id: None,
-        })
+        .dispatch_with_auth(
+            ToolCall::WorkOnProject {
+                project: String::new(),
+                client_id: Some("unresolved-runner".to_string()),
+                path: Some(source_path.clone()),
+                mode: Some("checkout".to_string()),
+                base_ref: Some("main".to_string()),
+                instruction: "must fail before resolution".to_string(),
+                include_project_instructions: true,
+                include_workflow_guidance: true,
+                session_id: None,
+            },
+            Some(&auth_context(None, true)),
+        )
         .await;
     assert!(!invalid.success);
     assert_eq!(invalid.output["error_kind"], "invalid_arguments");

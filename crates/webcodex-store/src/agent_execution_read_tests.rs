@@ -180,14 +180,14 @@ fn cli_read_slot_exposes_only_own_frozen_call_and_rechecks_current_run() {
     let member =
         f.db.read_agent_cli_planned_slot(&f.member, &f.root, &f.child, 0)
             .unwrap();
-    assert_eq!(member.model, "member-model");
+    assert_eq!(member.model.named(), Some("member-model"));
     assert_eq!(member.effort.as_deref(), Some("medium"));
     assert_eq!(member.instruction, "Approved member instruction");
     assert_eq!(member.source_task_id, f.child);
     let manager =
         f.db.read_agent_cli_planned_slot(&f.manager, &f.root, &f.root, 0)
             .unwrap();
-    assert_eq!(manager.model, "manager-model");
+    assert_eq!(manager.model.named(), Some("manager-model"));
     assert_eq!(manager.effort.as_deref(), Some("high"));
     assert!(f
         .db
@@ -227,7 +227,7 @@ fn cli_read_slot_preserves_explicit_no_effort_without_defaulting() {
         f.db.read_agent_cli_planned_slot(&f.member, &f.root, &f.child, 0)
             .unwrap();
     assert_eq!(slot.effort, None);
-    assert_eq!(slot.model, "member-model");
+    assert_eq!(slot.model.named(), Some("member-model"));
     assert_eq!(slot.instruction, "Approved member instruction");
 }
 
@@ -476,4 +476,35 @@ fn cli_read_recoverable_preparation_rejects_worker_close_without_closing_current
         .db
         .recoverable_agent_cli_preparation(&f.manager, &identity)
         .is_err());
+}
+
+#[test]
+fn cli_prepared_default_effort_recovers_same_attempt_worker_job_and_key() {
+    let fixture = Fixture::with_member_effort(None);
+    let mut request = fixture.request();
+    request.source_task_id = fixture.child.clone();
+    let first = fixture
+        .db
+        .prepare_agent_cli_worker(&fixture.member, request.clone())
+        .unwrap();
+    assert_eq!(first.receipt.effort, None);
+    let attempt = first.receipt.attempt_id;
+    let identity = first.preparation.unwrap().binding_identity().clone();
+    let counts = fixture.counts();
+    assert_eq!(
+        fixture
+            .db
+            .recoverable_agent_cli_preparation(&fixture.member, &identity)
+            .unwrap(),
+        identity
+    );
+    let replay = fixture
+        .db
+        .prepare_agent_cli_worker(&fixture.member, request)
+        .unwrap();
+    assert_eq!(replay.receipt.attempt_id, attempt);
+    assert_eq!(replay.preparation.unwrap().binding_identity(), &identity);
+    assert_eq!(fixture.counts(), counts);
+    assert!(identity.launch_intent_hash.is_empty());
+    assert!(identity.resource_manifest_hash.is_empty());
 }

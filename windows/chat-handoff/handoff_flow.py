@@ -80,7 +80,8 @@ def validate_request(request, check_expiry=True):
             raise ValueError("invalid thinking policy")
         if policy == "inherit_child":
             profile = request.get("thinking_profile")
-            if not isinstance(profile, dict) or not isinstance(profile.get("profile_id"), str):
+            if "thinking_profile" not in request or (profile is not None and
+                    (not isinstance(profile, dict) or not isinstance(profile.get("profile_id"), str))):
                 raise ValueError("child thinking profile required")
             child_request = request.get("chat_task_request_id")
             if not isinstance(child_request, str) or str(uuid.UUID(child_request)) != child_request:

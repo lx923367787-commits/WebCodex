@@ -61,7 +61,7 @@ impl Fixture {
             "runtime:read project:read project:write",
         );
         let run = db
-            .create_isolated_agent(&user.username, "project-a", None)
+            .create_isolated_agent(&user.id, "project-a", None)
             .unwrap();
         let service = Self::service(&db, temp.path());
         Self {
@@ -274,7 +274,7 @@ async fn host_registration_is_explicit_and_exact_principal_and_window_are_requir
     ] {
         assert!(names.contains(&required));
     }
-    assert!(!names.contains(&"run_process"));
+    assert!(names.contains(&"run_process"));
     let (_, active_tools) = f.rpc(&f.oauth, Some(SOURCE), "tools/list", json!({})).await;
     assert_eq!(
         unbound_tools["result"]["tools"], active_tools["result"]["tools"],
@@ -324,7 +324,7 @@ async fn host_registration_is_explicit_and_exact_principal_and_window_are_requir
 }
 
 #[tokio::test]
-async fn registered_host_has_no_generic_model_or_management_escape_and_respects_oauth_scopes() {
+async fn registered_host_shares_runtime_status_and_respects_original_oauth_scopes() {
     let f = Fixture::new();
     f.register().await;
     success(
@@ -335,14 +335,16 @@ async fn registered_host_has_no_generic_model_or_management_escape_and_respects_
         )
         .await,
     );
-    for name in [
-        "run_process",
-        "run_shell",
-        "coding_agent_start",
-        "runtime_status",
-    ] {
+    for name in ["run_process", "run_shell", "coding_agent_start"] {
+        // Missing business arguments still fail the ordinary tool parser.
         denied(&f.call(SOURCE, name, json!({})).await);
     }
+    let status = success(
+        f.call(SOURCE, "runtime_status", json!({"compact":true}))
+            .await,
+    );
+    assert!(status.get("agents").is_some(), "{status}");
+    assert!(status.get("build").is_some(), "{status}");
     let (_, body) = f
         .rpc(
             &f.oauth,
@@ -504,7 +506,7 @@ async fn host_http_handoff_redeems_one_time_claim_and_survives_lost_response_and
         f.db.authenticate_agent_run(&f.run.token).is_ok(),
         "source must not retire before commit"
     );
-    let control = json!({"action":"handoff_begin_attempt","owner_user":f.user.username,"project":"project-a","agent_id":f.run.agent.agent_id,
+    let control = json!({"action":"handoff_begin_attempt","owner_user":f.user.id,"project":"project-a","agent_id":f.run.agent.agent_id,
         "goal_id":goal,"handoff_id":checkpoint["handoff"]["handoff_id"]});
     let (status, reserved) = f.control(BOOTSTRAP, control.clone()).await;
     assert_eq!(status, StatusCode::OK, "{reserved}");
@@ -518,7 +520,7 @@ async fn host_http_handoff_redeems_one_time_claim_and_survives_lost_response_and
         "attempt_id":reserved["handoff"]["attempt_id"],"checkpoint_sequence":reserved["handoff"]["checkpoint_sequence"]});
     // Possession of the exact attempt identifier grants no window authority.
     denied(&f.call("candidate", "goal_handoff", args.clone()).await);
-    let issuance = json!({"action":"handoff_launch_claim","owner_user":f.user.username,"project":"project-a",
+    let issuance = json!({"action":"handoff_launch_claim","owner_user":f.user.id,"project":"project-a",
         "agent_id":f.run.agent.agent_id,"goal_id":goal,"handoff_id":args["handoff_id"],"expected_attempt_id":args["attempt_id"]});
     let (status, grant) = f.control(BOOTSTRAP, issuance.clone()).await;
     assert_eq!(status, StatusCode::OK);

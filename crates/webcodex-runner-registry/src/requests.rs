@@ -192,6 +192,29 @@ enum QueueAdmission {
     Generic,
     AgentExecution,
     AgentCli,
+    AgentProgram,
+}
+
+pub(super) fn enqueue_agent_program_request_locked(
+    telemetry: &dyn crate::RunnerRegistryTelemetry,
+    inner: &mut RunnerRegistryInner,
+    client_id: &str,
+    request_id: String,
+    request: RunnerRequest,
+    waiter: Option<oneshot::Sender<ShellRunResponse>>,
+    job_id: Option<String>,
+    _permit: &crate::agent_program::AgentProgramEnqueuePermit,
+) -> Result<(), PendingRequestEnqueueError> {
+    enqueue_pending_request_impl(
+        telemetry,
+        inner,
+        client_id,
+        request_id,
+        request,
+        waiter,
+        job_id,
+        QueueAdmission::AgentProgram,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -231,6 +254,12 @@ fn enqueue_pending_request_impl(
         .decode_operation()
         .map_err(|message| PendingRequestEnqueueError::InvalidOperation { message })?;
     let required = match &operation {
+        RunnerOperation::AgentProgramInspect(_) | RunnerOperation::AgentBrowser(_) => {
+            QueueAdmission::AgentProgram
+        }
+        RunnerOperation::Job(job) if job.context().is_some_and(|c| c.agent_program.is_some()) => {
+            QueueAdmission::AgentProgram
+        }
         RunnerOperation::AgentExecutionClose(_)
         | RunnerOperation::Job(
             webcodex_core::runner_operation::RunnerJobOperation::StartIsolatedProcess(_),
@@ -1195,6 +1224,7 @@ impl RunnerRegistry {
         let ssh_context = ssh_resource
             .zip(ssh_session_id)
             .map(|(resource, session_id)| ShellJobContext {
+                agent_program: None,
                 agent_execution: None,
                 document: None,
                 runtime_project_id: None,
@@ -1643,6 +1673,71 @@ impl RunnerRegistry {
             .supports(RunnerFeature::RunnerConfigControl)
         {
             return Err("capability_unavailable: Runner config control is unsupported".to_string());
+        }
+        if now_ts().saturating_sub(runner.last_seen) > RUNNER_ONLINE_WINDOW_SECS {
+            return Err("exact Runner is offline; request was not started".to_string());
+        }
+        enqueue_pending_request_locked(
+            self.telemetry.as_ref(),
+            &mut inner,
+            client_id,
+            request_id.clone(),
+            request,
+            Some(tx),
+            None,
+        )?;
+        inner
+            .pending_by_id
+            .get_mut(&request_id)
+            .expect("Runner config request was just enqueued")
+            .expected_runner_config_runner_instance_id =
+            Some(expected_runner_instance_id.to_string());
+        notify_runner_locked(&inner, client_id);
+        Ok((request_id, rx))
+    }
+
+    pub async fn enqueue_tool_connection(
+        &self,
+        client_id: &str,
+        expected_runner_instance_id: &str,
+        operation: webcodex_core::tool_connection::ToolConnectionRequest,
+        auth: Option<&crate::RunnerAccess>,
+        requested_by: String,
+    ) -> Result<(String, oneshot::Receiver<ShellRunResponse>), String> {
+        operation
+            .validate()
+            .map_err(|_| "invalid_runner_config_request: request was not started".to_string())?;
+        let content = serde_json::to_string(&operation)
+            .map_err(|_| "invalid_runner_config_request: request was not started".to_string())?;
+        if content.len() > webcodex_core::tool_connection::TOOL_CONNECTION_MAX_BYTES {
+            return Err("invalid_runner_config_request: request was not started".to_string());
+        }
+        let request_id = next_request_id();
+        let (tx, rx) = oneshot::channel();
+        let request = encode_runner_operation(
+            &request_id,
+            client_id,
+            requested_by,
+            RunnerOperation::ToolConnection(operation),
+        )
+        .map_err(|_| "invalid_runner_config_request: request was not started".to_string())?;
+        let mut inner = self.inner.lock().await;
+        let runner = inner
+            .runners
+            .get(client_id)
+            .ok_or_else(|| "exact Runner is unavailable".to_string())?;
+        assert_runner_access(auth, runner)
+            .map_err(|_| "exact Runner is unavailable".to_string())?;
+        if runner.runner_instance_id != expected_runner_instance_id {
+            return Err("runner_replaced: request was not started".to_string());
+        }
+        if !runner
+            .runner_features
+            .supports(RunnerFeature::ToolConnections)
+        {
+            return Err(
+                "capability_unavailable: Tool connection management is unsupported".to_string(),
+            );
         }
         if now_ts().saturating_sub(runner.last_seen) > RUNNER_ONLINE_WINDOW_SECS {
             return Err("exact Runner is offline; request was not started".to_string());

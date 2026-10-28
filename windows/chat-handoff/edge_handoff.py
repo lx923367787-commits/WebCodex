@@ -6,12 +6,14 @@ import time
 from urllib.parse import urlsplit
 
 import handoff_flow as flow
+import approval_guard
 
 class FlowError(RuntimeError):
     pass
 
 
 COMPOSER_JS = r'''function() {
+''' + approval_guard.USER_MESSAGES_JS + r'''
   const shown = e => !!e && !!e.getClientRects().length && getComputedStyle(e).visibility === 'visible';
   const edits = [...document.querySelectorAll('[contenteditable="true"],textarea')].filter(shown);
   const preferred = edits.filter(e => e.id === 'prompt-textarea' || e.getAttribute('role') === 'textbox'
@@ -27,8 +29,7 @@ COMPOSER_JS = r'''function() {
     document_visible:document.visibilityState === 'visible', document_focused:document.hasFocus(),
     html:e ? e.innerHTML : '', focused:!!e && (e === document.activeElement || e.contains(document.activeElement)),
     xpath:e ? `(//*[@contenteditable='true' or self::textarea])[${all.indexOf(e)+1}]` : null,
-    user_count:document.querySelectorAll('[data-markdown-text-tone="user-message"]').length
-      || document.querySelectorAll('[data-message-author-role="user"]').length,
+    user_count:users.length,
     send_count:send.length, send_enabled:send.length === 1 && !send[0].matches(':disabled')
       && send[0].getAttribute('aria-disabled') !== 'true',
     send_xpath:send.length === 1 ? `(//button)[${allButtons.indexOf(send[0])+1}]` : null,
@@ -109,6 +110,8 @@ def click_control(browser, key, request, deadline):
 
 def configure_chat(browser, request, keys):
     """Apply an exact discovered profile; handoff defaults to observed Pro max."""
+    if request.get("thinking_policy") == "inherit_child" and request.get("thinking_profile") is None:
+        return {"thinking_adjustment": {"status": "not_requested"}}
     import thinking_profiles
     try:
         return thinking_profiles.select_profile(browser, request, keys, request.get("thinking_profile"))

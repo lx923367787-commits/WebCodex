@@ -600,6 +600,7 @@ mod tests {
             internal_posix_script: false,
             structured_execution_jobs: false,
             agent_isolated_execution_v1: false,
+            agent_program_execution_v1: false,
             detached_process_jobs: false,
             lsp_read_only_navigation: false,
             lsp_call_hierarchy: false,
@@ -628,6 +629,7 @@ mod tests {
             native_tool_plugins: false,
             managed_ssh_resources: false,
             runner_config_control: false,
+            tool_connections: false,
         });
         QuicRegisterFrame::new(
             RunnerRegisterRequest {

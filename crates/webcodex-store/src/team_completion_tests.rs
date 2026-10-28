@@ -153,7 +153,7 @@ fn team_completion_separates_plans_budget_and_confirmed_work_without_refunding_f
         ),
         (0, 0, 0)
     );
-    assert_eq!(progress.success_gate, "pending");
+    assert_eq!(progress.success_gate, "not_required");
     let first = reserve(&db, &owner, &root, &root, 0);
     let child_call = reserve(&db, &owner, &root, &child, 0);
     assert_eq!(
@@ -176,7 +176,7 @@ fn team_completion_separates_plans_budget_and_confirmed_work_without_refunding_f
         (progress.consumed_cli_calls, progress.confirmed_cli_calls),
         (3, 2)
     );
-    assert!(!progress.members[1].minimum_met);
+    assert!(progress.members[1].minimum_met);
     // Failed executions still counted; replay cannot spend the slot again.
     reserve(&db, &owner, &root, &root, 0);
     assert_eq!(
@@ -230,7 +230,7 @@ fn team_completion_separates_plans_budget_and_confirmed_work_without_refunding_f
         db.read_team_completion(&owner, PROJECT, &root)
             .unwrap()
             .success_gate,
-        "pending"
+        "not_required"
     );
     db.record_team_agent_observation(
         &owner,
@@ -253,7 +253,7 @@ fn team_completion_separates_plans_budget_and_confirmed_work_without_refunding_f
     .unwrap();
     let progress = db.read_team_completion(&owner, PROJECT, &root).unwrap();
     assert_eq!(progress.confirmed_subagents, 1);
-    assert_eq!(progress.success_gate, "satisfied");
+    assert_eq!(progress.success_gate, "not_required");
     assert_eq!(
         progress.task_state, "ready",
         "quota evidence does not mark the task successful"
@@ -278,7 +278,7 @@ fn team_completion_unstarted_calls_consume_budget_but_do_not_satisfy_execution_m
         (progress.consumed_cli_calls, progress.confirmed_cli_calls),
         (1, 0)
     );
-    assert!(!progress.minimums_satisfied);
+    assert!(progress.minimums_satisfied);
 }
 
 #[test]

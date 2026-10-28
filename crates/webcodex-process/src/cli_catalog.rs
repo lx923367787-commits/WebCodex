@@ -189,6 +189,33 @@ pub(crate) fn apply_native_account_environment(
 }
 
 impl TrustedMetadataContext {
+    /// Only this provider's native account routing, never HOME, hooks, paths,
+    /// main-Agent credentials or unrelated environment. Values stay private.
+    pub fn account_environment(&self) -> BTreeMap<String, String> {
+        let keys: &[&str] = match self.provider {
+            Provider::Codex => &["CODEX_API_KEY"],
+            Provider::Claude => &[
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            ],
+            _ => &[],
+        };
+        keys.iter()
+            .filter_map(|key| {
+                self.environment
+                    .get(std::ffi::OsStr::new(key))
+                    .and_then(|v| v.to_str())
+                    .map(|v| ((*key).into(), v.into()))
+            })
+            .collect()
+    }
+
     /// Trusted host adapter for an installed CodeBuddy Node package. These paths
     /// are controller-selected, never model arguments or shell command text.
     pub fn for_codebuddy_node(

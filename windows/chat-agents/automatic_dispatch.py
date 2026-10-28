@@ -4,7 +4,6 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import threading
-import time
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent / "chat-handoff"))
@@ -33,7 +32,7 @@ class AutomaticDispatch:
     def __init__(self, service, context_factory, *, interval=5,
                  thread_factory=threading.Thread, advance_fn=advance,
                  state_reader=scheduler_state, lock_factory=watcher_lock,
-                 connection_binder=bind_connection, clock=time.monotonic):
+                 connection_binder=bind_connection):
         if not callable(context_factory) or not 1 <= interval <= 60:
             raise ValueError("invalid_automatic_dispatch_configuration")
         self.service, self.context_factory = service, context_factory
@@ -43,8 +42,6 @@ class AutomaticDispatch:
         self._thread = None
         self._last_scope = ""
         self.state = "pending"
-        self.clock = clock
-        self._profile_retry_at = float("-inf")
 
     def start(self):
         if self._thread is None and not self.service._stopping.is_set():
@@ -124,17 +121,25 @@ class AutomaticDispatch:
             state = self.state_reader(Path(context["scheduler_runtime"]))
             return {"mode": "stopped"} if self.service._stopping.is_set() else state
 
+        # Event work shares the existing single browser worker and STOP/PAUSE
+        # state. Its own failure cannot starve original enrollment recovery.
+        host_provider = getattr(context["manager_bindings"], "host_id_provider", None)
+        if callable(host_provider) and not self.service.browser_worker_busy():
+            try:
+                from team_continuation import schedule
+                schedule(self.service, context["member_api"], host_provider, read_state,
+                         cursor_path=queue_runtime / "continuation-cursor.json")
+            except Exception:
+                self.state = "continuation_unavailable"
+        if not self.service.browser_worker_busy():
+            try:
+                from enrollment_recovery import schedule as recover_original
+                recover_original(self.service, member, read_state)
+            except Exception:
+                self.state = "original_enrollment_recovery_unavailable"
         self.advance(fallback, self.service, read_state, member)
-        # Refresh is Host lifecycle work, never a side effect of catalog reads.
-        # Successful queue observation first proves the current control route;
-        # existing task work keeps priority over the one browser worker slot.
-        initial = read_state()
-        if (initial.get("mode") == "running" and self.clock() >= self._profile_retry_at
-                and read_state() == initial):
-            # Failed menu observations must not open a new tab every five seconds.
-            self._profile_retry_at = self.clock() + 300
-            if not self.service.maintain_chat_profiles():
-                self._profile_retry_at = self.clock() + self.interval
+        # Profile discovery is explicit UI work, not a queue prerequisite or
+        # an automatic consumer of the shared browser worker.
         self.state = "running"
 
     def _run(self):

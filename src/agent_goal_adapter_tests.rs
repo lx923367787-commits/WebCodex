@@ -31,7 +31,7 @@ fn start(db: &Database, binding: &VerifiedAgentRun) -> Value {
         db,
         binding,
         "goal_mode_start",
-        json!({"project":"project-a","objective":"Compare sources","idempotency_key":"start"}),
+        json!({"objective":"Compare sources","idempotency_key":"start"}),
     )
 }
 fn publish(db: &Database, binding: &VerifiedAgentRun) -> Value {

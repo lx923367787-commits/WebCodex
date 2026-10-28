@@ -36,8 +36,6 @@ impl Database {
         if [owner_user, project]
             .iter()
             .any(|s| s.trim().is_empty() || s.len() > 256 || s.chars().any(char::is_control))
-            || policy.max_subagents > 32
-            || policy.max_cli_calls > 32
         {
             return Err(AgentIsolationError::new(
                 "native_host_enrollment_policy_invalid",
@@ -79,11 +77,47 @@ impl Database {
         self.select_native_host_workspace(host, window_key, None, now)
     }
 
+    /// Canonical coding entry has already validated its arguments. A fresh
+    /// window uses the exact authorized folder; an active window keeps its Agent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ensure_native_host_coding_window(
+        &self,
+        host: &VerifiedNativeAgentHost,
+        window_key: &str,
+        project: &str,
+        client_id: Option<&str>,
+        path: Option<&str>,
+        now: i64,
+    ) -> Result<VerifiedAgentRun, AgentIsolationError> {
+        self.select_native_host_window_inner(
+            host,
+            window_key,
+            None,
+            Some((
+                project.trim(),
+                client_id.map(str::trim),
+                path.map(str::trim),
+            )),
+            now,
+        )
+    }
+
     pub fn select_native_host_workspace(
         &self,
         host: &VerifiedNativeAgentHost,
         window_key: &str,
         selected_project: Option<&str>,
+        now: i64,
+    ) -> Result<VerifiedAgentRun, AgentIsolationError> {
+        self.select_native_host_window_inner(host, window_key, selected_project, None, now)
+    }
+
+    fn select_native_host_window_inner(
+        &self,
+        host: &VerifiedNativeAgentHost,
+        window_key: &str,
+        selected_project: Option<&str>,
+        coding_source: Option<(&str, Option<&str>, Option<&str>)>,
         now: i64,
     ) -> Result<VerifiedAgentRun, AgentIsolationError> {
         if !hex(window_key, 64) {
@@ -140,14 +174,20 @@ impl Database {
             crate::native_workspaces::read_on_connection(&tx, &host.host_id)?
         {
             let choices: Vec<_> = catalog.projects.iter().filter(|p| p.enabled).collect();
-            let selected = match selected_project {
-                Some(id) => choices
-                    .iter()
-                    .find(|p| p.id == id)
-                    .copied()
-                    .ok_or_else(|| AgentIsolationError::new("workspace_not_authorized"))?,
-                None if choices.len() == 1 => choices[0],
-                None => return Err(AgentIsolationError::new("workspace_selection_required")),
+            let selected = if let Some((project, client, path)) = coding_source {
+                crate::native_workspaces::workspace_for_coding_source(
+                    &catalog, project, client, path,
+                )?
+            } else {
+                match selected_project {
+                    Some(id) => choices
+                        .iter()
+                        .find(|p| p.id == id)
+                        .copied()
+                        .ok_or_else(|| AgentIsolationError::new("workspace_not_authorized"))?,
+                    None if choices.len() == 1 => choices[0],
+                    None => return Err(AgentIsolationError::new("workspace_selection_required")),
+                }
             };
             let policy = match crate::native_workspaces::initial_team_on_connection(
                 &tx, &owner, selected,
@@ -171,7 +211,14 @@ impl Database {
             if selected_project.is_some() {
                 return Err(AgentIsolationError::new("workspace_not_authorized"));
             }
-            legacy.ok_or_else(|| AgentIsolationError::new("agent_host_enrollment_required"))?
+            let legacy =
+                legacy.ok_or_else(|| AgentIsolationError::new("agent_host_enrollment_required"))?;
+            if coding_source.is_some_and(|(project, client, path)| {
+                project != legacy.1 || client.is_some() || path.is_some()
+            }) {
+                return Err(AgentIsolationError::new("workspace_not_authorized"));
+            }
+            legacy
         };
         owner_enabled(&tx, &owner)?;
         let now = now.max(chrono::Utc::now().timestamp_millis());

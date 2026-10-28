@@ -248,6 +248,7 @@ pub const RUNNER_CAPABILITY_STRUCTURED_EXECUTION_JOBS: &str = "structured_execut
 /// Reserved D1 protocol contract. It is never a generation baseline and cannot
 /// be advertised until isolated dispatch, execution and durable close exist.
 pub const RUNNER_CAPABILITY_AGENT_ISOLATED_EXECUTION_V1: &str = "agent_isolated_execution_v1";
+pub const RUNNER_CAPABILITY_AGENT_PROGRAM_EXECUTION_V1: &str = "agent_program_execution_v1";
 /// Explicit authority for durable detached native-process Jobs whose payload tree is
 /// handed off to the detached supervisor. Missing on older Runners is false and
 /// is never inferred from structured process argv or ordinary durable Job support.
@@ -625,6 +626,8 @@ pub struct RunnerCapabilities {
     /// Exact isolated execution/close contract; never inferred from other bits.
     #[serde(default, skip_serializing_if = "is_false")]
     pub agent_isolated_execution_v1: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_program_execution_v1: bool,
     /// Durable detached native-process ownership handoff. This is an additive
     /// authority fence and is never implied by structured_process_argv or
     /// structured_execution_jobs.
@@ -737,6 +740,8 @@ pub struct RunnerCapabilities {
     /// transport, Plugin support, or protocol generation.
     #[serde(default, skip_serializing_if = "is_false")]
     pub runner_config_control: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tool_connections: bool,
 }
 
 /// Bounded, non-secret status for the Runner's active configuration generation.
@@ -917,6 +922,9 @@ impl RunnerCapabilities {
     pub const fn agent_isolated_execution_v1(&self) -> bool {
         self.agent_isolated_execution_v1
     }
+    pub const fn agent_program_execution_v1(&self) -> bool {
+        self.agent_program_execution_v1
+    }
 }
 
 impl Default for RunnerCapabilities {
@@ -953,6 +961,7 @@ impl Default for RunnerCapabilities {
             internal_posix_script: false,
             structured_execution_jobs: false,
             agent_isolated_execution_v1: false,
+            agent_program_execution_v1: false,
             detached_process_jobs: false,
             lsp_read_only_navigation: false,
             lsp_call_hierarchy: false,
@@ -981,6 +990,7 @@ impl Default for RunnerCapabilities {
             native_tool_plugins: false,
             managed_ssh_resources: false,
             runner_config_control: false,
+            tool_connections: false,
         }
     }
 }
@@ -1194,6 +1204,11 @@ pub struct RunnerPolicySummary {
     /// are never projected to the Server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_gateway_providers: Option<Vec<crate::mcp_gateway::McpGatewayProvider>>,
+    /// Runner-issued revision of the complete MCP provider inventory. Only
+    /// tool_connections-capable Runners may update that inventory in-process.
+    /// Revisions are monotonic within one Runner instance, including reconnects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_gateway_revision: Option<u64>,
 }
 
 impl Default for RunnerPolicySummary {
@@ -1207,6 +1222,7 @@ impl Default for RunnerPolicySummary {
             shell_profiles: None,
             tool_providers: None,
             mcp_gateway_providers: None,
+            mcp_gateway_revision: None,
         }
     }
 }
@@ -2793,7 +2809,7 @@ impl ShellJobStructuredExecutionMetadata {
             return false;
         }
         match self.execution_source.as_str() {
-            "agent_isolated_execution_v1" => {
+            "agent_isolated_execution_v1" | "start_agent_program" => {
                 self.language.is_none()
                     && self.script_bytes.is_none()
                     && self.arg_count <= PROCESS_ARG_MAX_COUNT
@@ -2823,6 +2839,8 @@ impl ShellJobStructuredExecutionMetadata {
 /// `run_job` input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellJobContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_program: Option<crate::agent_program::AgentProgramBinding>,
     /// Server-derived exact logical execution binding; no tokens or private
     /// paths. Only the explicit isolated Job operation may carry this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3515,6 +3533,8 @@ pub const AGENT_EXECUTION_RESOURCE_MAX_ENTRIES: usize = 32;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExecutionResourceDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_cli: Option<crate::host_cli::HostCliRegistration>,
     pub resource_set_id: String,
     pub manifest_hash: String,
     pub executable_identity: String,
@@ -3529,6 +3549,16 @@ pub struct AgentExecutionResourceDescriptor {
 
 impl AgentExecutionResourceDescriptor {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(host) = &self.host_cli {
+            host.validate()?;
+            if self.reviewed_controls.is_some()
+                || self.provider.as_ref().map(|p| p.id()) != Some(host.adapter.id.as_str())
+                || self.executable_identity != format!("sha256:{}", host.executable_sha256)
+                || self.manifest_hash != host.manifest(&self.resource_set_id)?
+            {
+                return Err("host_cli_resource_binding_mismatch".into());
+            }
+        }
         agent_execution_id(&self.resource_set_id)?;
         agent_execution_digest(&self.manifest_hash)?;
         agent_execution_digest(
@@ -3735,9 +3765,6 @@ impl AgentExecutionBinding {
         ] {
             agent_execution_id(id)?;
         }
-        if self.requester.call_index >= 32 {
-            return Err("agent_execution_invalid_call_index".into());
-        }
         if self.requester.run.agent_id == self.executor.run.agent_id
             || self.requester.run.agent_run_id == self.executor.run.agent_run_id
             || self.requester.enrollment_id == self.executor.enrollment_id
@@ -3939,6 +3966,7 @@ pub struct AgentExecutionStart {
 /// binding; caller sessions and private Runner paths are never inferred.
 pub fn isolated_job_context(start: &AgentExecutionStart) -> ShellJobContext {
     ShellJobContext {
+        agent_program: None,
         agent_execution: Some(start.binding.clone()),
         document: None,
         runtime_project_id: None,
@@ -3948,7 +3976,7 @@ pub fn isolated_job_context(start: &AgentExecutionStart) -> ShellJobContext {
         cwd: None,
         purpose: Some("operation".into()),
         shell: Some("direct_argv".into()),
-        command_preview: "isolated agent process".into(),
+        command_preview: "Agent CLI process".into(),
         validation_steps: Vec::new(),
         validation: None,
         structured_execution: Some(ShellJobStructuredExecutionMetadata {
@@ -4322,6 +4350,7 @@ mod envelope_tests {
         request.kind = "start_process_job".to_string();
         request.job_id = Some("job-process-1".to_string());
         request.job_context = Some(ShellJobContext {
+            agent_program: None,
             agent_execution: None,
             document: None,
             runtime_project_id: None,
@@ -4389,6 +4418,7 @@ mod envelope_tests {
         request.kind = "start_script_job".to_string();
         request.job_id = Some("job-script-1".to_string());
         request.job_context = Some(ShellJobContext {
+            agent_program: None,
             agent_execution: None,
             document: None,
             runtime_project_id: None,
@@ -4501,6 +4531,7 @@ mod envelope_tests {
                 internal_posix_script: true,
                 structured_execution_jobs: true,
                 agent_isolated_execution_v1: false,
+                agent_program_execution_v1: false,
                 detached_process_jobs: true,
                 lsp_read_only_navigation: false,
                 lsp_call_hierarchy: false,
@@ -4529,6 +4560,7 @@ mod envelope_tests {
                 native_tool_plugins: false,
                 managed_ssh_resources: false,
                 runner_config_control: false,
+                tool_connections: false,
             },
             policy: None,
             job_concurrency_limit: Some(4),
@@ -4858,6 +4890,7 @@ mod envelope_tests {
                 error: None,
                 command_execution_state: None,
                 context: ShellJobContext {
+                    agent_program: None,
                     agent_execution: None,
                     document: None,
                     runtime_project_id: Some("agent:oe:demo".to_string()),

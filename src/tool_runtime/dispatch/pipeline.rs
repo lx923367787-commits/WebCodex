@@ -344,9 +344,15 @@ impl ToolRuntime {
         // Keep the synchronous denial path: typed legacy calls have no original
         // isolated arguments or execution permit and must not enter async dispatch.
         if auth.is_none_or(|auth| {
-            auth.kind == crate::auth::AuthKind::ModelAgent
-                || auth.agent_run.is_some()
-                || auth.is_native_host()
+            auth.is_native_host()
+                || (auth.agent_run.is_some()
+                    && webcodex_runner_registry::current_agent_identity().is_none_or(|actor| {
+                        !auth.agent_run.as_ref().is_some_and(|run| {
+                            actor.agent_id == run.agent_id()
+                                && actor.agent_run_id == run.run_id()
+                                && actor.generation == run.generation()
+                        })
+                    }))
         }) {
             return self.isolated_model_call(call.tool_name(), serde_json::json!({}), auth);
         }
@@ -831,7 +837,6 @@ impl ToolRuntime {
         )
         .await;
         self.preserve_host_goal_operation_receipt(tool_name, &result);
-        sparsify_terminal_structured_execution_success(tool_name, &mut result);
         result
     }
 }

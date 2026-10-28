@@ -18,8 +18,9 @@ function comparablePath(path: string) {
   return (/^[A-Za-z]:\//.test(clean) || clean.startsWith("//") ? clean.toLowerCase() : clean).replace(/\/+$/, "");
 }
 
-export function NamedProjectsPanel({ state, onState, api = desktopApi }: {
+export function NamedProjectsPanel({ state, onState, onStartServices, startingServices = false, api = desktopApi }: {
   state: DesktopState; onState: (state: DesktopState) => void; onChooseProject?: () => void; api?: Api;
+  onStartServices?: () => void; startingServices?: boolean;
 }) {
   const [catalog, setCatalog] = useState<WorkspaceCatalog | null>(null);
   const [folders, setFolders] = useState<RegisteredProject[]>([]);
@@ -179,7 +180,9 @@ export function NamedProjectsPanel({ state, onState, api = desktopApi }: {
       </div>
     </div>
     <p className="lede">为项目命名，添加源文件夹，然后设置团队的工作方式。</p>
-    {!connected && <p role="status">请先启动本机 Server 和 Runner，再管理项目。</p>}
+    {!connected && <div className="empty-state"><p role="status">{state.readiness.server === "ready" && state.readiness.runner === "ready" ? "当前连接不支持管理本机项目。" : "服务尚未就绪。无需先创建或选择项目，即可启动 Server 和 Runner。"}</p>
+      {(state.readiness.server !== "ready" || state.readiness.runner !== "ready") && onStartServices && <button type="button" className="primary-button" disabled={busy || startingServices || Boolean(state.current_operation)} onClick={onStartServices} data-webcodex-action="start-project-services">{startingServices ? "正在启动服务…" : "启动服务"}</button>}
+    </div>}
     {connected && !canManage && catalog && <p role="status">当前连接不支持管理本机项目。</p>}
     {needsRefresh && connected && <p role="status">请{dialogOpen ? "取消当前操作后" : ""}刷新列表，再继续管理项目。</p>}
     {!dialogOpen && error && <p role="alert" className="project-error">{error}</p>}
@@ -223,7 +226,7 @@ export function NamedProjectsPanel({ state, onState, api = desktopApi }: {
           <div className="named-project-path-entry"><label className="field-group">文件夹路径<input value={path} onChange={event => setPath(event.target.value)} placeholder="输入完整文件夹路径" onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); if (path.trim()) void operate(current => addPaths([path.trim()], current)); } }} /></label><button type="button" className="secondary-button" disabled={!path.trim()} onClick={() => void operate(current => addPaths([path.trim()], current))}>添加路径</button></div>
           <button type="button" className="secondary-button named-project-browse" onClick={() => void operate(chooseFolders)}>添加文件夹…</button>
         </fieldset>
-        {draft.folders.length > 1 && <label className="field-group">团队工作文件夹<select disabled={!mutable} value={draft.team_project ?? ""} onChange={event => setDraft({ ...draft, team_project: event.target.value || null })}><option value="">请选择团队工作文件夹</option>{draft.folders.map(id => { const folder = folders.find(item => item.id === id); return <option key={id} value={id}>{folder ? folder.name + " — " + displayPath(folder.path) : id}</option>; })}</select><span className="field-help">团队使用此文件夹的人数、CLI 和模型设置。保存后用于新聊天，已有任务保持原有边界。</span></label>}
+        {draft.folders.length > 1 && <label className="field-group">团队工作文件夹<select disabled={!mutable} value={draft.team_project ?? ""} onChange={event => setDraft({ ...draft, team_project: event.target.value || null })}><option value="">请选择团队工作文件夹</option>{draft.folders.map(id => { const folder = folders.find(item => item.id === id); return <option key={id} value={id}>{folder ? folder.name + " — " + displayPath(folder.path) : id}</option>; })}</select><span className="field-help">团队在此文件夹开展项目工作。子 Agent、CLI、模型和思考强度按任务选择。</span></label>}
         <p id="named-project-grant-help" className="project-help named-project-grant-help">{isEditing ? "保存" : "创建"}后，项目可访问这些源文件夹。取消不会保存新的项目授权。</p>
         {error && <p role="alert" className="project-error">{error}</p>}
         {busy && <p role="status">正在处理……</p>}

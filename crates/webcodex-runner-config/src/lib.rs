@@ -188,12 +188,25 @@ struct GeneratedRunnerPolicy {
     allow_raw_shell: bool,
     allow_cwd_anywhere: bool,
     allowed_roots: Vec<PathBuf>,
+    require_explicit_roots: bool,
     max_timeout_secs: u64,
     max_output_bytes: usize,
 }
 
 pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, String> {
-    let effective_roots = effective_allowed_roots(&opts.allowed_roots, opts.allow_cwd_anywhere)?;
+    generated_runner_config_with_explicit_roots(opts, false)
+}
+
+/// Preserve legacy HOME defaults unless the caller explicitly requests an empty authority set.
+pub fn generated_runner_config_with_explicit_roots(
+    opts: &RunnerInitOptions,
+    require_explicit_roots: bool,
+) -> Result<String, String> {
+    let effective_roots = if require_explicit_roots {
+        opts.allowed_roots.clone()
+    } else {
+        effective_allowed_roots(&opts.allowed_roots, opts.allow_cwd_anywhere)?
+    };
     let cfg = GeneratedRunnerConfig {
         server_url: opts.server_url.trim_end_matches('/').to_string(),
         token: resolve_runner_init_token(opts)?,
@@ -270,6 +283,7 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             internal_posix_script: false,
             structured_execution_jobs: true,
             agent_isolated_execution_v1: false,
+            agent_program_execution_v1: false,
             // Detached process authority is advertised only by a running binary
             // after its durable ownership-transfer backend is installed.
             detached_process_jobs: false,
@@ -333,11 +347,13 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // against its startup-bound path and must never be inferred from a
             // generated static runner.toml capability block.
             runner_config_control: false,
+            tool_connections: false,
         },
         policy: GeneratedRunnerPolicy {
             allow_raw_shell: true,
             allow_cwd_anywhere: opts.allow_cwd_anywhere,
             allowed_roots: effective_roots,
+            require_explicit_roots,
             max_timeout_secs: DEFAULT_MAX_TIMEOUT_SECS,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         },
@@ -353,7 +369,14 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
 /// - Refuses to overwrite an existing file unless `--overwrite` is set.
 /// - Writes 0600 permissions on Unix.
 pub fn run_runner_init(opts: RunnerInitOptions) -> Result<String, String> {
-    let content = generated_runner_config_toml(&opts)?;
+    run_runner_init_with_explicit_roots(opts, false)
+}
+
+pub fn run_runner_init_with_explicit_roots(
+    opts: RunnerInitOptions,
+    require_explicit_roots: bool,
+) -> Result<String, String> {
+    let content = generated_runner_config_with_explicit_roots(&opts, require_explicit_roots)?;
     if opts.output.as_os_str() == "-" {
         return Ok(content);
     }
@@ -468,6 +491,23 @@ mod tests {
             allow_cwd_anywhere: false,
             overwrite: false,
         }
+    }
+
+    #[test]
+    fn explicit_empty_roots_do_not_grant_home_or_create_a_project() {
+        let mut opts = init_opts(PathBuf::from("unused.toml"));
+        opts.allowed_roots.clear();
+        let text = generated_runner_config_with_explicit_roots(&opts, true).unwrap();
+        let doc: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(
+            doc["policy"]["require_explicit_roots"].as_bool(),
+            Some(true)
+        );
+        assert!(doc["policy"]["allowed_roots"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(doc["policy"]["allow_cwd_anywhere"].as_bool(), Some(false));
     }
 
     #[test]

@@ -216,9 +216,11 @@ pub(crate) fn tool_scope(name: &str, args: &Value) -> &'static str {
         {
             "project:read"
         }
-        "agent_identity" | "agent_assignment" | "agent_projects" | "agent_select_project" => {
-            "runtime:read"
-        }
+        "agent_identity"
+        | "agent_assignment"
+        | "bind_chat_task_goal"
+        | "agent_projects"
+        | "agent_select_project" => "runtime:read",
         "agent_project_files" if args.get("action").and_then(Value::as_str) != Some("write") => {
             "project:read"
         }

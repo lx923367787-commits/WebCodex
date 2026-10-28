@@ -3,7 +3,7 @@
 #![cfg(windows)]
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -128,6 +128,156 @@ struct Fixture {
     workspace: PathBuf,
     sid: AppContainerSid,
     environment: BTreeMap<String, String>,
+    network_identity: String,
+}
+
+#[test]
+#[ignore = "real Windows per-AppContainer local TCP policy; explicit fresh validation root required"]
+fn lpac_local_service_allows_only_owned_port_and_revokes_permission() {
+    run_local_service(false);
+}
+#[test]
+#[ignore = "real Windows policy-controller loss; explicit fresh validation root required"]
+fn lpac_local_service_controller_loss_keeps_network_blocked() {
+    run_local_service(true);
+}
+
+fn run_local_service(controller_loss: bool) {
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use webcodex_process::windows_local_service::LocalServiceNetwork;
+    let fixture = Fixture::new(99);
+    let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    let forbidden = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let denied_port = forbidden.local_addr().unwrap().port();
+    drop(reserved);
+    let audit = PathBuf::from(std::env::var_os("WEBCODEX_LPAC_OBSERVATION_ROOT").unwrap())
+        .join(format!("local-service-{}.txt", fixture.network_identity));
+    fs::write(
+        &audit,
+        format!(
+            "identity={}\nport={port}\nstate=installing\n",
+            fixture.network_identity
+        ),
+    )
+    .unwrap();
+    let mut network = Some(
+        LocalServiceNetwork::install(&fixture.sid, &fixture.network_identity, port)
+            .expect("install exact local network policy"),
+    );
+    let mode = network.as_ref().unwrap().mode();
+    let args = vec![
+        "lpac-local-service".into(),
+        port.to_string(),
+        denied_port.to_string(),
+        "service-ready".into(),
+        "release".into(),
+    ];
+    let launched = LpacChild::spawn(LpacLaunch {
+        network: mode,
+        sid: &fixture.sid,
+        program: &fixture.program,
+        args: &args,
+        cwd: &fixture.workspace,
+        environment: &fixture.environment,
+    });
+    let mut child = match launched {
+        Ok(c) => c,
+        Err(e) => {
+            if e.execution_state == "not_started" {
+                network.take().unwrap().remove_after_stop().unwrap();
+            }
+            panic!("local service spawn: {e}");
+        }
+    };
+    drop(child.stdin.take());
+    let result = (|| -> Result<String, String> {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !fixture.workspace.join("service-ready").exists() {
+            if let Some(exit) = child.try_wait().map_err(|e| e.to_string())? {
+                let mut text = String::new();
+                if let Some(stderr) = child.stderr.take() {
+                    let _ = stderr.take(4096).read_to_string(&mut text);
+                }
+                return Err(format!("child exited {exit}: {text}"));
+            }
+            if Instant::now() >= deadline {
+                return Err("service readiness expired".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let report = fs::read_to_string(fixture.workspace.join("service-ready"))
+            .map_err(|e| e.to_string())?;
+        let listeners = child.local_listeners().map_err(|e| e.to_string())?;
+        if !listeners.contains(&(child.id(), port))
+            || listeners.iter().any(|(_, p)| *p == denied_port)
+        {
+            return Err("kernel listener ownership mismatch".into());
+        }
+        if !report.contains("other_port_denied=true") {
+            return Err(report);
+        }
+        let mut stream =
+            TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, port).into(), Duration::from_secs(2))
+                .map_err(|e| format!("host connection: {e}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|e| e.to_string())?;
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .map_err(|e| e.to_string())?;
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|e| e.to_string())?;
+        if !response.ends_with("\r\n\r\nOK") {
+            return Err("HTTP response mismatch".into());
+        }
+        if controller_loss {
+            drop(network.take());
+            if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+                return Err("service exited before controller-loss verification".into());
+            }
+            if TcpStream::connect_timeout(
+                &(Ipv4Addr::LOCALHOST, port).into(),
+                Duration::from_millis(300),
+            )
+            .is_ok()
+            {
+                return Err("controller loss left network permission active".into());
+            }
+        }
+        Ok(report)
+    })();
+    child.terminate_tree().unwrap();
+    assert!(child.wait_tree_exit(Duration::from_secs(5)).unwrap());
+    drop(child);
+    if let Some(network) = network.take() {
+        network.remove_after_stop().unwrap();
+    }
+    LocalServiceNetwork::remove_stopped(&fixture.network_identity).unwrap();
+    assert!(LocalServiceNetwork::cleanup_complete(&fixture.network_identity).unwrap());
+    fs::write(
+        &audit,
+        format!(
+            "identity={}\nport={port}\nstate=revoked\nresult={result:?}\n",
+            fixture.network_identity
+        ),
+    )
+    .unwrap();
+    assert!(LpacChild::spawn(LpacLaunch {
+        network: mode,
+        sid: &fixture.sid,
+        program: &fixture.program,
+        args: &args,
+        cwd: &fixture.workspace,
+        environment: &fixture.environment
+    })
+    .is_err());
+    println!(
+        "{}",
+        result.expect("bounded local service and other-port denial")
+    );
 }
 
 impl Fixture {
@@ -158,12 +308,11 @@ impl Fixture {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let sid = AppContainerSid::derive(&format!(
-            "WebCodex.Observation.{}.{}.{nonce}",
-            std::process::id(),
-            round
-        ))
-        .unwrap();
+        let network_identity = format!(
+            "{nonce:032x}{:032x}",
+            (std::process::id() as u128) * 1024 + round as u128
+        );
+        let sid = AppContainerSid::derive(&network_identity).unwrap();
         let sid_string = sid_text(sid.as_ptr());
         let owner = user_sid();
         set_exact_acl(&root, &root, &owner, &sid_string, "GRGX", false);
@@ -187,6 +336,7 @@ impl Fixture {
             workspace,
             sid,
             environment,
+            network_identity,
         }
     }
 

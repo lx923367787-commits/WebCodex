@@ -477,6 +477,11 @@ pub struct ComputerSnapshotRegion {
     deny_unknown_fields
 )]
 pub enum ToolCall {
+    ToolConnection {
+        client_id: String,
+        #[serde(flatten)]
+        connection: webcodex_core::tool_connection::ToolConnectionRequest,
+    },
     PresentDocument(DocumentToolCall),
     DocumentEdit(DocumentToolCall),
     DocumentConvert(DocumentToolCall),
@@ -819,7 +824,8 @@ pub enum ToolCall {
         source_task_id: String,
         call_index: u32,
         idempotency_key: String,
-        fallback_thinking_profile_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback_thinking_profile_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_secs: Option<u64>,
     },
@@ -832,7 +838,8 @@ pub enum ToolCall {
         root_task_id: String,
         source_task_id: String,
         idempotency_key: String,
-        thinking_profile_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_profile_id: Option<String>,
     },
     TeamAgentObserve {
         project: String,
@@ -2933,21 +2940,15 @@ impl ToolCall {
                     return Err(format!("{field} must be nonnegative"));
                 }
             }
-            if arguments["call_index"]
+            if arguments["limit"]
                 .as_u64()
-                .is_some_and(|value| value > 31)
-                || arguments["limit"]
-                    .as_u64()
-                    .is_some_and(|value| !(1..=20).contains(&value))
+                .is_some_and(|value| !(1..=20).contains(&value))
                 || arguments["timeout_secs"]
                     .as_u64()
                     .is_some_and(|value| !(1..=3600).contains(&value))
                 || arguments["attempts_limit"]
                     .as_u64()
                     .is_some_and(|value| !(1..=20).contains(&value))
-                || arguments["attempts_offset"]
-                    .as_u64()
-                    .is_some_and(|value| value > 65536)
             {
                 return Err(format!("invalid bounded arguments for tool '{name}'"));
             }
@@ -3075,6 +3076,9 @@ impl ToolCall {
         }
         let call: Self = serde_json::from_value(Value::Object(wrapped))
             .map_err(|e| format!("invalid arguments for tool '{}': {}", name, e))?;
+        if let Self::ToolConnection { connection, .. } = &call {
+            connection.validate()?;
+        }
         if let Self::PluginTool(plugin) = &call {
             plugin
                 .validate()
@@ -3272,6 +3276,7 @@ impl ToolCall {
             Self::UnregisterProject { .. } => "unregister_project",
             Self::CreateProject { .. } => "create_project",
             Self::ListRunners { .. } => "list_runners",
+            Self::ToolConnection { .. } => "tool_connection",
             Self::RunnerConfigCheck { .. } => "runner_config_check",
             Self::RunnerConfigReload { .. } => "runner_config_reload",
             Self::PluginTool(_) => "plugin_tool",

@@ -1231,6 +1231,7 @@ mod tests {
             allow_raw_shell: true,
             allow_cwd_anywhere: false,
             allowed_roots: vec![project.clone()],
+            require_explicit_roots: false,
             max_timeout_secs: 30,
             max_output_bytes: 16 * 1024,
         };
@@ -1663,6 +1664,7 @@ mod windows_tests {
             allow_raw_shell: true,
             allow_cwd_anywhere: false,
             allowed_roots: vec![project.clone()],
+            require_explicit_roots: false,
             max_timeout_secs: 30,
             max_output_bytes: 16 * 1024,
         };

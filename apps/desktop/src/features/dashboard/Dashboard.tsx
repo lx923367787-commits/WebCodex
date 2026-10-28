@@ -1,7 +1,8 @@
+import { servicesReady } from "../../models/topology";
+import { ProjectAvailability } from "./ProjectAvailability";
 import type { DesktopState } from "../../models/topology";
 import { useLocale } from "../../i18n/locale";
 import {
-  projectReadinessLabel,
   readinessNextAction,
   runtimeLabel,
   readinessSummary,
@@ -15,7 +16,6 @@ interface DashboardProps {
   onRefresh: () => void;
   onResumeRuntime: () => void;
   onConnectChatGpt: () => void;
-  onChooseProject: () => void;
   onChangeSetup: () => void;
   onNavigate: (page: "projects" | "connection" | "activity") => void;
   onStopQuickShare: () => void;
@@ -28,7 +28,6 @@ export function Dashboard({
   onRefresh,
   onResumeRuntime,
   onConnectChatGpt,
-  onChooseProject,
   onChangeSetup,
   onNavigate,
   onStopQuickShare,
@@ -38,13 +37,13 @@ export function Dashboard({
   const isQuickShare = state.topology?.experience === "quick_share";
   const operationBusy = Boolean(state.current_operation);
   const connectionVerified = chatgptActivityObserved(state) && state.regular_tunnel?.status !== "error";
-  const canResumeRuntime = !isQuickShare && Boolean(state.topology) && !state.readiness.runtime_ready;
+  const canResumeRuntime = !isQuickShare && Boolean(state.topology) && !servicesReady(state.readiness);
   const canConnectChatGpt = !isQuickShare &&
     state.topology?.server.kind === "local" &&
-    state.readiness.runtime_ready &&
+    servicesReady(state.readiness) &&
     state.openai_tunnel_configured &&
     !state.regular_tunnel;
-  const summary = state.readiness.runtime_ready ? readinessSummary(state.readiness.summary_kind, state.readiness.summary, t) : runtimeLabel(state, t);
+  const summary = servicesReady(state.readiness) ? readinessSummary(state.readiness.summary_kind, state.readiness.summary, t) : runtimeLabel(state, t);
   const nextAction = readinessNextAction(
     state.readiness.next_action_kind,
     state.readiness.next_action,
@@ -94,24 +93,14 @@ export function Dashboard({
               {t("home.connectChatGpt")}
             </button>
           )}
-          {state.readiness.runtime_ready && !canConnectChatGpt && !connectionVerified && (
+          {servicesReady(state.readiness) && !canConnectChatGpt && !connectionVerified && (
             <button className="primary-button" onClick={() => onNavigate("connection")}>{t("workspace.connectionSettings")}</button>
           )}
           {nextAction && !canResumeRuntime && !canConnectChatGpt && <span>{nextAction}</span>}
         </div>
       </div>
 
-      <article className="workspace-project">
-        <div className="project-emblem" aria-hidden="true"><span className="nav-icon nav-projects" /></div>
-        <div className="workspace-project-copy">
-          <span className="section-kicker">{t("workspace.currentProject")}</span>
-          <h2>{state.project?.path.split(/[\\/]/).filter(Boolean).pop() ?? t("home.noProject")}</h2>
-          <p>{state.project?.path ?? t("setup.projectRequired")}</p>
-        </div>
-        <button className="secondary-button" onClick={onChooseProject} disabled={operationBusy || refreshing}>
-          {state.project ? t("project.change") : t("project.add")}
-        </button>
-      </article>
+      <ProjectAvailability state={state} refreshing={refreshing} onManage={() => onNavigate("projects")} />
 
       {state.quick_share && (
         <div className="handoff-card">
@@ -129,12 +118,12 @@ export function Dashboard({
         <details className="workflow-guide" open={!connectionVerified}>
           <summary>{t("workspace.progress")}</summary>
           <ol className="workflow-steps" aria-label={t("workspace.progress")}>
-            <li className={state.readiness.runtime_ready ? "complete" : ""}>
+            <li className={servicesReady(state.readiness) ? "complete" : ""}>
               <span className="step-number" aria-hidden="true">01</span>
               <strong>{t("workspace.prepare")}</strong>
-              <p>{state.readiness.runtime_ready ? t("sidebar.runtimeReady") : t("workspace.prepareHint")}</p>
+              <p>{servicesReady(state.readiness) ? t("sidebar.runtimeReady") : t("workspace.prepareHint")}</p>
             </li>
-            <li className={state.readiness.runtime_ready && (state.readiness.ready_for_chatgpt || state.regular_tunnel?.ready_for_chatgpt) ? "complete" : ""}>
+            <li className={servicesReady(state.readiness) && (state.readiness.ready_for_chatgpt || state.regular_tunnel?.ready_for_chatgpt) ? "complete" : ""}>
               <span className="step-number" aria-hidden="true">02</span>
               <strong>{t("workspace.connect")}</strong>
               <p>{connectionExplanation(state, t)}</p>
@@ -142,15 +131,13 @@ export function Dashboard({
             <li className={connectionVerified ? "complete" : ""}>
               <span className="step-number" aria-hidden="true">03</span>
               <strong>{t("workspace.verify")}</strong>
-              <p>{!state.readiness.runtime_ready ? t("workspace.afterStart") : connectionVerified ? t("home.connectionObserved") : t("workspace.verifyHint")}</p>
+              <p>{!servicesReady(state.readiness) ? t("workspace.afterStart") : connectionVerified ? t("home.connectionObserved") : t("workspace.verifyHint")}</p>
             </li>
           </ol>
         </details>
       )}
 
-      <details className="runtime-details">
-        <summary>{t("workspace.diagnostics")}</summary>
-        <div className="status-grid" aria-label={t("home.components")}>
+      <div className="status-grid" aria-label={t("home.components")}>
           <StatusCard
             title={t("home.service")}
             value={serviceLabel(state, t)}
@@ -164,12 +151,6 @@ export function Dashboard({
             explanation={t("home.runnerExplanation")}
           />
           <StatusCard
-            title={t("home.projects")}
-            value={state.readiness.project === "ready" ? t("home.projectReady") : projectReadinessLabel(state.readiness.project, t)}
-            state={state.readiness.project}
-            explanation={state.project?.path ?? t("home.noProject")}
-          />
-          <StatusCard
             title={t("home.connection")}
             value={connectionLabel(state, t)}
             state={connectionCardState(state)}
@@ -177,12 +158,14 @@ export function Dashboard({
           />
         </div>
 
+      <details className="runtime-details">
+        <summary>{t("workspace.diagnostics")}</summary>
         {!isQuickShare && state.topology && (
           <div className="runtime-actions">
             <span>{t("home.runtimeOwnership")}</span>
             <div className="runtime-action-buttons">
               <button className="secondary-button" onClick={onChangeSetup} disabled={operationBusy} data-webcodex-action="change-runtime-setup">{t("home.changeSetup")}</button>
-              {state.readiness.runtime_ready && (
+              {servicesReady(state.readiness) && (
                 <button className="secondary-button" onClick={onStopRuntime} disabled={operationBusy} data-webcodex-action="stop-runtime">{t("home.stopRuntime")}</button>
               )}
             </div>
@@ -235,19 +218,22 @@ function quickShareClipboardLabel(state: string, contains: string, t: Translate)
 }
 
 function chatgptActivityObserved(state: DesktopState) {
-  return state.readiness.runtime_ready && Boolean(state.chatgpt_activity?.observed);
+  return servicesReady(state.readiness) && Boolean(state.chatgpt_activity?.observed);
 }
 
 function connectionCardState(state: DesktopState) {
+  if (!servicesReady(state.readiness)) return "unknown";
   if (state.regular_tunnel?.status === "error") return "error";
   if (chatgptActivityObserved(state)) return "ready";
   return state.readiness.exposure;
 }
 
 function connectionLabel(state: DesktopState, t: Translate) {
+  if (!servicesReady(state.readiness)) return runtimeLabel(state, t);
   if (chatgptActivityObserved(state) && state.regular_tunnel?.status !== "error") {
     return t("home.connectionObservedLabel");
   }
+  if (state.regular_tunnel?.status === "ready" && state.regular_tunnel.ready_for_chatgpt) return t("connection.tunnelReady");
   const exposure = state.topology?.exposure;
   if (!exposure || exposure.kind === "none") return t("connection.noDesktopTunnel");
   if (exposure.kind === "cloudflare") return "Cloudflare";
@@ -256,7 +242,7 @@ function connectionLabel(state: DesktopState, t: Translate) {
 }
 
 function connectionExplanation(state: DesktopState, t: Translate) {
-  if (!state.readiness.runtime_ready) return t("workspace.afterStart");
+  if (!servicesReady(state.readiness)) return t("workspace.afterStart");
   if (state.regular_tunnel?.status !== "error" && chatgptActivityObserved(state)) {
     return t("home.connectionObserved");
   }

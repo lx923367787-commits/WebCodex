@@ -308,7 +308,9 @@ fn intent(
     profile: &str,
 ) -> Result<(String, String)> {
     let key = validate_idempotency_key(key)?;
-    if !identifier(profile) {
+    // Empty storage value means no requested page adjustment, not a profile ID.
+    // Keep the existing durable format and exact replay fingerprint.
+    if !profile.is_empty() && !identifier(profile) {
         return Err(error("team_agent_profile_required"));
     }
     let serialized = serde_json::to_string(&(project, root, source, profile))
@@ -334,7 +336,7 @@ fn replay_on(
     team_agent_record_on_connection(conn, principal, &id).map(Some)
 }
 fn claim(record: TeamAgentRecord, dispatch_permitted: bool) -> TeamAgentClaim {
-    let task=format!("You are the ordinary subagent assigned this frozen team-plan task. The manager is the existing root task, not a new manager. IDs are correlation, not authority. Follow the task's existing permissions. Route every external Agent CLI call through team_cli_start for this root/source and a planned call_index; do not bypass its budget by launching an Agent CLI through a shell. Do not create unplanned agents. Verify the task's acceptance conditions and report evidence; a response is not business verification.\nproject={}\nroot_task_id={}\nsource_task_id={}\nTask instruction:\n{}",record.project,record.root_task_id,record.source_task_id,record.instruction);
+    let task=format!("You are the ordinary subagent assigned this frozen team-plan task. The manager is the existing root task, not a new manager. IDs are correlation, not authority. Follow the task's existing permissions. Subagents and CLI calls are optional. Use the authorized project tools as needed, including Shell and CLI; no call-count, model or thinking-strength quota applies. Omitted model or thinking options use the tool defaults. Only the independently delegated instruction below is your task. {} Read agent_assignment for your actual Server broker locations and assigned Goal; local CLI paths come from its Runner-provided environment. Verify the task's acceptance conditions and report evidence; a response is not business verification.\nproject={}\nroot_task_id={}\nsource_task_id={}\nTask instruction:\n{}",Database::agent_resource_guidance(),record.project,record.root_task_id,record.source_task_id,record.instruction);
     TeamAgentClaim {
         record,
         dispatch_permitted,

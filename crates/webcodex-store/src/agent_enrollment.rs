@@ -93,6 +93,8 @@ pub struct AgentEnrollmentProjection {
     pub brief: String,
     pub inputs: Vec<AgentEnrollmentSnapshot>,
     pub room_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub resource_convention: serde_json::Value,
 }
 
 #[derive(Debug)]
@@ -251,9 +253,7 @@ fn normalize(
     if parts.len() < 2 || parts[0] != "workspace" {
         return Err(invalid());
     }
-    if request.policy.max_subagents > 32
-        || request.policy.max_cli_calls > 32
-        || (request.purpose != AgentEnrollmentPurpose::Manager && request.policy.max_subagents != 0)
+    if (request.purpose != AgentEnrollmentPurpose::Manager && request.policy.max_subagents != 0)
         || (matches!(
             request.purpose,
             AgentEnrollmentPurpose::Fallback | AgentEnrollmentPurpose::CliWorker
@@ -462,8 +462,36 @@ fn projection(row: &Row) -> AgentEnrollmentProjection {
             })
             .collect(),
         room_ids: r.room_ids.clone(),
+        resource_convention: Database::agent_resource_convention(None),
     }
 }
+
+impl Database {
+    pub fn agent_resource_guidance() -> &'static str {
+        "Memory, execution objectives and acceptance criteria are the only personal resource categories. Keep and update your own; do not read or modify another Agent/CLI instance's directories for these three categories or deliberately retrieve the same content from copies. This is a soft convention, not a technical guarantee that same-account programs cannot read them. Project/workspace files, deliverables, logs, stdout/stderr, execution status and all normally authorized tools remain shared. Do not label an entire Agent directory, workspace, result or tool private. An independent delegated brief is the receiver's objective; do not copy the parent's memory, objectives or acceptance criteria into it."
+    }
+
+    pub fn agent_resource_convention(goal_id: Option<&str>) -> serde_json::Value {
+        let goal_directory = goal_id.map(|id| format!("goals/{id}/plans"));
+        serde_json::json!({
+            "mode":"soft_convention", "technical_read_isolation":false,
+            "guidance":Self::agent_resource_guidance(),
+            "agent_resources":{
+                "path_scope":"authenticated Server broker paths; not local Runner filesystem paths",
+                "memory":{"tool":"agent_private","path":"memory"},
+                "execution_objective":{"assignment_field":"brief","goal_id":goal_id,"tool":"goal_read","goal_field":"goal.objective","directory":goal_directory},
+                "acceptance_criteria":{"goal_id":goal_id,"tool":"goal_read","view":"detail","goal_field":"plan.plan.final_criteria","directory":goal_directory}
+            },
+            "cli_directories":{
+                "source":"Runner creates these instance directories before launching the real CLI",
+                "memory_env":"WEBCODEX_MEMORY_DIR",
+                "execution_objectives_env":"WEBCODEX_OBJECTIVES_DIR",
+                "acceptance_criteria_env":"WEBCODEX_ACCEPTANCE_DIR"
+            }
+        })
+    }
+}
+
 fn principal_valid(conn: &Connection, principal: &str) -> Result<(), AgentIsolationError> {
     let revoked:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_agent_enrollment_principal_revocations WHERE principal_key=?1)",[principal],|r|r.get(0)).map_err(unavailable_enrollment)?;
     if revoked {
@@ -572,14 +600,12 @@ pub(crate) fn authorize_agent_assignment_on_connection(
     let allowed = match operation {
         AgentAssignmentOperation::Read => true,
         AgentAssignmentOperation::PlanManage => auth.purpose == AgentEnrollmentPurpose::Manager,
-        AgentAssignmentOperation::Delegate => {
-            auth.purpose == AgentEnrollmentPurpose::Manager && auth.policy.max_subagents > 0
-        }
+        AgentAssignmentOperation::Delegate => auth.purpose == AgentEnrollmentPurpose::Manager,
         AgentAssignmentOperation::UseCli => {
             matches!(
                 auth.purpose,
                 AgentEnrollmentPurpose::Manager | AgentEnrollmentPurpose::Member
-            ) && auth.policy.max_cli_calls > 0
+            )
         }
         AgentAssignmentOperation::ManagePolicy => false,
         AgentAssignmentOperation::TaskStart | AgentAssignmentOperation::TaskComplete => true,
@@ -650,9 +676,9 @@ pub(crate) fn delegated_cli_budget_on_connection(
             "agent_delegated_assignment_ambiguous",
         ));
     }
-    let policy: AgentEnrollmentPolicy =
+    let _: AgentEnrollmentPolicy =
         serde_json::from_str(&policies[0]).map_err(unavailable_enrollment)?;
-    Ok(policy.max_cli_calls)
+    Ok(u32::MAX)
 }
 
 fn source_valid(
@@ -681,11 +707,7 @@ fn source_valid(
                 authorize_agent_assignment_on_connection(conn, source, &own.task_id, operation)
                     .map_err(|_| stale_source())?;
             let registered:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_agent_host_windows WHERE principal_key=?1 AND run_id=?2 AND enabled=1)",params![request.principal_key,source.run_id()],|r|r.get(0)).map_err(unavailable_enrollment)?;
-            if !registered
-                || request.task_id == auth.task_id
-                || request.policy.max_subagents > auth.policy.max_subagents
-                || request.policy.max_cli_calls > auth.policy.max_cli_calls
-            {
+            if !registered || request.task_id == auth.task_id {
                 return Err(stale_source());
             }
             Ok(())
@@ -1287,6 +1309,31 @@ impl Database {
         Ok(binding)
     }
 
+    /// Resolve the immutable assignment association, never a latest Goal or
+    /// a caller-supplied Agent identity. This reads no private Goal contents.
+    pub fn agent_enrollment_goal(
+        &self,
+        binding: &VerifiedAgentRun,
+    ) -> Result<Option<String>, AgentIsolationError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(unavailable_enrollment)?;
+        validate_agent_run_on_connection(&tx, binding)?;
+        let goal = tx
+            .query_row(
+                "SELECT goal_id FROM wc_agent_enrollment_goals WHERE agent_id=?1",
+                [binding.agent_id()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(unavailable_enrollment)?;
+        if let Some(id) = &goal {
+            authorize_enrollment_goal_on_connection(&tx, binding, Some(id))?;
+        }
+        Ok(goal)
+    }
+
     pub fn agent_enrollment_task_directory(
         &self,
         binding: &VerifiedAgentRun,
@@ -1681,14 +1728,6 @@ pub(crate) fn issue_agent_enrollment_on_connection(
     }
     if !deferred && now_after(now, started) >= request.expires_at_unix_ms {
         return Err(denied());
-    }
-    if request.purpose == AgentEnrollmentPurpose::Member {
-        let source = source.ok_or_else(denied)?;
-        let own = authority(conn, source)?;
-        let count:i64=conn.query_row("SELECT COUNT(*) FROM wc_agent_enrollments WHERE source_agent_id=?1 AND purpose='member' AND state!='revoked'",[source.agent_id()],|r|r.get(0)).map_err(unavailable_enrollment)?;
-        if count >= i64::from(own.policy.max_subagents) {
-            return Err(AgentIsolationError::new("agent_member_budget_exhausted"));
-        }
     }
     let agent = IsolatedAgentIdentity {
         agent_id: format!("wc_iagent_{}", uuid::Uuid::new_v4().simple()),

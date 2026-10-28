@@ -127,7 +127,11 @@ impl Fixture {
         let outside = other.join("private-sentinel.txt");
         fs::write(&outside, b"other-private-sentinel").unwrap();
         let profiles = validate_profiles(&AgentExecutionResourcesConfig {
+            native_cli: None,
+            browser: None,
             profiles: vec![AgentExecutionResourceProfile {
+                host_cli: None,
+                native_worker: None,
                 id: "synthetic-profile".into(),
                 provider,
                 reviewed_controls: None,
@@ -423,6 +427,613 @@ impl Drop for Fixture {
 }
 
 #[test]
+#[ignore = "real Python stdlib sandbox; explicit resource manifest and fresh validation root"]
+fn agent_program_real_python_sqlite_and_child_restart_preserve_filesystem_isolation() {
+    exercise_python_program(false, false, false);
+}
+
+#[test]
+#[ignore = "real Python relative-path regression at production-length sandbox roots; no business code"]
+fn agent_program_real_long_root_keeps_relative_files_imports_and_restart_readable() {
+    exercise_python_program(false, false, true);
+}
+
+#[test]
+#[ignore = "real isolated Edge UI; explicit prepared browser resources and fresh validation root required"]
+fn agent_program_real_browser_interaction_uses_private_profile_and_local_service() {
+    exercise_python_program(true, false, false);
+}
+
+#[test]
+#[ignore = "real fixed browser controller, explicit Python manifest/browser path and fresh validation root"]
+fn agent_program_real_fixed_browser_is_owned_durable_and_bounded() {
+    exercise_python_program(true, true, false);
+}
+
+struct ProgramFixtureCleanup(JobManager);
+impl Drop for ProgramFixtureCleanup {
+    fn drop(&mut self) {
+        self.0.stop_accepting_work();
+        self.0.cancel_queued_for_shutdown();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let batch = self.0.signal_all_for_shutdown();
+        let _ = self.0.drain_shutdown(batch, deadline);
+        let _ = self.0.wait_for_workers(deadline);
+    }
+}
+fn exercise_python_program(with_browser: bool, fixed_browser: bool, long_paths: bool) {
+    use webcodex_core::agent_program::{AgentProgramBinding, AgentProgramStart};
+    use webcodex_core::runner_protocol::{AgentExecutionTarget, AgentRunRef};
+    let base = PathBuf::from(std::env::var_os("WEBCODEX_AGENT_EXECUTION_TEST_ROOT").unwrap());
+    let temp = tempfile::Builder::new()
+        .prefix("ordinary-python-")
+        .tempdir_in(base)
+        .unwrap();
+    let manifest = PathBuf::from(
+        std::env::var_os("WEBCODEX_PROGRAM_PYTHON_RESOURCES")
+            .expect("prepared Python resource manifest"),
+    );
+    let mut settings =
+        serde_json::from_slice::<AgentExecutionResourcesConfig>(&fs::read(manifest).unwrap())
+            .unwrap();
+    if with_browser && !fixed_browser {
+        let browser_manifest = PathBuf::from(
+            std::env::var_os("WEBCODEX_PROGRAM_BROWSER_RESOURCES")
+                .expect("prepared browser resources"),
+        );
+        settings.profiles.extend(
+            serde_json::from_slice::<AgentExecutionResourcesConfig>(
+                &fs::read(browser_manifest).unwrap(),
+            )
+            .unwrap()
+            .profiles,
+        );
+    }
+    let profiles = validate_profiles(&settings).unwrap();
+    let manager = JobManager::new(2);
+    let _cleanup = ProgramFixtureCleanup(manager.clone_for_worker());
+    let state = if long_paths {
+        let length = 151usize
+            .checked_sub(temp.path().to_str().unwrap().len() + 1 + "-agent-resources".len())
+            .expect("short explicit test root required");
+        temp.path().join("s".repeat(length))
+    } else {
+        temp.path().join("state")
+    };
+    manager
+        .configure_agent_execution_resources(profiles.clone(), state)
+        .unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("public.txt"), b"public-input").unwrap();
+    if long_paths {
+        fs::create_dir(project.join("collaboration")).unwrap();
+        fs::write(
+            project.join("collaboration/contract-v1.json"),
+            b"synthetic-long-path",
+        )
+        .unwrap();
+        fs::create_dir(project.join("framework_module")).unwrap();
+        fs::write(
+            project.join("framework_module/important_feature.py"),
+            b"VALUE = 47\n",
+        )
+        .unwrap();
+    }
+    let outside = temp.path().join("other-agent-private.txt");
+    fs::write(&outside, b"private-sentinel").unwrap();
+    let canonical = crate::webcodex_runner::shell::canonicalize_existing(&project).unwrap();
+    let registry = temp.path().join("registry");
+    fs::create_dir(&registry).unwrap();
+    fs::write(
+        registry.join("repo.toml"),
+        format!(
+            "id=\"repo\"\npath={}\nallow_patch=true\n",
+            serde_json::to_string(canonical.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    let code = format!(
+        r#"import sqlite3, subprocess, sys, pathlib, json
+assert pathlib.Path('public.txt').read_text() == 'public-input'
+{snapshot_assertions}
+try:
+    pathlib.Path({outside}).read_text()
+except PermissionError:
+    denied = True
+else:
+    raise RuntimeError('outside private file was readable')
+db=sqlite3.connect('synthetic.db')
+db.execute('create table evidence(value integer)')
+db.execute('insert into evidence values (47)')
+db.commit()
+db.close()
+child=subprocess.run([sys.executable,'-c',"import sqlite3; assert sqlite3.connect('synthetic.db').execute('select value from evidence').fetchone()[0] == 47; print('reopened')"],capture_output=True,text=True,timeout=5)
+assert child.returncode == 0, child.stderr
+assert child.stdout.strip() == 'reopened'
+print(json.dumps({{'framework_fixture': True, 'sqlite_reopen': 47, 'private_read_denied': denied, 'child_exit':child.returncode}}))
+"#,
+        outside = serde_json::to_string(outside.to_str().unwrap()).unwrap(),
+        snapshot_assertions = if long_paths {
+            "assert pathlib.Path('collaboration/contract-v1.json').read_text() == 'synthetic-long-path'\nfrom framework_module.important_feature import VALUE\nassert VALUE == 47"
+        } else {
+            ""
+        }
+    );
+    let mut start = AgentProgramStart {
+        binding: AgentProgramBinding {
+            local_service_port: None,
+            resume_from_program: None,
+            version: 1,
+            program_id: "python-program".into(),
+            enrollment_id: "own-enrollment".into(),
+            task_id: "own-task".into(),
+            run: AgentRunRef {
+                agent_id: "own-agent".into(),
+                agent_run_id: "own-run".into(),
+                generation: 1,
+            },
+            project: "logical-project".into(),
+            target: AgentExecutionTarget {
+                client_id: "native-runner".into(),
+                runner_instance_id: "native-instance".into(),
+            },
+            job_id: "python-job".into(),
+            start_request_id: "python-request".into(),
+            workspace_project: "agent:native-runner:repo".into(),
+            workspace_root: canonical.to_str().unwrap().into(),
+            relative_cwd: ".".into(),
+            resource_set_id: "python-stdlib".into(),
+            resource_manifest_hash: profiles.manifest("python-stdlib").unwrap().into(),
+            launch_intent_hash: "a".repeat(64),
+            expires_at_unix_ms: chrono::Utc::now().timestamp_millis() + 60000,
+        },
+        args: vec!["-c".into(), code],
+        stdin: None,
+        timeout_secs: 30,
+    };
+    start.binding.launch_intent_hash = start.compute_launch_hash().unwrap();
+    let wire = RunnerInvocation {
+        metadata: RunnerInvocationMetadata {
+            request_id: start.binding.start_request_id.clone(),
+            client_id: "native-runner".into(),
+            requested_by: "framework-fixture".into(),
+            created_at: chrono::Utc::now().timestamp(),
+        },
+        operation: RunnerOperation::Job(start.clone().into_job()),
+    }
+    .into_v2_request()
+    .unwrap();
+    let mut pending = PendingJobStart::from_wire(
+        1,
+        RunnerPolicy::default(),
+        ShellConfig::default(),
+        SshConfig::default(),
+        registry.clone(),
+        wire,
+    );
+    pending.policy.allowed_roots = vec![project.clone()];
+    let (tx, _rx) = tokio::sync::mpsc::channel(256);
+    let sink = RunnerSink::WebSocket {
+        tx,
+        client_id: "native-runner".into(),
+        runner_instance_id: "native-instance".into(),
+    };
+    manager.enqueue(sink.clone(), pending);
+    let deadline = Instant::now() + Duration::from_secs(35);
+    let snapshot = loop {
+        let snapshot = lock_unpoison(&manager.jobs)
+            .get(&start.binding.job_id)
+            .unwrap()
+            .snapshot
+            .clone();
+        if super::super::lifecycle::runner_job_is_terminal(&snapshot.status) {
+            break snapshot;
+        }
+        assert!(Instant::now() < deadline, "Python sandbox timeout");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(snapshot.exit_code, Some(0), "{snapshot:?}");
+    assert_eq!(snapshot.status, "completed", "{snapshot:?}");
+    assert!(
+        snapshot.stdout.tail.contains("sqlite_reopen"),
+        "{snapshot:?}"
+    );
+    println!("{}", snapshot.stdout.tail);
+    assert!(manager.wait_for_workers(Instant::now() + Duration::from_secs(5)));
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    let service_code = r#"import http.server, sqlite3, os, json
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path=='/slow':
+            import time
+            time.sleep(20)
+        if self.path=='/ui':
+            body=b'<!doctype html><title>Framework fixture</title><input id="name"><button id="send" onclick="document.getElementById(\'result\').textContent=\'Hello \'+document.getElementById(\'name\').value">Submit</button><p id="result">Ready</p>'
+            self.send_response(200)
+            self.send_header('Content-Type','text/html')
+            self.send_header('Content-Length',str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path=='/favicon.ico':
+            self.send_response(204)
+            self.end_headers()
+            return
+        with sqlite3.connect('synthetic.db') as db:
+            value=db.execute('select value from evidence').fetchone()[0]
+            db.execute('update evidence set value=?',(value+1,))
+        body=json.dumps({'value':value}).encode()
+        self.send_response(200)
+        self.send_header('Content-Length',str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+http.server.HTTPServer(('127.0.0.1',int(os.environ['WEBCODEX_PORT'])),Handler).serve_forever()
+"#;
+    let mut previous = start.binding.program_id.clone();
+    for round in 0..2 {
+        let mut service = start.clone();
+        service.binding.program_id = format!("http-program-{round}");
+        service.binding.job_id = format!("http-job-{round}");
+        service.binding.start_request_id = format!("http-request-{round}");
+        service.binding.local_service_port = Some(port);
+        service.binding.resume_from_program = Some(previous);
+        service.args = vec!["-c".into(), service_code.into()];
+        service.binding.launch_intent_hash = service.compute_launch_hash().unwrap();
+        let audit = PathBuf::from(std::env::var_os("WEBCODEX_AGENT_EXECUTION_TEST_ROOT").unwrap())
+            .join(format!(
+                "http-policy-{}.txt",
+                service.binding.identity_hash().unwrap()
+            ));
+        fs::write(
+            &audit,
+            format!(
+                "identity={}\nport={port}\nstate=issued\n",
+                service.binding.identity_hash().unwrap()
+            ),
+        )
+        .unwrap();
+        let wire = RunnerInvocation {
+            metadata: RunnerInvocationMetadata {
+                request_id: service.binding.start_request_id.clone(),
+                client_id: "native-runner".into(),
+                requested_by: "framework-local-service".into(),
+                created_at: chrono::Utc::now().timestamp(),
+            },
+            operation: RunnerOperation::Job(service.clone().into_job()),
+        }
+        .into_v2_request()
+        .unwrap();
+        let mut pending = PendingJobStart::from_wire(
+            1,
+            RunnerPolicy::default(),
+            ShellConfig::default(),
+            SshConfig::default(),
+            registry.clone(),
+            wire,
+        );
+        pending.policy.allowed_roots = vec![project.clone()];
+        manager.enqueue(sink.clone(), pending);
+        let query = webcodex_core::agent_program::AgentProgramInspect {
+            target: service.binding.target.clone(),
+            binding: service.binding.clone(),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let observation = manager.inspect_agent_program(&sink, &query).unwrap();
+            if let Some(endpoint) = observation.service {
+                assert_eq!(endpoint.port, port);
+                assert!(endpoint.process_id > 0);
+                break;
+            }
+            assert!(
+                observation
+                    .job
+                    .as_ref()
+                    .is_none_or(|j| !super::super::lifecycle::runner_job_is_terminal(&j.status)),
+                "{observation:?}"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "service did not listen: {observation:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut client =
+            TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, port).into(), Duration::from_secs(2))
+                .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["value"], 47 + round);
+        if with_browser && round == 0 && fixed_browser {
+            use webcodex_core::agent_browser::{
+                AgentBrowserAction, AgentBrowserRequest, BrowserStep,
+            };
+            let binary = PathBuf::from(
+                std::env::var_os("WEBCODEX_LOCAL_BROWSER_BINARY")
+                    .expect("explicit installed browser binary"),
+            );
+            let config = super::super::agent_resources::LocalBrowserConfig {
+                python: settings.profiles[0].executable.clone(),
+                python_sha256: settings.profiles[0].executable_sha256.clone(),
+                browser: binary.clone(),
+                browser_sha256: format!("{:x}", Sha256::digest(fs::read(binary).unwrap())),
+            };
+            let action = AgentBrowserAction {
+                action_id: format!("wc_browser_{}", uuid::Uuid::new_v4().simple()),
+                service: service.binding.clone(),
+                timeout_secs: 15,
+                steps: vec![
+                    BrowserStep::Navigate { path: "/ui".into() },
+                    BrowserStep::Fill {
+                        selector: "#name".into(),
+                        text: "沙箱".into(),
+                    },
+                    BrowserStep::Click {
+                        accept_dialog: false,
+                        selector: "#send".into(),
+                    },
+                    BrowserStep::ExpectText {
+                        selector: "#result".into(),
+                        text: "Hello 沙箱".into(),
+                    },
+                    BrowserStep::Screenshot {},
+                ],
+            };
+            let query = AgentBrowserRequest {
+                target: service.binding.target.clone(),
+                action: action.clone(),
+                observe_only: false,
+                image_step: None,
+            };
+            let result = manager
+                .agent_local_browser(&sink, &query, Some(&config))
+                .unwrap();
+            assert_eq!(result.state, "completed", "{result:?}");
+            assert_eq!(result.exit_code, Some(0));
+            assert!(result.process_id.is_some());
+            assert_eq!(
+                result.result.as_ref().unwrap()["result"]["steps"][3]["text"],
+                "Hello 沙箱"
+            );
+            let store = lock_unpoison(&manager.agent_execution)
+                .configuration
+                .clone()
+                .unwrap()
+                .store;
+            assert!(
+                fs::metadata(
+                    store
+                        .browser_artifact_directory(&action)
+                        .unwrap()
+                        .join("evidence/step-04.png")
+                )
+                .unwrap()
+                .len()
+                    > 1000
+            );
+            assert_eq!(
+                manager.agent_local_browser(&sink, &query, None).unwrap(),
+                result,
+                "replay must not launch even without current config"
+            );
+            let mut image_query = query.clone();
+            image_query.observe_only = true;
+            image_query.image_step = Some(4);
+            let image = manager
+                .agent_local_browser_response(&sink, &image_query, None)
+                .unwrap()
+                .image
+                .unwrap();
+            assert!(image.file_bytes > 1000);
+            assert_eq!(image.step, 4);
+            image_query.image_step = Some(1);
+            assert!(manager
+                .agent_local_browser_response(&sink, &image_query, None)
+                .is_err());
+            let mut changed = query.clone();
+            changed.action.steps.push(BrowserStep::Text {
+                selector: "body".into(),
+            });
+            assert!(manager
+                .agent_local_browser(&sink, &changed, Some(&config))
+                .is_err());
+            let mut unknown = query.clone();
+            unknown.action.action_id = format!("wc_browser_{}", uuid::Uuid::new_v4().simple());
+            let fenced = webcodex_core::agent_browser::AgentBrowserReceipt {
+                action_id: unknown.action.action_id.clone(),
+                identity_hash: unknown.action.identity_hash().unwrap(),
+                state: "dispatch_fenced".into(),
+                process_id: None,
+                exit_code: None,
+                result: None,
+                error: None,
+            };
+            assert!(store.fence_browser(&unknown.action, &fenced).unwrap());
+            assert_eq!(
+                manager
+                    .agent_local_browser(&sink, &unknown, Some(&config))
+                    .unwrap()
+                    .state,
+                "outcome_unknown"
+            );
+            assert!(!store
+                .browser_artifact_directory(&unknown.action)
+                .unwrap()
+                .exists());
+            let mut wrong = query.clone();
+            wrong.action.action_id = format!("wc_browser_{}", uuid::Uuid::new_v4().simple());
+            wrong.action.service.program_id = "foreign-program".into();
+            assert_eq!(
+                manager
+                    .agent_local_browser(&sink, &wrong, Some(&config))
+                    .unwrap()
+                    .state,
+                "not_started"
+            );
+            let mut slow = query.clone();
+            slow.action.action_id = format!("wc_browser_{}", uuid::Uuid::new_v4().simple());
+            slow.action.steps = vec![BrowserStep::Navigate {
+                path: "/slow".into(),
+            }];
+            slow.action.timeout_secs = 30;
+            let (worker_manager, worker_sink, worker_config, worker_query) = (
+                manager.clone_for_worker(),
+                sink.clone(),
+                config.clone(),
+                slow.clone(),
+            );
+            let worker = std::thread::spawn(move || {
+                worker_manager.agent_local_browser(
+                    &worker_sink,
+                    &worker_query,
+                    Some(&worker_config),
+                )
+            });
+            let wait_until = Instant::now() + Duration::from_secs(10);
+            loop {
+                if store
+                    .browser_metadata(&slow.action.action_id)
+                    .unwrap()
+                    .is_some_and(|r| r.receipt.process_id.is_some())
+                    && store
+                        .browser_artifact_directory(&slow.action)
+                        .unwrap()
+                        .join("evidence/engine.json")
+                        .is_file()
+                {
+                    assert!(!worker.is_finished());
+                    break;
+                }
+                assert!(
+                    !worker.is_finished(),
+                    "browser worker ended before process evidence"
+                );
+                assert!(Instant::now() < wait_until, "browser did not start");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            manager.stop(&service.binding.job_id).unwrap();
+            let wait_until = Instant::now() + Duration::from_secs(10);
+            while !worker.is_finished() {
+                assert!(
+                    Instant::now() < wait_until,
+                    "browser did not stop with its service"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let stopped_browser = worker.join().unwrap().unwrap();
+            assert_eq!(stopped_browser.state, "failed", "{stopped_browser:?}");
+            assert!(stopped_browser.exit_code.is_some());
+            assert_eq!(
+                manager.agent_local_browser(&sink, &slow, None).unwrap(),
+                stopped_browser
+            );
+            println!("framework fixed browser: real Edge interaction/screenshot, original action replay retained, unknown not resent, foreign service rejected, service stop terminates browser tree");
+        }
+        if with_browser && round == 0 && !fixed_browser {
+            let mut browser = start.clone();
+            browser.binding.program_id = "browser-program".into();
+            browser.binding.job_id = "browser-job".into();
+            browser.binding.start_request_id = "browser-request".into();
+            browser.binding.resource_set_id = "python-browser".into();
+            browser.binding.resource_manifest_hash =
+                profiles.manifest("python-browser").unwrap().into();
+            browser.binding.local_service_port = Some(port);
+            browser.timeout_secs = 60;
+            let fixture_root =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../windows/program-runtime");
+            let browser_code = fs::read_to_string(fixture_root.join("browser_fixture.py")).unwrap();
+            browser.args = vec![
+                "-u".into(),
+                "-c".into(),
+                format!(
+                    "{}\n{}",
+                    fs::read_to_string(fixture_root.join("webcodex_asyncio.py")).unwrap(),
+                    browser_code
+                ),
+            ];
+            browser.binding.launch_intent_hash = browser.compute_launch_hash().unwrap();
+            let wire = RunnerInvocation {
+                metadata: RunnerInvocationMetadata {
+                    request_id: browser.binding.start_request_id.clone(),
+                    client_id: "native-runner".into(),
+                    requested_by: "framework-browser-fixture".into(),
+                    created_at: chrono::Utc::now().timestamp(),
+                },
+                operation: RunnerOperation::Job(browser.clone().into_job()),
+            }
+            .into_v2_request()
+            .unwrap();
+            let mut pending = PendingJobStart::from_wire(
+                1,
+                RunnerPolicy::default(),
+                ShellConfig::default(),
+                SshConfig::default(),
+                registry.clone(),
+                wire,
+            );
+            pending.policy.allowed_roots = vec![project.clone()];
+            manager.enqueue(sink.clone(), pending);
+            let deadline = Instant::now() + Duration::from_secs(65);
+            let snapshot = loop {
+                let s = lock_unpoison(&manager.jobs)
+                    .get(&browser.binding.job_id)
+                    .unwrap()
+                    .snapshot
+                    .clone();
+                if super::super::lifecycle::runner_job_is_terminal(&s.status) {
+                    break s;
+                }
+                assert!(Instant::now() < deadline, "browser fixture deadline");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(snapshot.exit_code, Some(0), "{snapshot:?}");
+            assert!(
+                snapshot.stdout.tail.contains("Hello sandbox"),
+                "{snapshot:?}"
+            );
+            println!("{}", snapshot.stdout.tail);
+        }
+        manager.stop(&service.binding.job_id).unwrap();
+        assert!(manager.wait_for_workers(Instant::now() + Duration::from_secs(5)));
+        let stopped = manager.inspect_agent_program(&sink, &query).unwrap();
+        assert!(stopped.service.is_none());
+        assert_eq!(stopped.state, "stopped");
+        assert!(
+            webcodex_process::windows_local_service::LocalServiceNetwork::cleanup_complete(
+                &service.binding.identity_hash().unwrap()
+            )
+            .unwrap()
+        );
+        fs::write(
+            &audit,
+            format!(
+                "identity={}\nport={port}\nstate=revoked\n",
+                service.binding.identity_hash().unwrap()
+            ),
+        )
+        .unwrap();
+        previous = service.binding.program_id.clone();
+        println!(
+            "framework HTTP round={round}; actual_port={port}; persisted_value={}; stopped=true",
+            body["value"]
+        );
+    }
+}
+
+#[test]
 #[ignore = "real Windows LPAC Job lane; explicit isolated validation root/helper required"]
 fn agent_execution_real_typed_job_closes_replays_and_fences_old_run() {
     let mut fixture = Fixture::new();
@@ -714,6 +1325,195 @@ fn agent_execution_real_project_workspace_reads_edits_and_validates_without_host
         )
         .unwrap_err(),
         "agent_workspace_project_changed"
+    );
+}
+
+#[test]
+#[ignore = "real ordinary program sandbox; explicit fresh validation root/helper required"]
+fn agent_program_real_job_writes_owned_files_denies_private_files_and_stops_without_cli_worker() {
+    use webcodex_core::agent_program::{AgentProgramBinding, AgentProgramStart};
+    use webcodex_core::runner_protocol::{AgentExecutionTarget, AgentRunRef};
+    let fixture = Fixture::new();
+    let project = fixture._temporary.path().join("ordinary-project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("public.txt"), b"authorized-source").unwrap();
+    let canonical = crate::webcodex_runner::shell::canonicalize_existing(&project).unwrap();
+    let registry = fixture._temporary.path().join("ordinary-registry");
+    fs::create_dir(&registry).unwrap();
+    fs::write(
+        registry.join("repo.toml"),
+        format!(
+            "id = \"repo\"\npath = {}\nallow_patch = true\n",
+            serde_json::to_string(canonical.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut start = AgentProgramStart {
+        binding: AgentProgramBinding {
+            local_service_port: None,
+            resume_from_program: None,
+            version: 1,
+            program_id: "native-program".into(),
+            enrollment_id: "original-enrollment".into(),
+            task_id: "original-task".into(),
+            run: AgentRunRef {
+                agent_id: "original-agent".into(),
+                agent_run_id: "original-run".into(),
+                generation: 1,
+            },
+            project: "logical-project".into(),
+            target: AgentExecutionTarget {
+                client_id: "native-runner".into(),
+                runner_instance_id: "native-instance".into(),
+            },
+            job_id: "program-job".into(),
+            start_request_id: "program-request".into(),
+            workspace_project: "agent:native-runner:repo".into(),
+            workspace_root: canonical.to_str().unwrap().into(),
+            relative_cwd: ".".into(),
+            resource_set_id: "synthetic-profile".into(),
+            resource_manifest_hash: fixture
+                .profiles
+                .manifest("synthetic-profile")
+                .unwrap()
+                .into(),
+            launch_intent_hash: "a".repeat(64),
+            expires_at_unix_ms: chrono::Utc::now().timestamp_millis() + 60000,
+        },
+        args: vec![
+            "lpac-resource-boundary".into(),
+            "../input/authorized.txt".into(),
+            fixture.outside.to_str().unwrap().into(),
+            "program-ready".into(),
+            "program-release".into(),
+        ],
+        stdin: None,
+        timeout_secs: 60,
+    };
+    start.binding.launch_intent_hash = start.compute_launch_hash().unwrap();
+    let wire = RunnerInvocation {
+        metadata: RunnerInvocationMetadata {
+            request_id: start.binding.start_request_id.clone(),
+            client_id: "native-runner".into(),
+            requested_by: "framework-test".into(),
+            created_at: chrono::Utc::now().timestamp(),
+        },
+        operation: RunnerOperation::Job(start.clone().into_job()),
+    }
+    .into_v2_request()
+    .unwrap();
+    let mut pending = PendingJobStart::from_wire(
+        1,
+        RunnerPolicy::default(),
+        ShellConfig::default(),
+        SshConfig::default(),
+        registry,
+        wire,
+    );
+    pending.policy.allowed_roots = vec![project.clone()];
+    fixture
+        .manager
+        .enqueue(fixture.sink.clone(), pending.clone());
+    let workspace = super::super::agent_resources::program_resource_directory(
+        &fixture.configuration.resource_root,
+        &start.binding,
+    )
+    .unwrap()
+    .join("workspace");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !workspace.join("program-ready").exists() {
+        let snapshot = lock_unpoison(&fixture.manager.jobs)
+            .get(&start.binding.job_id)
+            .unwrap()
+            .snapshot
+            .clone();
+        assert!(
+            !super::super::lifecycle::runner_job_is_terminal(&snapshot.status),
+            "{snapshot:?}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "ordinary sandbox readiness: {snapshot:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        fs::read(workspace.join("public.txt")).unwrap(),
+        b"authorized-source"
+    );
+    assert!(fs::read_to_string(workspace.join("program-ready"))
+        .unwrap()
+        .contains("outside-read-denied"));
+    assert_eq!(
+        fs::read(workspace.join("owned-output.txt")).unwrap(),
+        b"workspace-write-ok"
+    );
+    assert!(!project.join("owned-output.txt").exists());
+    let pid = lock_unpoison(&fixture.manager.jobs)
+        .get(&start.binding.job_id)
+        .unwrap()
+        .child
+        .as_ref()
+        .map(|c| lock_unpoison(c).id())
+        .unwrap();
+    assert!(pid > 0);
+    fixture.manager.enqueue(fixture.sink.clone(), pending); // same Job: no second native start
+    fixture.manager.stop(&start.binding.job_id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows = fixture
+            .configuration
+            .store
+            .read_agent_program_metadata()
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        if rows[0].worker_finished {
+            assert!(rows[0].tree_stopped);
+            assert_eq!(rows[0].snapshot.as_ref().unwrap().status, "stopped");
+            break;
+        }
+        assert!(Instant::now() < deadline, "program did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fixture
+        .configuration
+        .store
+        .read_agent_execution_metadata()
+        .unwrap()
+        .jobs
+        .is_empty());
+    // Diagnostic of the real OS network boundary; no exemption, external
+    // endpoint, model or business application is involved.
+    let mut network = start.clone();
+    network.binding.program_id = "native-network-probe".into();
+    network.binding.job_id = "network-job".into();
+    network.binding.start_request_id = "network-request".into();
+    network.args = vec!["lpac-loopback-probe".into(), "loopback-report".into()];
+    network.binding.launch_intent_hash = network.compute_launch_hash().unwrap();
+    let operation = network.clone().into_job();
+    let mut pending = fixture.pending(&fixture.start(99, vec!["sleep".into(), "0".into()], None));
+    pending.project_registry_dir = fixture._temporary.path().join("ordinary-registry");
+    pending.policy.allowed_roots = vec![project];
+    pending.metadata.request_id = network.binding.start_request_id.clone();
+    pending.operation = operation;
+    fixture.manager.enqueue(fixture.sink.clone(), pending);
+    let output = super::super::agent_resources::program_resource_directory(
+        &fixture.configuration.resource_root,
+        &network.binding,
+    )
+    .unwrap()
+    .join("workspace/loopback-report");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !output.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "loopback probe did not produce output"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    println!(
+        "ordinary program OS network probe: {}",
+        fs::read_to_string(output).unwrap()
     );
 }
 

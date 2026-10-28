@@ -14,9 +14,12 @@ use webcodex_core::runner_protocol::{
     AgentExecutionBinding, AgentExecutionResourceDescriptor, AgentExecutionStart,
 };
 
+#[path = "host_cli.rs"]
+pub(crate) mod host_cli;
+use host_cli::{NativeCliConfig, NativeCliWorker};
 const MAX_PROFILES: usize = 32;
-const MAX_FILES: usize = 256;
-const MAX_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_FILES: usize = 512;
+const MAX_RESOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 const PROGRAM: &str = "bin/program.exe";
 const WRITABLE_DIRS: &[&str] = &["workspace", "home", "state", "cache", "temp", "session"];
 // Sorted JSON pairs (execution-relative path, SHA-256), covering the complete
@@ -29,12 +32,29 @@ const CODEBUDDY_NODE_PACKAGE_SHA256: &str =
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentExecutionResourcesConfig {
     #[serde(default)]
+    pub(crate) native_cli: Option<NativeCliConfig>,
+    #[serde(default)]
+    pub(crate) browser: Option<LocalBrowserConfig>,
+    #[serde(default)]
     pub(crate) profiles: Vec<AgentExecutionResourceProfile>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct LocalBrowserConfig {
+    pub(crate) python: PathBuf,
+    pub(crate) python_sha256: String,
+    pub(crate) browser: PathBuf,
+    pub(crate) browser_sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AgentExecutionResourceProfile {
+    #[serde(default)]
+    pub(crate) host_cli: Option<webcodex_core::host_cli::HostCliRegistration>,
+    #[serde(default)]
+    pub(crate) native_worker: Option<NativeCliWorker>,
     pub(crate) id: String,
     #[serde(default)]
     pub(crate) provider: Option<AgentCliProvider>,
@@ -71,6 +91,8 @@ struct ResourceFile {
 
 #[derive(Debug, Clone)]
 struct ValidatedProfile {
+    host_cli: Option<webcodex_core::host_cli::HostCliRegistration>,
+    native_worker: Option<NativeCliWorker>,
     provider: Option<AgentCliProvider>,
     reviewed_controls: Option<ReviewedAgentCliControls>,
     user_https_proxy: bool,
@@ -244,8 +266,12 @@ fn legacy_credential_loading(
     let controls = controls?;
     controls.require_supported_loading().ok()?;
     match controls.loading_method.as_str() {
-        CODEBUDDY_FILES_LOADING | CODEBUDDY_NODE_FILES_LOADING => Some(AgentCliProvider::WorkBuddy),
-        ANTIGRAVITY_FILES_LOADING => Some(AgentCliProvider::Antigravity),
+        CODEBUDDY_FILES_LOADING | CODEBUDDY_FILES_LOADING_V2 | CODEBUDDY_NODE_FILES_LOADING => {
+            Some(AgentCliProvider::WorkBuddy)
+        }
+        ANTIGRAVITY_FILES_LOADING | ANTIGRAVITY_148_FILES_LOADING => {
+            Some(AgentCliProvider::Antigravity)
+        }
         _ => None,
     }
 }
@@ -297,16 +323,19 @@ fn execution_manifest(
     if controls.loading_method == webcodex_core::agent_cli_controls::CODEBUDDY_NODE_FILES_LOADING {
         validate_codebuddy_node_package(files)?;
     }
-    if controls.loading_method == webcodex_core::agent_cli_controls::ANTIGRAVITY_FILES_LOADING
-        && (files.len() != 3
-            || files.iter().any(|file| {
-                !matches!(
-                    file.destination.as_str(),
-                    PROGRAM
-                        | webcodex_core::agent_cli_controls::ANTIGRAVITY_AGENT_PATH
-                        | webcodex_core::agent_cli_controls::ANTIGRAVITY_SETTINGS_PATH
-                )
-            }))
+    if matches!(
+        controls.loading_method.as_str(),
+        webcodex_core::agent_cli_controls::ANTIGRAVITY_FILES_LOADING
+            | webcodex_core::agent_cli_controls::ANTIGRAVITY_148_FILES_LOADING
+    ) && (files.len() != 3
+        || files.iter().any(|file| {
+            !matches!(
+                file.destination.as_str(),
+                PROGRAM
+                    | webcodex_core::agent_cli_controls::ANTIGRAVITY_AGENT_PATH
+                    | webcodex_core::agent_cli_controls::ANTIGRAVITY_SETTINGS_PATH
+            )
+        }))
     {
         return Err("agent_resources_antigravity_package_mismatch".into());
     }
@@ -328,6 +357,17 @@ fn execution_manifest(
 }
 
 fn validate_profile_manifest(id: &str, profile: &ValidatedProfile) -> Result<(), String> {
+    if let Some(host) = &profile.host_cli {
+        host.validate()?;
+        if host.manifest(id)? != profile.manifest
+            || profile.reviewed_controls.is_some()
+            || profile.executable_identity != format!("sha256:{}", host.executable_sha256)
+            || profile.provider.as_ref().map(|p| p.id()) != Some(host.adapter.id.as_str())
+        {
+            return Err("native_cli_profile_binding_mismatch".into());
+        }
+        return Ok(());
+    }
     if execution_manifest(
         id,
         profile.provider,
@@ -347,6 +387,9 @@ fn validate_execution_args(
     profile: &ValidatedProfile,
     start: &AgentExecutionStart,
 ) -> Result<(), String> {
+    if let Some(host) = &profile.host_cli {
+        return host.validate_args(&start.process.args);
+    }
     if profile.provider.is_some() {
         let controls = profile
             .reviewed_controls
@@ -519,19 +562,34 @@ pub(crate) fn validate_profiles(
             profile.reviewed_controls.as_ref(),
             profile.codebuddy_config_directory.as_deref(),
         )?;
-        let manifest = execution_manifest(
-            &profile.id,
-            profile.provider,
-            &executable_identity,
-            &files,
-            profile.reviewed_controls.as_ref(),
-            profile.user_https_proxy,
-            codebuddy_config_directory.as_deref(),
-        )?;
+        let manifest = if let Some(host) = &profile.host_cli {
+            if profile.reviewed_controls.is_some()
+                || profile.user_https_proxy
+                || profile.codebuddy_config_directory.is_some()
+                || !profile.files.is_empty()
+                || host.executable_sha256 != profile.executable_sha256
+                || profile.provider.as_ref().map(|p| p.id()) != Some(host.adapter.id.as_str())
+            {
+                return Err("native_cli_profile_binding_mismatch".into());
+            }
+            host.manifest(&profile.id)?
+        } else {
+            execution_manifest(
+                &profile.id,
+                profile.provider,
+                &executable_identity,
+                &files,
+                profile.reviewed_controls.as_ref(),
+                profile.user_https_proxy,
+                codebuddy_config_directory.as_deref(),
+            )?
+        };
         if profiles
             .insert(
                 profile.id.clone(),
                 ValidatedProfile {
+                    host_cli: profile.host_cli.clone(),
+                    native_worker: profile.native_worker.clone(),
                     provider: profile.provider,
                     reviewed_controls: profile.reviewed_controls.clone(),
                     user_https_proxy: profile.user_https_proxy,
@@ -550,20 +608,45 @@ pub(crate) fn validate_profiles(
 }
 
 impl ValidatedResourceProfiles {
+    pub(crate) fn validate_program(
+        &self,
+        start: &webcodex_core::agent_program::AgentProgramStart,
+    ) -> Result<(), String> {
+        start.validate()?;
+        let profile = self
+            .0
+            .get(&start.binding.resource_set_id)
+            .ok_or("agent_program_resource_unavailable")?;
+        if profile.provider.is_some()
+            || profile.reviewed_controls.is_some()
+            || profile.user_https_proxy
+            || profile.codebuddy_config_directory.is_some()
+            || profile.manifest != start.binding.resource_manifest_hash
+        {
+            return Err("agent_program_resource_not_ordinary".into());
+        }
+        validate_profile_manifest(&start.binding.resource_set_id, profile)
+    }
     pub(crate) fn cli_installations(&self) -> Vec<webcodex_core::agent_cli::AgentCliInstallation> {
         self.0
             .values()
             .filter_map(|profile| {
                 let provider = profile.provider?;
                 let adapter = profile
-                    .reviewed_controls
+                    .host_cli
                     .as_ref()
-                    .and_then(|record| record.adapter.clone())
+                    .map(|host| host.adapter.clone())
                     .or_else(|| {
-                        webcodex_core::cli_adapter::cli_adapters(&[])
-                            .ok()?
-                            .into_iter()
-                            .find(|entry| entry.id == provider.id())
+                        profile
+                            .reviewed_controls
+                            .as_ref()
+                            .and_then(|record| record.adapter.clone())
+                            .or_else(|| {
+                                webcodex_core::cli_adapter::cli_adapters(&[])
+                                    .ok()?
+                                    .into_iter()
+                                    .find(|entry| entry.id == provider.id())
+                            })
                     });
                 let installed = profile
                     .files
@@ -579,6 +662,23 @@ impl ValidatedResourceProfiles {
                         .find(|file| file.destination == PROGRAM)?
                         .source
                         .clone(),
+                    execution_ready: Some(
+                        installed
+                            && (profile.host_cli.is_some()
+                                || profile
+                                    .reviewed_controls
+                                    .as_ref()
+                                    .is_some_and(|c| c.require_supported_loading().is_ok())),
+                    ),
+                    execution_mode: Some(
+                        if profile.host_cli.is_some() {
+                            "native_host"
+                        } else {
+                            "isolated"
+                        }
+                        .into(),
+                    ),
+                    reason_code: (!installed).then(|| "cli_resource_file_missing".into()),
                     provider_id: provider.id().into(),
                     label: adapter
                         .map(|entry| entry.label)
@@ -593,7 +693,7 @@ impl ValidatedResourceProfiles {
                     }
                     .into(),
                     message: if installed {
-                        "已发现本机登记的 CLI，调用前会复核资源。"
+                        "已注册为任务执行资源，调用前会复核程序与账号可用性。"
                     } else {
                         "已登记的 CLI 文件当前不可用，请重新配置。"
                     }
@@ -606,7 +706,7 @@ impl ValidatedResourceProfiles {
         self.0.is_empty()
     }
     pub(crate) fn requires_proxy_controller(&self) -> bool {
-        self.0.values().any(|profile| profile.user_https_proxy)
+        false
     }
     pub(crate) fn manifest(&self, resource_set_id: &str) -> Option<&str> {
         self.0.get(resource_set_id).map(|p| p.manifest.as_str())
@@ -617,7 +717,8 @@ impl ValidatedResourceProfiles {
         self.0
             .iter()
             .map(|(id, profile)| AgentExecutionResourceDescriptor {
-                project_workspace_copy: cfg!(windows),
+                host_cli: profile.host_cli.clone(),
+                project_workspace_copy: cfg!(windows) && profile.host_cli.is_none(),
                 resource_set_id: id.clone(),
                 manifest_hash: profile.manifest.clone(),
                 executable_identity: profile.executable_identity.clone(),
@@ -647,11 +748,8 @@ impl ValidatedResourceProfiles {
         &self,
         start: &AgentExecutionStart,
     ) -> Result<(bool, bool), String> {
-        let profile = selected_profile(self, start)?;
-        Ok((
-            legacy_credential_loading(profile.reviewed_controls.as_ref()).is_some(),
-            profile.user_https_proxy,
-        ))
+        selected_profile(self, start)?;
+        Ok((false, false))
     }
 }
 
@@ -671,44 +769,91 @@ pub(crate) fn pin_discovered_catalog_executable(
     program: &Path,
     provider: AgentCliProvider,
 ) -> Result<PinnedCatalogExecutable, String> {
-    use std::io::Read;
-    let mut source =
-        std::fs::File::open(program).map_err(|_| "agent_cli_metadata_source_unavailable")?;
-    let metadata = source
-        .metadata()
-        .map_err(|_| "agent_cli_metadata_source_unavailable")?;
-    if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES {
-        return Err("agent_cli_metadata_source_limit".into());
-    }
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    let mut total = 0u64;
-    loop {
-        let count = source
-            .read(&mut buffer)
-            .map_err(|_| "agent_cli_metadata_source_unavailable")?;
-        if count == 0 {
-            break;
-        }
-        total += count as u64;
-        if total > MAX_RESOURCE_BYTES {
-            return Err("agent_cli_metadata_source_limit".into());
-        }
-        digest.update(&buffer[..count]);
-    }
+    let (program, source, digest) = open_host_executable(program, None)?;
     let profiles = validate_profiles(&AgentExecutionResourcesConfig {
+        native_cli: None,
+        browser: None,
         profiles: vec![AgentExecutionResourceProfile {
+            host_cli: None,
+            native_worker: None,
             id: format!("metadata-{}", provider.id()),
             provider: Some(provider),
             reviewed_controls: None,
             user_https_proxy: false,
             codebuddy_config_directory: None,
-            executable: program.to_path_buf(),
-            executable_sha256: format!("{:x}", digest.finalize()),
+            executable: program.clone(),
+            executable_sha256: digest,
             files: vec![],
         }],
     })?;
-    pin_catalog_executable(&profiles, provider)
+    Ok(PinnedCatalogExecutable {
+        program,
+        entrypoint: None,
+        codebuddy_config_directory: None,
+        descriptor: profiles
+            .descriptors()
+            .into_iter()
+            .next()
+            .ok_or("agent_cli_metadata_profile_missing")?,
+        _pins: vec![source],
+    })
+}
+
+/// Host installations may be installer symlinks, directory junctions or hard
+/// links. Open their actual file normally and verify content, without the old
+/// copied-resource requirement that every ancestor/file have a unique link.
+fn open_host_executable(
+    program: &Path,
+    expected: Option<&str>,
+) -> Result<(PathBuf, std::fs::File, String), String> {
+    use std::io::Read;
+    let canonical = program.canonicalize().map_err(|e| {
+        format!(
+            "native_cli_resolve_failed:{}",
+            e.raw_os_error().unwrap_or(0)
+        )
+    })?;
+    let mut source = std::fs::File::open(&canonical)
+        .map_err(|e| format!("native_cli_open_failed:{}", e.raw_os_error().unwrap_or(0)))?;
+    let metadata = source.metadata().map_err(|e| {
+        format!(
+            "native_cli_metadata_failed:{}",
+            e.raw_os_error().unwrap_or(0)
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES {
+        return Err("native_cli_executable_size_invalid".into());
+    }
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut total = 0u64;
+    loop {
+        let count = source
+            .read(&mut buffer)
+            .map_err(|e| format!("native_cli_read_failed:{}", e.raw_os_error().unwrap_or(0)))?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > MAX_RESOURCE_BYTES {
+            return Err("native_cli_executable_size_invalid".into());
+        }
+        hash.update(&buffer[..count]);
+    }
+    let digest = format!("{:x}", hash.finalize());
+    if expected.is_some_and(|expected| expected != digest) {
+        return Err("native_cli_executable_changed".into());
+    }
+    // Reuse ordinary Win32 path spelling accepted by native argv/CreateProcess.
+    let text = canonical.to_string_lossy();
+    let program = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        canonical
+    };
+    Ok((program, source, digest))
 }
 
 fn catalog_entrypoint(profile: &ValidatedProfile) -> Result<Option<PathBuf>, String> {
@@ -868,6 +1013,8 @@ fn environment(root: &Path, windows_directory: &Path) -> Result<BTreeMap<String,
 /// and the existing Store/Job close decision authorize resource release.
 /// It intentionally does not remove directories on Drop: Job recovery owns them.
 pub(crate) struct PreparedAgentResources {
+    #[cfg(windows)]
+    pub(crate) native_host: bool,
     result_contract: Option<webcodex_core::cli_adapter::CliResultContract>,
     pub(crate) program: PathBuf,
     pub(crate) cwd: PathBuf,
@@ -879,12 +1026,21 @@ pub(crate) struct PreparedAgentResources {
     #[cfg(windows)]
     network: webcodex_process::windows_lpac::LpacNetwork,
     #[cfg(windows)]
+    local_network: Option<webcodex_process::windows_local_service::LocalServiceNetwork>,
+    #[cfg(windows)]
     sid: webcodex_process::windows_lpac::AppContainerSid,
     #[cfg(windows)]
     _pins: Vec<std::fs::File>,
 }
 
 impl PreparedAgentResources {
+    pub(crate) fn revoke_local_network_after_stop(&mut self) -> Result<(), String> {
+        #[cfg(windows)]
+        if let Some(guard) = self.local_network.take() {
+            guard.remove_after_stop()?;
+        }
+        Ok(())
+    }
     pub(crate) fn result_contract(&self) -> Option<&webcodex_core::cli_adapter::CliResultContract> {
         self.result_contract.as_ref()
     }
@@ -952,12 +1108,171 @@ pub(crate) fn prepare(
     absolute_path(durable_job_root)?;
     #[cfg(windows)]
     {
-        windows::prepare(profile, start, durable_job_root)
+        let identity = start.binding.identity_hash()?;
+        let mut prepared = prepare_host(
+            profile,
+            &start.process.args,
+            start
+                .workspace_source
+                .as_ref()
+                .map(|source| PathBuf::from(&source.root))
+                .unwrap_or(
+                    std::env::current_dir()
+                        .map_err(|_| "native_cli_working_directory_unavailable")?,
+                ),
+            &identity,
+        )?;
+        let instance_root = prepared
+            .cwd
+            .join(".webcodex/instances")
+            .join(format!("cli-{identity}"));
+        for (name, directory) in [
+            ("WEBCODEX_MEMORY_DIR", "memory"),
+            ("WEBCODEX_OBJECTIVES_DIR", "objectives"),
+            ("WEBCODEX_ACCEPTANCE_DIR", "acceptance"),
+        ] {
+            let path = instance_root.join(directory);
+            std::fs::create_dir_all(&path)
+                .map_err(|error| format!("cli_instance_directory_create_failed:{error}"))?;
+            prepared
+                .environment
+                .insert(name.into(), path.to_string_lossy().into_owned());
+        }
+        Ok(prepared)
     }
     #[cfg(not(windows))]
     {
         let _ = profile;
         Err("agent_resources_platform_unsupported".into())
+    }
+}
+
+#[cfg(windows)]
+fn prepare_host(
+    profile: &ValidatedProfile,
+    args: &[String],
+    cwd: PathBuf,
+    identity: &str,
+) -> Result<PreparedAgentResources, String> {
+    let program = profile
+        .files
+        .iter()
+        .find(|file| file.destination == PROGRAM)
+        .ok_or("native_cli_program_missing")?;
+    let program = PathBuf::from(&program.source);
+    let cwd = cwd
+        .canonicalize()
+        .map_err(|error| format!("native_execution_working_directory_unavailable:{error}"))?;
+    if !cwd.is_dir() {
+        return Err("native_execution_working_directory_not_directory".into());
+    }
+    let cwd = webcodex_process::windows_lpac::native_host_path(&cwd);
+    let mut environment = BTreeMap::new();
+    for (key, value) in std::env::vars() {
+        if !crate::webcodex_runner::shell::is_sensitive_env_key(&key) {
+            let effective = std::env::var(&key).unwrap_or(value);
+            environment.insert(key.to_ascii_uppercase(), effective);
+        }
+    }
+    if profile.provider == Some(AgentCliProvider::WorkBuddy) {
+        // Installed CodeBuddy's MemoryContextInterceptor reads this exact "1"
+        // before shared project-memory injection. Keep explicit instance-file
+        // CRUD and the rest of the normal process environment unchanged.
+        environment.insert("CODEBUDDY_DISABLE_AUTO_MEMORY".into(), "1".into());
+    }
+    Ok(PreparedAgentResources {
+        native_host: true,
+        result_contract: profile
+            .host_cli
+            .as_ref()
+            .and_then(|host| host.adapter.invocation.as_ref()?.result.clone()),
+        program,
+        cwd,
+        environment,
+        workspace_snapshot: None,
+        args: args.to_vec(),
+        proxy_requested: false,
+        network: webcodex_process::windows_lpac::LpacNetwork::None,
+        local_network: None,
+        sid: webcodex_process::windows_lpac::AppContainerSid::derive(identity)
+            .map_err(|error| error.to_string())?,
+        _pins: Vec::new(),
+    })
+}
+
+/// Ordinary programs use only credential-free resource profiles. The current
+/// authenticated project source is supplied by Server/Runner, never by CLI
+/// controls or a model-selected host executable.
+pub(crate) fn prepare_program(
+    profiles: &ValidatedResourceProfiles,
+    start: &webcodex_core::agent_program::AgentProgramStart,
+    durable_job_root: &Path,
+    resume_source: Option<&Path>,
+) -> Result<PreparedAgentResources, String> {
+    profiles.validate_program(start)?;
+    let profile = profiles
+        .0
+        .get(&start.binding.resource_set_id)
+        .ok_or("agent_program_resource_unavailable")?;
+    if profile.provider.is_some()
+        || profile.reviewed_controls.is_some()
+        || profile.user_https_proxy
+        || profile.codebuddy_config_directory.is_some()
+        || profile.manifest != start.binding.resource_manifest_hash
+    {
+        return Err("agent_program_resource_not_ordinary".into());
+    }
+    #[cfg(windows)]
+    {
+        let _ = (durable_job_root, resume_source);
+        prepare_host(
+            profile,
+            &start.args,
+            PathBuf::from(&start.binding.workspace_root).join(&start.binding.relative_cwd),
+            &start.binding.identity_hash()?,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (profile, durable_job_root);
+        Err("agent_program_platform_unavailable".into())
+    }
+}
+
+/// Shorten filesystem names without truncating the 256-bit execution identity.
+/// Python and other Win32 programs can fail on relative paths even when the
+/// Runner successfully copied those files using extended absolute paths.
+/// Existing execution directories remain authoritative and are never moved.
+pub(crate) fn program_resource_directory(
+    durable_root: &Path,
+    binding: &webcodex_core::agent_program::AgentProgramBinding,
+) -> Result<PathBuf, String> {
+    use base64::Engine;
+    let identity = binding.identity_hash()?;
+    let bytes = (0..identity.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&identity[index..index + 2], 16)
+                .map_err(|_| "agent_program_resource_identity_invalid".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let compact = durable_root.join(format!(
+        "p-{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    ));
+    let legacy = durable_root.join(format!("program-{identity}"));
+    let exists = |path: &Path| match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("agent_program_resource_layout_unavailable".to_string()),
+    };
+    if exists(&legacy)? {
+        if exists(&compact)? {
+            return Err("agent_program_resource_layout_ambiguous".into());
+        }
+        Ok(legacy)
+    } else {
+        Ok(compact)
     }
 }
 
@@ -1168,6 +1483,8 @@ mod windows {
         cleanup_auth_path(
             &home.join(webcodex_core::agent_cli_controls::ANTIGRAVITY_NATIVE_AUTH_RELATIVE),
         )?;
+        cleanup_auth_path(&home.join(".codex/auth.json"))?;
+        cleanup_auth_path(&home.join(".claude/.credentials.json"))?;
         Ok(())
     }
 
@@ -1306,6 +1623,13 @@ mod windows {
 
     pub(super) fn verify_sources(profiles: &ValidatedResourceProfiles) -> Result<(), String> {
         for (id, profile) in &profiles.0 {
+            if profile.host_cli.is_some() {
+                for item in &profile.files {
+                    open_host_executable(Path::new(&item.source), Some(&item.sha256))?;
+                }
+                validate_profile_manifest(id, profile)?;
+                continue;
+            }
             let mut total = 0;
             let mut pins = Vec::new();
             for item in &profile.files {
@@ -1332,6 +1656,25 @@ mod windows {
             .find(|file| file.destination == PROGRAM)
             .ok_or("agent_resources_profile_required")?;
         let program = PathBuf::from(&executable.source);
+        if profile.host_cli.is_some() {
+            validate_profile_manifest(id, profile)?;
+            let (program, source, _) = open_host_executable(&program, Some(&executable.sha256))?;
+            return Ok(PinnedCatalogExecutable {
+                program,
+                entrypoint: None,
+                codebuddy_config_directory: None,
+                descriptor: AgentExecutionResourceDescriptor {
+                    host_cli: profile.host_cli.clone(),
+                    project_workspace_copy: false,
+                    resource_set_id: id.into(),
+                    manifest_hash: profile.manifest.clone(),
+                    executable_identity: profile.executable_identity.clone(),
+                    provider: profile.provider,
+                    reviewed_controls: None,
+                },
+                _pins: vec![source],
+            });
+        }
         let mut pins = Vec::new();
         let mut bytes = 0;
         if profile.reviewed_controls.is_some() {
@@ -1361,7 +1704,8 @@ mod windows {
             entrypoint,
             codebuddy_config_directory,
             descriptor: AgentExecutionResourceDescriptor {
-                project_workspace_copy: cfg!(windows),
+                host_cli: profile.host_cli.clone(),
+                project_workspace_copy: cfg!(windows) && profile.host_cli.is_none(),
                 resource_set_id: id.into(),
                 manifest_hash: profile.manifest.clone(),
                 executable_identity: profile.executable_identity.clone(),
@@ -1965,9 +2309,28 @@ mod windows {
         refresh_acl: Option<(&Descriptor, &Descriptor)>,
         destination_pins: &mut Vec<File>,
     ) -> Result<(), String> {
-        use webcodex_core::agent_cli_controls::CODEBUDDY_NATIVE_AUTH_RELATIVE;
+        copy_native_auth_file(
+            user_home,
+            root,
+            webcodex_core::agent_cli_controls::CODEBUDDY_NATIVE_AUTH_RELATIVE,
+            directory_acl,
+            file_acl,
+            refresh_acl,
+            destination_pins,
+        )
+    }
+
+    fn copy_native_auth_file(
+        user_home: &Path,
+        root: &Path,
+        relative: &str,
+        directory_acl: &Descriptor,
+        file_acl: &Descriptor,
+        refresh_acl: Option<(&Descriptor, &Descriptor)>,
+        destination_pins: &mut Vec<File>,
+    ) -> Result<(), String> {
         absolute_path(user_home)?;
-        let source_path = user_home.join(CODEBUDDY_NATIVE_AUTH_RELATIVE);
+        let source_path = user_home.join(relative);
         let mut source_pins = Vec::new();
         pin_directories(
             source_path
@@ -1982,13 +2345,9 @@ mod windows {
             return Err("codebuddy_native_auth_source_invalid".into());
         }
         let identity = file_identity(&source)?;
-        let destination_path = root.join("home").join(CODEBUDDY_NATIVE_AUTH_RELATIVE);
+        let destination_path = root.join("home").join(relative);
         let mut directory = root.join("home");
-        for part in Path::new(CODEBUDDY_NATIVE_AUTH_RELATIVE)
-            .parent()
-            .unwrap()
-            .components()
-        {
+        for part in Path::new(relative).parent().unwrap().components() {
             directory.push(part);
             let acl = if Some(directory.as_path()) == destination_path.parent() {
                 refresh_acl.map(|pair| pair.0).unwrap_or(directory_acl)
@@ -2365,6 +2724,170 @@ mod windows {
         prepare_inner(profile, start, durable_root, false)
     }
 
+    pub(super) fn prepare_program(
+        profile: &ValidatedProfile,
+        start: &webcodex_core::agent_program::AgentProgramStart,
+        durable_root: &Path,
+        resume_source: Option<&Path>,
+    ) -> Result<PreparedAgentResources, String> {
+        validate_profile_manifest(&start.binding.resource_set_id, profile)?;
+        let identity = start.binding.identity_hash()?;
+        let sid = webcodex_process::windows_lpac::AppContainerSid::derive(&identity)
+            .map_err(|e| e.to_string())?;
+        let owner = current_user()?;
+        let package = sid_text(sid.as_ptr())?;
+        let root = program_resource_directory(durable_root, &start.binding)?;
+        let mut pins = Vec::new();
+        pin_directories(durable_root, &mut pins)?;
+        let traverse = Descriptor::new(
+            &owner,
+            &package,
+            FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+            true,
+            false,
+        )?;
+        let ro_dir = Descriptor::new(
+            &owner,
+            &package,
+            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+            true,
+            false,
+        )?;
+        let rw_dir = Descriptor::new(
+            &owner,
+            &package,
+            FILE_GENERIC_READ
+                | FILE_GENERIC_WRITE
+                | FILE_GENERIC_EXECUTE
+                | DELETE
+                | FILE_DELETE_CHILD,
+            true,
+            true,
+        )?;
+        let ro_file = Descriptor::new(&owner, &package, FILE_GENERIC_READ, false, false)?;
+        let binary = Descriptor::new(
+            &owner,
+            &package,
+            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+            false,
+            false,
+        )?;
+        let rw_file = Descriptor::new(
+            &owner,
+            &package,
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+            false,
+            true,
+        )?;
+        create_directory(&root, &traverse, &mut pins)?;
+        for name in ["bin", "input"] {
+            create_directory(&root.join(name), &ro_dir, &mut pins)?;
+        }
+        for name in WRITABLE_DIRS {
+            create_directory(&root.join(name), &rw_dir, &mut pins)?;
+        }
+        let mut created = BTreeSet::from(["bin".to_owned(), "input".to_owned()]);
+        let mut total = 0;
+        for item in &profile.files {
+            let mut file = source(Path::new(&item.source), &item.sha256, &mut total, &mut pins)?;
+            let relative = Path::new(&item.destination);
+            let mut directory = PathBuf::new();
+            for part in relative
+                .parent()
+                .ok_or("agent_resources_destination_parent")?
+                .components()
+            {
+                directory.push(part);
+                if created.insert(directory.to_string_lossy().to_ascii_lowercase()) {
+                    create_directory(&root.join(&directory), &ro_dir, &mut pins)?;
+                }
+            }
+            pins.push(copy_file(
+                &mut file,
+                &root.join(relative),
+                &item.sha256,
+                if item.destination.starts_with("bin/") {
+                    &binary
+                } else {
+                    &ro_file
+                },
+            )?);
+        }
+        let source = resume_source.map(Path::to_path_buf).unwrap_or_else(|| {
+            Path::new(&start.binding.workspace_root).join(&start.binding.relative_cwd)
+        });
+        let snapshot = copy_project_workspace(
+            &source,
+            &root,
+            &rw_dir,
+            &rw_file,
+            &ro_file,
+            &mut pins,
+            start.timeout_secs,
+        )?;
+        let mut windows_path = vec![0u16; 32768];
+        let size =
+            unsafe { GetWindowsDirectoryW(windows_path.as_mut_ptr(), windows_path.len() as u32) };
+        if size == 0 || size as usize >= windows_path.len() {
+            return Err(error("windows_directory_failed"));
+        }
+        let windows_path = PathBuf::from(
+            String::from_utf16(&windows_path[..size as usize])
+                .map_err(|_| "agent_resources_windows_path_encoding")?,
+        );
+        let mut environment = environment(&root, &windows_path)?;
+        if let Some(port) = start.binding.local_service_port {
+            environment.insert("WEBCODEX_PORT".into(), port.to_string());
+        }
+        if profile
+            .files
+            .iter()
+            .any(|f| f.destination == "bin/browser/msedge.exe")
+        {
+            environment.insert(
+                "WEBCODEX_BROWSER_EXECUTABLE".into(),
+                absolute_path(&root.join("bin/browser/msedge.exe"))?,
+            );
+            environment.insert(
+                "PLAYWRIGHT_BROWSERS_PATH".into(),
+                absolute_path(&root.join("bin/browser"))?,
+            );
+            environment.insert(
+                "NODE_OPTIONS".into(),
+                "--preserve-symlinks --preserve-symlinks-main".into(),
+            );
+        }
+        validate_profile_manifest(&start.binding.resource_set_id, profile)?;
+        let local_network = start
+            .binding
+            .local_service_port
+            .map(|port| {
+                webcodex_process::windows_local_service::LocalServiceNetwork::install(
+                    &sid, &identity, port,
+                )
+            })
+            .transpose()?;
+        let network = local_network
+            .as_ref()
+            .map_or(webcodex_process::windows_lpac::LpacNetwork::None, |g| {
+                g.mode()
+            });
+        Ok(PreparedAgentResources {
+            native_host: false,
+            result_contract: None,
+            program: root.join(PROGRAM),
+            cwd: root.join("workspace"),
+            environment,
+            workspace_snapshot: Some(snapshot),
+            args: start.args.clone(),
+            proxy_requested: false,
+            network,
+            local_network,
+            sid,
+            _pins: pins,
+        })
+    }
+
     pub(super) fn prepare_inner(
         profile: &ValidatedProfile,
         start: &AgentExecutionStart,
@@ -2467,7 +2990,11 @@ mod windows {
         if !operator_probe {
             validate_execution_args(profile, start)?;
         }
-        let credential_loading = legacy_credential_loading(profile.reviewed_controls.as_ref());
+        let credential_loading = if profile.host_cli.is_some() {
+            profile.provider
+        } else {
+            legacy_credential_loading(profile.reviewed_controls.as_ref())
+        };
         let antigravity_files = credential_loading == Some(AgentCliProvider::Antigravity);
         if operator_probe || credential_loading == Some(AgentCliProvider::WorkBuddy) {
             let user_home = std::env::var_os("USERPROFILE")
@@ -2527,9 +3054,15 @@ mod windows {
         if antigravity_files {
             // The durable Job already owns cleanup intent before preparation.
             copy_antigravity_auth(&root, &owner, &package, &mut pins)?;
-            install_antigravity_controls(&root, &owner, &package, &mut pins)?;
+            if profile.host_cli.is_none() {
+                install_antigravity_controls(&root, &owner, &package, &mut pins)?;
+            }
         }
-        let workspace_snapshot = if let Some(source) = &start.workspace_source {
+        let workspace_snapshot = if let Some(source) = &start
+            .workspace_source
+            .as_ref()
+            .filter(|_| profile.host_cli.is_none())
+        {
             let writable_file = Descriptor::new(
                 &owner,
                 &package,
@@ -2555,21 +3088,33 @@ mod windows {
             None
         };
         Ok(PreparedAgentResources {
+            native_host: false,
             result_contract: profile
-                .reviewed_controls
+                .host_cli
                 .as_ref()
-                .and_then(|record| {
-                    record.adapter.clone().or_else(|| {
-                        webcodex_core::cli_adapter::cli_adapters(&[])
-                            .ok()?
-                            .into_iter()
-                            .find(|adapter| adapter.id == record.provider.id())
+                .map(|host| host.adapter.clone())
+                .or_else(|| {
+                    profile.reviewed_controls.as_ref().and_then(|record| {
+                        record.adapter.clone().or_else(|| {
+                            webcodex_core::cli_adapter::cli_adapters(&[])
+                                .ok()?
+                                .into_iter()
+                                .find(|adapter| adapter.id == record.provider.id())
+                        })
                     })
                 })
                 .and_then(|adapter| adapter.invocation?.result),
             workspace_snapshot,
             program: root.join(PROGRAM),
-            cwd: root.join("workspace"),
+            cwd: if profile.host_cli.is_some() {
+                start
+                    .workspace_source
+                    .as_ref()
+                    .map(|s| PathBuf::from(&s.root))
+                    .unwrap_or_else(|| root.join("workspace"))
+            } else {
+                root.join("workspace")
+            },
             environment,
             args,
             proxy_requested,
@@ -2578,6 +3123,7 @@ mod windows {
             } else {
                 webcodex_process::windows_lpac::LpacNetwork::None
             },
+            local_network: None,
             sid,
             _pins: pins,
         })

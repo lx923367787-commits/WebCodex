@@ -32,6 +32,182 @@ fn alice() -> RunnerAccess {
     auth_context(Some("alice"), false)
 }
 
+fn connection_status() -> webcodex_core::tool_connection::ToolConnectionRequest {
+    webcodex_core::tool_connection::ToolConnectionRequest {
+        action: webcodex_core::tool_connection::ConnectionAction::Status,
+        kind: webcodex_core::tool_connection::ConnectionKind::Mcp,
+        id: None,
+        entry: None,
+        args: Vec::new(),
+        cwd: None,
+        env: Default::default(),
+        headers: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn tool_connection_enqueue_requires_own_capability_and_polls_exact_payload() {
+    let registry = RunnerRegistry::default();
+    registry
+        .register(registration("instance-a", true))
+        .await
+        .unwrap();
+    let auth = alice();
+    assert!(registry
+        .enqueue_tool_connection(
+            "runner-config-control",
+            "instance-a",
+            connection_status(),
+            Some(&auth),
+            "test".into(),
+        )
+        .await
+        .unwrap_err()
+        .contains("capability_unavailable"));
+
+    // Connection management has its own feature; generic config reload is not
+    // a prerequisite and must not be selected by the shared dequeue fence.
+    let mut registration = registration("instance-a", true);
+    registration.capabilities.tool_connections = true;
+    registry.register(registration).await.unwrap();
+    {
+        let mut inner = registry.inner.lock().await;
+        let mut capabilities = RunnerCapabilities::default();
+        capabilities.tool_connections = true;
+        inner
+            .runners
+            .get_mut("runner-config-control")
+            .unwrap()
+            .runner_features = RunnerFeatureSet::try_from_registration(
+            &crate::test_support::current_runner_capabilities(capabilities),
+        )
+        .unwrap();
+    }
+    let bob = auth_context(Some("bob"), false);
+    assert!(registry
+        .enqueue_tool_connection(
+            "runner-config-control",
+            "instance-a",
+            connection_status(),
+            Some(&bob),
+            "test".into(),
+        )
+        .await
+        .is_err());
+    assert!(registry
+        .enqueue_tool_connection(
+            "runner-config-control",
+            "old-instance",
+            connection_status(),
+            Some(&auth),
+            "test".into(),
+        )
+        .await
+        .unwrap_err()
+        .contains("runner_replaced"));
+    let (request_id, _receiver) = registry
+        .enqueue_tool_connection(
+            "runner-config-control",
+            "instance-a",
+            connection_status(),
+            Some(&auth),
+            "test".into(),
+        )
+        .await
+        .unwrap();
+    let request = registry
+        .poll(RunnerPollRequest {
+            client_id: "runner-config-control".into(),
+            runner_instance_id: "instance-a".into(),
+        })
+        .await
+        .unwrap()
+        .expect("connection management reaches the exact Runner");
+    assert_eq!(request.request_id, request_id);
+    assert_eq!(
+        request.kind,
+        webcodex_core::tool_connection::TOOL_CONNECTION_KIND
+    );
+    assert!(request.command.is_empty());
+    assert!(request.cwd.is_none());
+    assert!(request.path.is_none());
+    let parsed: webcodex_core::tool_connection::ToolConnectionRequest =
+        serde_json::from_str(request.content.as_deref().unwrap()).unwrap();
+    assert_eq!(parsed, connection_status());
+}
+
+#[tokio::test]
+async fn tool_connection_dequeue_rejects_replaced_runner_and_lost_capability() {
+    for replace_instance in [true, false] {
+        let registry = RunnerRegistry::default();
+        let mut registration = registration("instance-a", false);
+        registration.capabilities.tool_connections = true;
+        registry.register(registration).await.unwrap();
+        let auth = alice();
+        let (_request_id, receiver) = registry
+            .enqueue_tool_connection(
+                "runner-config-control",
+                "instance-a",
+                connection_status(),
+                Some(&auth),
+                "test".into(),
+            )
+            .await
+            .unwrap();
+        {
+            // Isolate dequeue validation from registration's earlier draining.
+            let mut inner = registry.inner.lock().await;
+            let runner = inner.runners.get_mut("runner-config-control").unwrap();
+            if replace_instance {
+                runner.runner_instance_id = "instance-b".into();
+            } else {
+                runner.runner_features =
+                    RunnerFeatureSet::try_from_registration(
+                        &crate::test_support::current_runner_capabilities(
+                            RunnerCapabilities::default(),
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(registry
+            .poll(RunnerPollRequest {
+                client_id: "runner-config-control".into(),
+                runner_instance_id: if replace_instance {
+                    "instance-b"
+                } else {
+                    "instance-a"
+                }
+                .into(),
+            })
+            .await
+            .unwrap()
+            .is_none());
+        let response = receiver.await.unwrap();
+        assert!(!response.success);
+        assert_eq!(response.request_dispatched, Some(false));
+        assert_eq!(
+            response.command_execution_state,
+            Some(ShellCommandExecutionState::NotStarted)
+        );
+        let expected = if replace_instance {
+            "runner_replaced"
+        } else {
+            "capability_unavailable"
+        };
+        assert!(response
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains(expected)));
+        let inner = registry.inner.lock().await;
+        assert!(inner.pending_by_id.is_empty());
+        assert!(inner
+            .queues_by_runner
+            .get("runner-config-control")
+            .is_none_or(|queue| queue.is_empty()));
+    }
+}
+
 #[tokio::test]
 async fn runner_config_enqueue_requires_capability_exact_instance_and_closed_payload() {
     let registry = RunnerRegistry::default();

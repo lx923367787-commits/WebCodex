@@ -106,7 +106,10 @@ impl RunnerRegistry {
                         &pending.operation,
                         pending.expected_runner_config_runner_instance_id.as_deref(),
                     ) {
-                        (RunnerOperation::RunnerConfig(_), Some(expected)) => {
+                        (
+                            RunnerOperation::RunnerConfig(_) | RunnerOperation::ToolConnection(_),
+                            Some(expected),
+                        ) => {
                             let Some(runner) = inner.runners.get(&body.client_id) else {
                                 return Some((
                                     "runner_replaced",
@@ -121,16 +124,23 @@ impl RunnerRegistry {
                                         .to_string(),
                                 ));
                             }
-                            (!runner
-                                .runner_features
-                                .supports(RunnerFeature::RunnerConfigControl))
+                            (!runner.runner_features.supports(
+                                if matches!(pending.operation, RunnerOperation::ToolConnection(_)) {
+                                    RunnerFeature::ToolConnections
+                                } else {
+                                    RunnerFeature::RunnerConfigControl
+                                },
+                            ))
                             .then_some((
                                 "capability_unavailable",
                                 "Runner config-control capability changed before dispatch"
                                     .to_string(),
                             ))
                         }
-                        (RunnerOperation::RunnerConfig(_), None) => Some((
+                        (
+                            RunnerOperation::RunnerConfig(_) | RunnerOperation::ToolConnection(_),
+                            None,
+                        ) => Some((
                             "runner_replaced",
                             "Runner config exact-process fence is missing".to_string(),
                         )),
@@ -575,7 +585,11 @@ impl RunnerRegistry {
                 continue;
             }
             if let Some(error) = inner.pending_by_id.get(&request_id).and_then(|pending| {
-                crate::agent_execution::dispatch_fence(&inner, &pending.operation).err()
+                crate::agent_execution::dispatch_fence(&inner, &pending.operation)
+                    .err()
+                    .or_else(|| {
+                        crate::agent_program::dispatch_fence(&inner, &pending.operation).err()
+                    })
             }) {
                 // A delayed isolated start cannot move to another instance or
                 // cross a close. Preserve its original Job as unresolved.
@@ -723,7 +737,8 @@ impl RunnerRegistry {
             &pending.operation,
             RunnerOperation::AgentExecutionClose(_)
                 | RunnerOperation::Job(RunnerJobOperation::StartIsolatedProcess(_))
-        ) {
+        ) || matches!(&pending.operation,RunnerOperation::Job(job) if job.context().is_some_and(|c|c.agent_program.is_some()))
+        {
             return Err("agent_execution_typed_observation_required".into());
         }
         if !matches!(&pending.operation, RunnerOperation::CodingAgent(_))

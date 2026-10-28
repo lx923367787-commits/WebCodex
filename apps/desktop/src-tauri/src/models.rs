@@ -124,6 +124,7 @@ pub struct ReadinessSnapshot {
     pub runner: RunnerReadiness,
     pub exposure: ExposureReadiness,
     pub project: ProjectReadiness,
+    /// Compatibility field: Server + Runner readiness, not project task authority.
     pub runtime_ready: bool,
     pub ready_for_chatgpt: bool,
     pub summary_kind: ReadinessSummaryKind,
@@ -157,9 +158,8 @@ pub fn aggregate_readiness(
     exposure: ExposureReadiness,
     project: ProjectReadiness,
 ) -> ReadinessSnapshot {
-    let runtime_ready = server == ServerReadiness::Ready
-        && runner == RunnerReadiness::Ready
-        && project == ProjectReadiness::Ready;
+    // Service/connection availability is independent of any chat project.
+    let runtime_ready = server == ServerReadiness::Ready && runner == RunnerReadiness::Ready;
     let ready_for_chatgpt = runtime_ready && exposure == ExposureReadiness::RemoteReady;
     let (summary_kind, next_action_kind, summary, next_action) = if ready_for_chatgpt {
         (
@@ -197,13 +197,6 @@ pub fn aggregate_readiness(
             Some(ReadinessNextActionKind::StartRunner),
             "Runner is not connected".to_string(),
             Some("Start the Runner and wait for it to connect.".to_string()),
-        )
-    } else if project != ProjectReadiness::Ready {
-        (
-            ReadinessSummaryKind::ProjectNotReady,
-            Some(ReadinessNextActionKind::AddOrReloadProject),
-            "Project is not ready".to_string(),
-            Some("Prepare and activate the selected project.".to_string()),
         )
     } else if exposure == ExposureReadiness::Disabled || exposure == ExposureReadiness::LocalReady {
         (
@@ -622,9 +615,9 @@ mod tests {
             ExposureReadiness::RemoteReady,
             ProjectReadiness::None,
         );
-        assert!(!missing_project.runtime_ready);
+        assert!(missing_project.runtime_ready);
         assert!(missing_project.services_ready());
-        assert!(!missing_project.ready_for_chatgpt);
+        assert!(missing_project.ready_for_chatgpt);
 
         let local_only = aggregate_readiness(
             ServerReadiness::Ready,

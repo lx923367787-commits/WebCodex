@@ -23,8 +23,8 @@ fn optional_text(max: usize) -> Value {
 pub(crate) fn team_policy_schema() -> Value {
     let range = object(
         json!({
-            "min":{"type":"integer","minimum":0,"maximum":32},
-            "max":{"type":"integer","minimum":0,"maximum":32}
+            "min":{"type":"integer","minimum":0},
+            "max":{"type":"integer","minimum":0}
         }),
         &["min", "max"],
     );
@@ -32,7 +32,7 @@ pub(crate) fn team_policy_schema() -> Value {
         json!({
             "mode":{"type":"string","enum":["auto","custom"]},
             "subagents":range,"cli_per_agent":range,
-            "providers":{"type":"array","maxItems":32,"items":object(json!({
+            "providers":{"type":"array","items":object(json!({
                 "provider_id":provider(),"enabled":{"type":"boolean"},
                 "model":optional_text(256),"effort":optional_text(64)
             }), &["provider_id","enabled"])}
@@ -45,16 +45,16 @@ pub(crate) fn team_plan_schema() -> Value {
     let member = object(
         json!({
             "task_id":task_id(),
-            "cli_calls":{"type":"array","maxItems":32,"items":object(json!({
-                "provider_id":provider(),"model":text(256),"effort":{"anyOf":[text(64),{"type":"null"}],"description":"Explicit discovered effort, null for an effort-pinned Antigravity model slug or when unsupported, or project_policy to resolve the saved effort at expected_policy_revision. The selector requires an enabled provider and exact saved model; the frozen value is the actual effort or null."},
+            "cli_calls":{"type":"array","items":object(json!({
+                "provider_id":provider(),"model":{"anyOf":[text(256),{"type":"null"}],"description":"Omit or use null for the adapter-supported CLI configured/default model. Explicit names require discovery; null sends no model override."},"effort":{"anyOf":[text(64),{"type":"null"}],"description":"Omit or use null for the CLI/model default, an explicit discovered effort to override it, or project_policy to resolve the saved effort at expected_policy_revision. The selector requires an enabled provider and exact saved model; the frozen value is the actual effort or null."},
                 "inputs":{"type":"array","maxItems":8,"description":"Explicit immutable UTF-8 task material, at most 32 KiB serialized JSON total. Names are labels, not host paths; no filesystem access is granted.","items":object(json!({"name":text(128),"content":{"type":"string"}}), &["name","content"])},
-                "instruction":{"anyOf":[text(8192),{"type":"null"}],"description":"Manager-assigned CLI subtask text, not a command or authority grant. Must be nonblank, at most 8192 UTF-8 bytes and contain no NUL; newlines are allowed. Required and non-null for every call when this member has multiple calls. A sole call may omit it to inherit its AgentTask instruction."}
-            }), &["provider_id","model","effort"])}
+                "instruction":{"type":"string","minLength":1,"maxLength":8192,"description":"Independent task for this CLI instance, not a command or authority grant. Must be nonblank, at most 8192 UTF-8 bytes and contain no NUL; newlines are allowed. The source Agent execution goal is never inherited."}
+            }), &["provider_id","instruction"])}
         }),
         &["task_id", "cli_calls"],
     );
     object(
-        json!({"manager":member,"subagents":{"type":"array","maxItems":32,"items":member}}),
+        json!({"manager":member,"subagents":{"type":"array","items":member}}),
         &["manager", "subagents"],
     )
 }
@@ -114,9 +114,9 @@ pub fn team_cli_start_input_schema() -> Value {
     object(
         json!({
             "project":text(512),"root_task_id":task_id(),"source_task_id":task_id(),
-            "call_index":{"type":"integer","minimum":0,"maximum":31},
+            "call_index":{"type":"integer","minimum":0},
             "idempotency_key":text(128),
-            "fallback_thinking_profile_id":{"type":"string","minLength":1,"maxLength":128,"description":"Exact discovered ChatGPT thinking profile explicitly selected by the coordinating manager and frozen for this CLI attempt's recovery conversation. No implicit highest/default profile."},
+            "fallback_thinking_profile_id":{"type":"string","minLength":1,"maxLength":128,"description":"Omit or use the reserved value default to retain the recovery chat setting; otherwise use a fresh discovered Host profile ID. Frozen per attempt; default does not mean high or Pro. Host availability is checked when recovery is needed."},
             "timeout_secs":{"type":"integer","minimum":1,"maximum":3600,"default":900}
         }),
         &[
@@ -125,7 +125,6 @@ pub fn team_cli_start_input_schema() -> Value {
             "source_task_id",
             "call_index",
             "idempotency_key",
-            "fallback_thinking_profile_id",
         ],
     )
 }
@@ -142,14 +141,13 @@ pub fn team_agent_start_input_schema() -> Value {
         json!({
             "project":text(512), "root_task_id":task_id(), "source_task_id":task_id(),
             "idempotency_key":text(128),
-            "thinking_profile_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_.:-]+$","description":"Exact fresh Host thinking profile explicitly selected for this ordinary planned subagent. Replays retain the original choice."}
+            "thinking_profile_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_.:-]+$","description":"Optional page adjustment. Omit to keep page settings without catalog lookup, discovery or readback. Legacy default also leaves settings unchanged. Explicit IDs request a best-effort UI adjustment; failure does not fail dispatch. Replays retain the original request."}
         }),
         &[
             "project",
             "root_task_id",
             "source_task_id",
             "idempotency_key",
-            "thinking_profile_id",
         ],
     )
 }

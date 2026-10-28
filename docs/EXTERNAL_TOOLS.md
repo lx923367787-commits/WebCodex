@@ -75,3 +75,25 @@ Windows 普通聊天工具安装不再自动安装 Goal ACP；需要时在目标
 2026-10-25 审计确认：旧迁移包含独立 CLI，远端纠正版虽然去掉了它们，但 Goal ACP 依赖仍嵌套 Codex；当前打包源码也已排除此项。现有安装目录、已下载 ZIP 和历史 Release 附件不会因源码更新而自动变干净。本轮不把历史附件改称新规范产物，也不删除用户已安装的工具或登录资料。
 
 打包应从新目录准备输入。路径检查会拒绝已知账号状态、私有配置和模型执行器；它不是完整密钥扫描器，仍须检查文件内容、第三方工具的配置和许可证。通用依赖、适配器源码以及不含凭据的 Tunnel 程序可保留。检查通过或文件哈希一致，都不能作为“所有秘密绝不存在”或“新用户账号已经可用”的保证。
+
+隔离团队的普通程序入口为 `agent_process`，与 WorkBuddy/Gemini 等模型 CLI 的计划和预算分开。Server 从当前身份推导原 Task、项目和 Runner，保留幂等请求与真实 Job；Runner 只加载不带 provider、登录资料或代理配置的普通资源 profile，使用操作系统沙箱执行授权项目副本。`catalog` 必须报告当前 Runner 实际声明的 `agent_program_execution_v1` 能力；缺失能力不回退到宿主的任意执行。`observe` 返回实际输出和退出状态，`stop` 保留原 Job 与日志，未知状态不能记成成功。交接继续要求普通程序的终态证据。
+
+`scripts/prepare_python_program_resource.py --output <新目录>` 可从本机 Python 安装准备只含标准库、运行库和隔离搜索路径文件的资源清单；不复制 site-packages、登录配置或凭据，也不修改 Runner 配置。当前程序沙箱默认无网络，每个新 Job 使用独立项目副本；HTTP 服务、跨 Job 数据恢复和浏览器通道必须单独实现并验证后才能声明可用。普通 Python/SQLite 合成测试不代表业务应用已经通过验收。
+
+### Configured/default CLI model selection
+
+Team CLI calls may omit `model` or set it to `null` when the selected adapter explicitly supports its own configured/default selection. The frozen plan and receipt retain `null`; invocation omits the model flag entirely. Explicit names keep their original string encoding and still require discovery. Blank names and invented `default` aliases do not select this mode. Optional effort is omitted independently; with an unnamed model the Agent path currently accepts only the native default effort.
+
+Starting an explicit default selection skips the optional model-list query. A discovery call that cannot list models can also produce a `configured_default` provider projection only from an authenticated exact Runner resource with typed reviewed controls and a supporting adapter. The projection contains no invented model list and does not attest login or account entitlement. Missing resources, unsupported loaders, stale identities, policy model constraints, call budgets and unknown execution fences still apply. Actual model identity remains unknown unless the real CLI protocol supplies it.
+
+### Ordinary program browser verification
+
+`agent_process` keeps ordinary program starts in their existing OS sandbox. Its `browser` action is a separate fixed Runner controller using a fresh Chromium profile and Chromium page sandbox. The Agent supplies only its own live service `program_id`, bounded `steps`, a stable `idempotency_key`, and optional `timeout_secs` (default/max 30). The Runner derives the HTTP origin from the retained Job's kernel-owned loopback listener; no caller URL, JavaScript, Python, executable, profile, environment or output path is accepted. The helper permits HTTP requests only to that origin and blocks WebSockets/downloads/popups.
+
+JavaScript dialogs are recorded and dismissed by default; a click can explicitly use `accept_dialog=true` for confirmations from that click. Steps are `navigate` with a relative `path`, `click`/`text` with a CSS `selector`, `fill` with `selector` and `text`, `select` with `selector` and `value`, `expect_text` with `selector` and a nonblank `text` substring (bounded wait for asynchronous UI updates), or `screenshot` with no other fields. `browser_observe` reads the original `action_id`; `browser_image` reads one recorded screenshot using `action_id` and its zero-based `step` (omit for an action with exactly one screenshot), returning native image content over MCP. Images are bounded PNGs belonging to that action; reads do not rerun a browser.
+
+Server and Runner persist independent execution fences before external effects. A lost response is observed, never blindly resent. Failed actions can contain completed earlier steps; partial failures and process results are retained. Service exit and Runner shutdown stop the managed browser tree; terminal receipts require real exit/tree settlement. Browser history problems disable this optional adapter without disabling ordinary program execution.
+
+The operator configures the installed interpreter and browser under `[agent_execution_resources.browser]` with `python`, `python_sha256`, `browser`, and `browser_sha256`. These are trusted local configuration fields, not model inputs. The controller pins and hashes the executables, runs the compiled helper with Python isolated mode, clears inherited environment settings, and uses a private temporary home/profile. The installed Python needs Playwright. Never install the experimental LPAC Edge resource profiles as a verified browser backend.
+
+The native CodeBuddy 2.162.0 candidate loader `codebuddy-2.162.0-files-v2` uses `--setting-sources none`. Inspection of the exact installed executable found that an empty value is treated as absent before the source parser, while `none` selects no external settings scopes. The old v1 mapping and its review hashes remain readable; v2 requires its own bound control record and does not silently alter old attempts. This mapping and synthetic argv validation do not attest account availability or a real model execution.

@@ -1,32 +1,29 @@
-//! Persistent Runner-owned stdio MCP providers for the built-in MCP gateway.
-//!
-//! Each configured provider is initialized lazily at most once for this
-//! Runner process. A protocol/transport failure permanently closes that
-//! provider instance; it is never silently restarted under the same identity.
+//! Runner-owned MCP providers. Replacement is prepared before publication;
+//! in-flight calls retain their exact provider. Failed exchanges are never
+//! replayed, while a later request may establish a fresh transport session.
 
 use super::config::{McpGatewayConfig, McpGatewayProviderConfig, MCP_GATEWAY_MAX_CWD_BYTES};
 use super::shell::is_sensitive_env_key;
 use crate::mcp_gateway::{
-    validate_json_value, validate_request, validate_tool_result, validate_tools, McpGatewayContent,
-    McpGatewayDispatchState, McpGatewayProvider, McpGatewayRequest, McpGatewayResponse,
-    McpGatewayResponsePayload, McpGatewayTool, McpGatewayToolResult, MCP_GATEWAY_MAX_MESSAGE_BYTES,
+    validate_json_value, validate_request, validate_result_json_value, validate_tool_result,
+    validate_tools, McpGatewayContent, McpGatewayDispatchState, McpGatewayProvider,
+    McpGatewayRequest, McpGatewayResponse, McpGatewayResponsePayload, McpGatewayTool,
+    McpGatewayToolResult, MCP_GATEWAY_MAX_MESSAGE_BYTES,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{mpsc, Mutex, TryLockError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 use webcodex_process::ManagedChild;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-const PROVIDER_AVAILABLE: u8 = 0;
-const PROVIDER_FAILED: u8 = 1;
 const MCP_GATEWAY_MAX_IGNORED_NOTIFICATIONS: usize = 32;
 
 pub(crate) struct McpGatewayManager {
-    providers: BTreeMap<String, ProviderEntry>,
+    providers: Mutex<BTreeMap<String, Arc<ProviderEntry>>>,
     request_timeout: Duration,
     stopping: AtomicBool,
 }
@@ -34,11 +31,27 @@ pub(crate) struct McpGatewayManager {
 struct ProviderEntry {
     config: McpGatewayProviderConfig,
     instance_id: String,
-    failed: AtomicU8,
     session: Mutex<Option<ProviderConnection>>,
+    status: Mutex<ProviderStatus>,
 }
 
-struct ProviderConnection {
+struct ProviderStatus {
+    state: &'static str,
+    tool_count: Option<usize>,
+    last_error: Option<&'static str>,
+}
+
+impl Default for ProviderStatus {
+    fn default() -> Self {
+        Self {
+            state: "configured",
+            tool_count: None,
+            last_error: None,
+        }
+    }
+}
+
+struct StdioConnection {
     child: ManagedChild,
     stdin: ChildStdin,
     incoming: mpsc::Receiver<ReaderEvent>,
@@ -124,30 +137,44 @@ impl McpGatewayManager {
             .map(|provider| {
                 (
                     provider.id.clone(),
-                    ProviderEntry {
+                    Arc::new(ProviderEntry {
                         config: provider.clone(),
                         instance_id: uuid::Uuid::new_v4().simple().to_string(),
-                        failed: AtomicU8::new(PROVIDER_AVAILABLE),
                         session: Mutex::new(None),
-                    },
+                        status: Mutex::new(ProviderStatus::default()),
+                    }),
                 )
             })
             .collect();
         Self {
-            providers,
+            providers: Mutex::new(providers),
             request_timeout: Duration::from_secs(config.request_timeout_secs.clamp(1, 120)),
             stopping: AtomicBool::new(false),
         }
     }
 
-    /// Exact process-lifetime provider inventory projected in normal Runner
+    /// Exact configuration-generation inventory projected in normal Runner
     /// registration. Reading it does not start a provider process and does not
     /// expose executable, argv, environment, PID, stderr, or secret material.
     pub(crate) fn provider_inventory(&self) -> Vec<McpGatewayProvider> {
         self.providers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .values()
-            .map(ProviderEntry::advertisement)
+            .map(|provider| provider.advertisement())
             .collect()
+    }
+
+    pub(crate) fn matches_config(&self, config: &McpGatewayConfig) -> bool {
+        if self.request_timeout != Duration::from_secs(config.request_timeout_secs.clamp(1, 120)) {
+            return false;
+        }
+        let providers = self.providers.lock().unwrap_or_else(|p| p.into_inner());
+        providers.len() == config.providers.len()
+            && config
+                .providers
+                .iter()
+                .all(|p| providers.get(&p.id).is_some_and(|entry| entry.config == *p))
     }
 
     pub(crate) fn handle(&self, request: McpGatewayRequest) -> McpGatewayResponse {
@@ -179,6 +206,7 @@ impl McpGatewayManager {
                     |connection, timeout| connection.tools_list(timeout),
                 ) {
                     Ok(tools) => {
+                        provider.observe_tool_count(tools.len());
                         McpGatewayResponse::success(McpGatewayResponsePayload::Tools { tools })
                     }
                     Err(error) => provider_failure_response(error),
@@ -202,6 +230,7 @@ impl McpGatewayManager {
                         let tools = connection
                             .tools_list(timeout)
                             .map_err(ProviderFailure::preflight)?;
+                        provider.observe_tool_count(tools.len());
                         let Some(current) = tools.iter().find(|tool| tool.name == name) else {
                             return Err(ProviderFailure::not_started("provider_tool_missing"));
                         };
@@ -232,23 +261,156 @@ impl McpGatewayManager {
         &self,
         provider_id: &str,
         provider_instance_id: &str,
-    ) -> Option<&ProviderEntry> {
-        self.providers.get(provider_id).filter(|provider| {
-            provider.instance_id == provider_instance_id
-                && provider.failed.load(Ordering::SeqCst) == PROVIDER_AVAILABLE
+    ) -> Option<Arc<ProviderEntry>> {
+        self.providers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(provider_id)
+            .filter(|provider| provider.instance_id == provider_instance_id)
+            .cloned()
+    }
+
+    pub(crate) fn config(&self, id: &str) -> Option<McpGatewayProviderConfig> {
+        self.providers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .map(|provider| provider.config.clone())
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        config: &McpGatewayProviderConfig,
+    ) -> Result<PreparedMcpProvider, String> {
+        self.prepare_provider(config, true)
+    }
+
+    pub(crate) fn prepare_reconnect(
+        &self,
+        config: &McpGatewayProviderConfig,
+    ) -> Result<PreparedMcpProvider, String> {
+        self.prepare_provider(config, false)
+    }
+
+    fn prepare_provider(
+        &self,
+        config: &McpGatewayProviderConfig,
+        reuse: bool,
+    ) -> Result<PreparedMcpProvider, String> {
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err("runner_stopping".into());
+        }
+        super::config::validate_mcp_gateway_config(&McpGatewayConfig {
+            request_timeout_secs: self.request_timeout.as_secs(),
+            providers: vec![config.clone()],
+        })?;
+        let existing = self
+            .providers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&config.id)
+            .filter(|provider| reuse && provider.config == *config)
+            .cloned();
+        let provider = existing.unwrap_or_else(|| {
+            Arc::new(ProviderEntry {
+                config: config.clone(),
+                instance_id: uuid::Uuid::new_v4().simple().to_string(),
+                session: Mutex::new(None),
+                status: Mutex::new(ProviderStatus::default()),
+            })
+        });
+        let tools = provider
+            .with_connection(
+                provider.request_timeout(self.request_timeout),
+                |connection, timeout| connection.tools_list(timeout),
+            )
+            .map_err(|error| error.code.to_string())?;
+        provider.observe_tool_count(tools.len());
+        Ok(PreparedMcpProvider {
+            provider,
+            tool_count: tools.len(),
         })
+    }
+
+    /// Publication cannot fail. The caller persists first and
+    /// serializes configuration changes; old calls own their provider Arc.
+    pub(crate) fn commit(&self, prepared: PreparedMcpProvider) -> McpGatewayProvider {
+        let inventory = prepared.inventory();
+        let previous = self
+            .providers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(prepared.provider.config.id.clone(), prepared.provider);
+        drop(previous);
+        inventory
+    }
+
+    pub(crate) fn remove(&self, id: &str) -> bool {
+        let previous = self
+            .providers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(id);
+        let removed = previous.is_some();
+        drop(previous);
+        removed
+    }
+
+    pub(crate) fn connection_status(
+        &self,
+    ) -> Vec<webcodex_core::tool_connection::ToolConnectionStatus> {
+        self.providers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .map(|provider| {
+                let status = provider
+                    .status
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                webcodex_core::tool_connection::ToolConnectionStatus {
+                    id: provider.config.id.clone(),
+                    kind: webcodex_core::tool_connection::ConnectionKind::Mcp,
+                    state: status.state.to_string(),
+                    error_code: status.last_error.map(str::to_string),
+                    tool_count: status.tool_count,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn last_error(&self, id: &str) -> Option<&'static str> {
+        let provider = self
+            .providers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .cloned()?;
+        let status = provider
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        status.last_error
     }
 
     pub(crate) fn shutdown(&self) {
         if self.stopping.swap(true, Ordering::SeqCst) {
             return;
         }
-        for provider in self.providers.values() {
+        let providers: Vec<_> = self
+            .providers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        for provider in providers {
             let mut session = provider
                 .session
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             drop(session.take());
+            provider.observe_state("stopped", None);
         }
     }
 }
@@ -260,6 +422,22 @@ impl Drop for McpGatewayManager {
 }
 
 impl ProviderEntry {
+    fn observe_tool_count(&self, count: usize) {
+        self.status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .tool_count = Some(count);
+    }
+
+    fn observe_state(&self, state: &'static str, last_error: Option<&'static str>) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        status.state = state;
+        status.last_error = last_error;
+    }
+
     fn advertisement(&self) -> McpGatewayProvider {
         McpGatewayProvider {
             provider_id: self.config.id.clone(),
@@ -280,9 +458,6 @@ impl ProviderEntry {
         timeout: Duration,
         operation: impl FnOnce(&mut ProviderConnection, Duration) -> Result<T, ProviderFailure>,
     ) -> Result<T, ProviderFailure> {
-        if self.failed.load(Ordering::SeqCst) == PROVIDER_FAILED {
-            return Err(ProviderFailure::before_send("provider_unavailable"));
-        }
         let mut session = match self.session.try_lock() {
             Ok(session) => session,
             Err(TryLockError::WouldBlock) => {
@@ -293,12 +468,13 @@ impl ProviderEntry {
                 })
             }
             Err(TryLockError::Poisoned(_)) => {
-                self.failed.store(PROVIDER_FAILED, Ordering::SeqCst);
+                self.observe_state("error", Some("provider_unavailable"));
                 return Err(ProviderFailure::before_send("provider_unavailable"));
             }
         };
         let started = Instant::now();
         if session.is_none() {
+            self.observe_state("connecting", None);
             match ProviderConnection::spawn(&self.config, timeout) {
                 Ok(connection) => *session = Some(connection),
                 Err(mut error) => {
@@ -306,7 +482,7 @@ impl ProviderEntry {
                     // requested tools/list or tools/call. Even if initialize
                     // reached the child, the caller's operation did not.
                     error.dispatch_state = McpGatewayDispatchState::NotStarted;
-                    self.failed.store(PROVIDER_FAILED, Ordering::SeqCst);
+                    self.observe_state("error", Some(error.code));
                     return Err(error);
                 }
             }
@@ -315,7 +491,7 @@ impl ProviderEntry {
             .checked_sub(started.elapsed())
             .filter(|remaining| !remaining.is_zero())
         else {
-            self.failed.store(PROVIDER_FAILED, Ordering::SeqCst);
+            self.observe_state("error", Some("provider_timeout"));
             if let Some(mut connection) = session.take() {
                 connection.terminate();
             }
@@ -325,8 +501,11 @@ impl ProviderEntry {
             session.as_mut().expect("provider connection initialized"),
             remaining,
         );
+        match &result {
+            Ok(_) => self.observe_state("connected", None),
+            Err(error) => self.observe_state("error", Some(error.code)),
+        }
         if result.as_ref().is_err_and(|error| error.fatal) {
-            self.failed.store(PROVIDER_FAILED, Ordering::SeqCst);
             if let Some(mut connection) = session.take() {
                 connection.terminate();
             }
@@ -338,7 +517,13 @@ impl ProviderEntry {
 fn resolve_provider_environment(
     config: &McpGatewayProviderConfig,
 ) -> Result<Vec<(String, std::ffi::OsString)>, ProviderFailure> {
-    let mut resolved = Vec::with_capacity(config.env_from_env.len());
+    let mut resolved = Vec::with_capacity(config.env_from_env.len() + config.env.len());
+    for (destination, value) in &config.env {
+        if is_sensitive_env_key(destination) {
+            return Err(ProviderFailure::before_send("provider_env_forbidden"));
+        }
+        resolved.push((destination.clone(), std::ffi::OsString::from(value)));
+    }
     for (destination, source) in &config.env_from_env {
         // Keep the Runner transport/account secret invariant authoritative even
         // if a caller constructs config without going through load_config.
@@ -373,7 +558,210 @@ fn resolve_provider_cwd(
     }
 }
 
+#[path = "mcp_gateway/http.rs"]
+mod http;
+
+pub(crate) struct PreparedMcpProvider {
+    provider: Arc<ProviderEntry>,
+    tool_count: usize,
+}
+impl PreparedMcpProvider {
+    pub(crate) fn inventory(&self) -> McpGatewayProvider {
+        self.provider.advertisement()
+    }
+    pub(crate) fn tool_count(&self) -> usize {
+        self.tool_count
+    }
+}
+
+enum ProviderConnection {
+    Stdio(StdioConnection),
+    Http(http::HttpConnection),
+}
 impl ProviderConnection {
+    fn spawn(
+        config: &McpGatewayProviderConfig,
+        timeout: Duration,
+    ) -> Result<Self, ProviderFailure> {
+        if config.url.is_some() {
+            http::HttpConnection::connect(config, timeout).map(Self::Http)
+        } else {
+            StdioConnection::spawn(config, timeout).map(Self::Stdio)
+        }
+    }
+    fn request(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, ProviderFailure> {
+        match self {
+            Self::Stdio(connection) => connection.request(method, params, timeout),
+            Self::Http(connection) => connection.request(method, params, timeout),
+        }
+    }
+    fn terminate(&mut self) {
+        if let Self::Stdio(connection) = self {
+            connection.terminate();
+        }
+    }
+    fn tools_list(&mut self, timeout: Duration) -> Result<Vec<McpGatewayTool>, ProviderFailure> {
+        let deadline = Instant::now() + timeout;
+        let mut all_tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut cursors = std::collections::HashSet::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ProviderFailure::before_send("provider_timeout"));
+            }
+            let params = cursor
+                .as_ref()
+                .map(|value| json!({"cursor": value}))
+                .unwrap_or_else(|| json!({}));
+            let result = self.request("tools/list", params, remaining)?;
+            validate_json_value(
+                &result,
+                MCP_GATEWAY_MAX_MESSAGE_BYTES,
+                "provider tools response",
+            )
+            .map_err(|_| ProviderFailure::completed("invalid_provider_tools"))?;
+            let object = result
+                .as_object()
+                .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
+            cursor = match object.get("nextCursor") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) if !value.is_empty() && value.len() <= 4096 => {
+                    Some(value.clone())
+                }
+                _ => return Err(ProviderFailure::completed("invalid_provider_cursor")),
+            };
+            let raw_tools = object
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
+            let mut tools = Vec::with_capacity(raw_tools.len());
+            for raw in raw_tools {
+                let object = raw
+                    .as_object()
+                    .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
+                let name = object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
+                let title = object
+                    .get("title")
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))
+                    })
+                    .transpose()?;
+                let description = object
+                    .get("description")
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))
+                    })
+                    .transpose()?;
+                let input_schema = object
+                    .get("inputSchema")
+                    .cloned()
+                    .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
+                let output_schema = object.get("outputSchema").cloned();
+                let annotations = object.get("annotations").cloned();
+                let meta = object.get("_meta").cloned();
+                tools.push(McpGatewayTool {
+                    name: name.to_string(),
+                    title,
+                    description,
+                    input_schema,
+                    output_schema,
+                    annotations,
+                    meta,
+                });
+            }
+            all_tools.extend(tools);
+            validate_tools(&all_tools)
+                .map_err(|_| ProviderFailure::completed("invalid_provider_tools"))?;
+            crate::mcp_gateway::validate_response(&McpGatewayResponse::success(
+                McpGatewayResponsePayload::Tools {
+                    tools: all_tools.clone(),
+                },
+            ))
+            .map_err(|_| ProviderFailure::completed("invalid_provider_tools"))?;
+            match &cursor {
+                None => return Ok(all_tools),
+                Some(value) if !cursors.insert(value.clone()) || cursors.len() > 128 => {
+                    return Err(ProviderFailure::completed("invalid_provider_cursor"))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    fn tools_call(
+        &mut self,
+        name: &str,
+        arguments: Value,
+        timeout: Duration,
+    ) -> Result<McpGatewayToolResult, ProviderFailure> {
+        // Outer MCP caller metadata deliberately stops at the WebCodex trust
+        // boundary. Provider tools/call receives only gateway-owned fields.
+        let params = json!({"name": name, "arguments": arguments});
+        let result = self.request("tools/call", params, timeout)?;
+        validate_result_json_value(
+            &result,
+            MCP_GATEWAY_MAX_MESSAGE_BYTES,
+            "provider tool result",
+        )
+        .map_err(|_| ProviderFailure::completed("invalid_provider_result"))?;
+        let object = result
+            .as_object()
+            .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))?;
+        let raw_content = object
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))?;
+        let mut content = Vec::with_capacity(raw_content.len());
+        for item in raw_content {
+            let item = item
+                .as_object()
+                .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))?;
+            if item.get("type").and_then(Value::as_str) != Some("text") {
+                return Err(ProviderFailure::completed("unsupported_provider_content"));
+            }
+            let text = item
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))?;
+            content.push(McpGatewayContent::Text {
+                text: text.to_string(),
+            });
+        }
+        let result = McpGatewayToolResult {
+            content,
+            structured_content: object.get("structuredContent").cloned(),
+            is_error: object
+                .get("isError")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))
+                })
+                .transpose()?
+                .unwrap_or(false),
+        };
+        validate_tool_result(&result)
+            .map_err(|_| ProviderFailure::completed("invalid_provider_result"))?;
+        Ok(result)
+    }
+}
+
+impl StdioConnection {
     fn spawn(
         config: &McpGatewayProviderConfig,
         timeout: Duration,
@@ -451,134 +839,6 @@ impl ProviderConnection {
         validate_initialize_result(&initialized)?;
         connection.send_notification("notifications/initialized", json!({}))?;
         Ok(connection)
-    }
-
-    fn tools_list(&mut self, timeout: Duration) -> Result<Vec<McpGatewayTool>, ProviderFailure> {
-        let result = self.request("tools/list", json!({}), timeout)?;
-        validate_json_value(
-            &result,
-            MCP_GATEWAY_MAX_MESSAGE_BYTES,
-            "provider tools response",
-        )
-        .map_err(|_| ProviderFailure::completed("invalid_provider_tools"))?;
-        let object = result
-            .as_object()
-            .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
-        if object
-            .get("nextCursor")
-            .is_some_and(|cursor| !cursor.is_null())
-        {
-            return Err(ProviderFailure::completed(
-                "provider_pagination_unsupported",
-            ));
-        }
-        let raw_tools = object
-            .get("tools")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
-        let mut tools = Vec::with_capacity(raw_tools.len());
-        for raw in raw_tools {
-            let object = raw
-                .as_object()
-                .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
-            let name = object
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
-            let title = object
-                .get("title")
-                .map(|value| {
-                    value
-                        .as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))
-                })
-                .transpose()?;
-            let description = object
-                .get("description")
-                .map(|value| {
-                    value
-                        .as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))
-                })
-                .transpose()?;
-            let input_schema = object
-                .get("inputSchema")
-                .cloned()
-                .ok_or_else(|| ProviderFailure::completed("invalid_provider_tools"))?;
-            let output_schema = object.get("outputSchema").cloned();
-            let annotations = object.get("annotations").cloned();
-            let meta = object.get("_meta").cloned();
-            tools.push(McpGatewayTool {
-                name: name.to_string(),
-                title,
-                description,
-                input_schema,
-                output_schema,
-                annotations,
-                meta,
-            });
-        }
-        validate_tools(&tools).map_err(|_| ProviderFailure::completed("invalid_provider_tools"))?;
-        Ok(tools)
-    }
-
-    fn tools_call(
-        &mut self,
-        name: &str,
-        arguments: Value,
-        timeout: Duration,
-    ) -> Result<McpGatewayToolResult, ProviderFailure> {
-        // Outer MCP caller metadata deliberately stops at the WebCodex trust
-        // boundary. Provider tools/call receives only gateway-owned fields.
-        let params = json!({"name": name, "arguments": arguments});
-        let result = self.request("tools/call", params, timeout)?;
-        validate_json_value(
-            &result,
-            MCP_GATEWAY_MAX_MESSAGE_BYTES,
-            "provider tool result",
-        )
-        .map_err(|_| ProviderFailure::completed("invalid_provider_result"))?;
-        let object = result
-            .as_object()
-            .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))?;
-        let raw_content = object
-            .get("content")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))?;
-        let mut content = Vec::with_capacity(raw_content.len());
-        for item in raw_content {
-            let item = item
-                .as_object()
-                .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))?;
-            if item.get("type").and_then(Value::as_str) != Some("text") {
-                return Err(ProviderFailure::completed("unsupported_provider_content"));
-            }
-            let text = item
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))?;
-            content.push(McpGatewayContent::Text {
-                text: text.to_string(),
-            });
-        }
-        let result = McpGatewayToolResult {
-            content,
-            structured_content: object.get("structuredContent").cloned(),
-            is_error: object
-                .get("isError")
-                .map(|value| {
-                    value
-                        .as_bool()
-                        .ok_or_else(|| ProviderFailure::completed("invalid_provider_result"))
-                })
-                .transpose()?
-                .unwrap_or(false),
-        };
-        validate_tool_result(&result)
-            .map_err(|_| ProviderFailure::completed("invalid_provider_result"))?;
-        Ok(result)
     }
 
     fn request(
@@ -736,7 +996,7 @@ impl ProviderConnection {
     }
 }
 
-impl Drop for ProviderConnection {
+impl Drop for StdioConnection {
     fn drop(&mut self) {
         self.terminate();
     }

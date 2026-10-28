@@ -1138,7 +1138,7 @@ fn spawn_piped_ssh_child(command: &mut Command) -> std::io::Result<PipedSshChild
     }
 }
 
-fn piped_ssh_process_mut(child: &mut PipedSshChild) -> &mut Child {
+fn piped_ssh_process_mut(child: &mut PipedSshChild) -> &mut webcodex_process::ManagedChildIo {
     #[cfg(unix)]
     {
         child

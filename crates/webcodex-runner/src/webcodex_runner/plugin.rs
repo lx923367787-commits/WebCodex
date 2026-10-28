@@ -31,6 +31,8 @@ use webcodex_process::ManagedChild;
 #[path = "plugin_runtime_lifecycle.rs"]
 mod runtime_lifecycle;
 use runtime_lifecycle::{ProcessCustody, RuntimeState};
+#[path = "plugin_single_provider.rs"]
+pub(crate) mod single_provider;
 
 const PLUGIN_READER_QUEUE: usize = 16;
 const PLUGIN_WRITER_QUEUE: usize = 1;
@@ -54,7 +56,6 @@ pub(crate) struct PluginManager {
 struct CommittedState {
     providers: BTreeMap<String, Arc<ProviderEntry>>,
     config: PluginConfig,
-    environment: PluginEnvironmentSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +80,16 @@ struct PluginProfileEnvironment {
 }
 
 impl PluginEnvironmentSnapshot {
+    fn for_provider(shell: &ShellConfig, provider: &PluginProviderConfig) -> Self {
+        Self::from_config(
+            shell,
+            &PluginConfig {
+                request_timeout_secs: 30,
+                providers: vec![provider.clone()],
+            },
+        )
+    }
+
     fn from_config(shell: &ShellConfig, plugins: &PluginConfig) -> Self {
         let mut profile_names = BTreeSet::new();
         let uses_default_profile = plugins
@@ -144,6 +155,7 @@ impl PluginEnvironmentSnapshot {
 
 struct ProviderEntry {
     config: PluginProviderConfig,
+    environment: PluginEnvironmentSnapshot,
     instance_id: String,
     timeout: Duration,
     failed: AtomicBool,
@@ -358,10 +370,6 @@ impl PluginManager {
             committed: Mutex::new(CommittedState {
                 providers,
                 config: startup.plugins.clone(),
-                environment: PluginEnvironmentSnapshot::from_config(
-                    &startup.shell,
-                    &startup.plugins,
-                ),
             }),
             candidate_gate: Mutex::new(()),
             last_check_stderr: Mutex::new(BTreeMap::new()),
@@ -475,6 +483,16 @@ impl PluginManager {
                 else {
                     return stale_provider();
                 };
+                if provider.failed.load(Ordering::SeqCst)
+                    && provider.runtime.is_none()
+                    && self
+                        .recover_failed_provider(&provider_id, &provider_instance_id)
+                        .is_ok()
+                {
+                    // Recovery created a new instance. The caller must observe
+                    // it before creating a binding; an old identity never moves.
+                    return stale_provider();
+                }
                 match provider.frozen_tools() {
                     Ok(tools) => {
                         PluginGatewayResponse::success(PluginGatewayResponsePayload::Tools {
@@ -687,7 +705,7 @@ impl PluginManager {
         Ok(())
     }
 
-    fn provider_views(&self) -> Vec<PluginProviderView> {
+    pub(crate) fn provider_views(&self) -> Vec<PluginProviderView> {
         self.committed
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -889,8 +907,6 @@ impl PluginManager {
                 message: "Plugin manager is stopping; configuration was not replaced",
             };
         }
-        let candidate_environment =
-            PluginEnvironmentSnapshot::from_config(&candidate.shell, &candidate.plugins);
         {
             let committed = self
                 .committed
@@ -898,7 +914,12 @@ impl PluginManager {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !force_provider_restart
                 && committed.config == candidate.plugins
-                && committed.environment == candidate_environment
+                && candidate.plugins.providers.iter().all(|config| {
+                    committed.providers.get(&config.id).is_some_and(|provider| {
+                        provider.environment
+                            == PluginEnvironmentSnapshot::for_provider(&candidate.shell, config)
+                    })
+                })
             {
                 drop(committed);
                 after_plugin_commit();
@@ -994,8 +1015,11 @@ impl PluginManager {
                 };
             }
             committed.config = candidate.plugins.clone();
-            committed.environment = candidate_environment;
-            std::mem::replace(&mut committed.providers, prepared)
+            let retired = std::mem::replace(&mut committed.providers, prepared);
+            for provider in retired.values() {
+                provider.retire("plugin_provider_replaced");
+            }
+            retired
         };
         // The caller's HotConfig generation must be committed before activation.
         // No manager map lock is held across that callback or provider IO.
@@ -1120,6 +1144,9 @@ impl ProviderEntry {
         };
         // Closing may have begun after the first check but before this session
         // was acquired. Existing Arc holders cannot cross that admission fence.
+        if self.failed.load(Ordering::SeqCst) {
+            return Err(ProviderFailure::not_started("plugin_provider_unavailable"));
+        }
         if !self.runtime_allows_business() {
             return Err(ProviderFailure::not_started("plugin_runtime_not_active"));
         }
@@ -1324,6 +1351,7 @@ fn prepare_provider(
     let process = Arc::new(ProviderProcess::new());
     let entry = Arc::new(ProviderEntry {
         config: config.clone(),
+        environment: PluginEnvironmentSnapshot::for_provider(shell, config),
         instance_id: uuid::Uuid::new_v4().simple().to_string(),
         timeout: config
             .timeout_secs
@@ -1358,7 +1386,7 @@ fn prepare_provider(
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let environment = match PreparedExecutionEnvironment::prepare(
+    let mut environment = match PreparedExecutionEnvironment::prepare(
         generation,
         shell,
         config.profile.as_deref(),
@@ -1381,6 +1409,7 @@ fn prepare_provider(
             );
         }
     };
+    environment.apply_env_overrides(&config.env);
     let mut command = match environment.native_command(&config.command, &config.args, &cwd) {
         Ok(command) => command,
         Err(error) => {

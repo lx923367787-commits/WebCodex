@@ -60,6 +60,17 @@ class OrdinaryDispatchTests(unittest.TestCase):
         self.assertFalse(result["business_verified"])
         self.assertEqual(set(self.control.records[0]), {"team_agent_attempt_id", "dispatch_attempt_id", "request_id", "state", "reason", "response_observed"})
 
+    def test_no_profile_and_failed_adjustment_are_dispatched(self):
+        self.control.envelope["thinking_profile_id"] = ""
+        observed = chat_state()
+        observed.pop("requested_thinking_profile")
+        observed["thinking_adjustment"] = {"status": "not_requested"}
+        self.service.spawn_chat_task.return_value = observed
+        result = self.dispatch()
+        self.assertEqual(result["state"], "dispatched")
+        self.assertEqual(result["chat_state"]["thinking_adjustment"]["status"], "not_requested")
+        self.assertEqual(self.control.records[0]["state"], "dispatched")
+
     def test_replay_reads_original_identity_without_spawning_again(self):
         first = self.dispatch()
         self.control.envelope["request_id"] = None  # Lost Server receipt, retained claim.
@@ -143,7 +154,7 @@ class OrdinaryDispatchTests(unittest.TestCase):
         self.assertEqual(result["state"], "cancel_requested")
 
     def test_invalid_profile_source_fence_and_identity_never_default_or_spawn(self):
-        for updates in ({"thinking_profile_id": None}, {"thinking_profile_id": ""},
+        for updates in ({"thinking_profile_id": None}, {"thinking_profile_id": "../bad"},
                         {"source_task_id": ENVELOPE["root_task_id"]}, {"dispatch_attempt_id": "not-a-fence"},
                         {"request_id": str(uuid.uuid4())}, {"dispatch_permitted": "true"},
                         {"task": "x" * 12000}, {"task": "\ud800"}):

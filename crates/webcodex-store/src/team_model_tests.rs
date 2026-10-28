@@ -38,6 +38,40 @@ fn enroll(
     source: Option<&VerifiedAgentRun>,
     key: &str,
 ) -> VerifiedAgentRun {
+    enroll_with_budget(
+        db,
+        task,
+        purpose,
+        source,
+        key,
+        if purpose == AgentEnrollmentPurpose::Manager {
+            3
+        } else {
+            1
+        },
+    )
+}
+
+fn enroll_with_budget(
+    db: &Database,
+    task: &str,
+    purpose: AgentEnrollmentPurpose,
+    source: Option<&VerifiedAgentRun>,
+    key: &str,
+    budget: u32,
+) -> VerifiedAgentRun {
+    enroll_with_limits(db, task, purpose, source, key, budget, 1)
+}
+
+fn enroll_with_limits(
+    db: &Database,
+    task: &str,
+    purpose: AgentEnrollmentPurpose,
+    source: Option<&VerifiedAgentRun>,
+    key: &str,
+    budget: u32,
+    max_subagents: u32,
+) -> VerifiedAgentRun {
     let now = chrono::Utc::now().timestamp_millis();
     let mut issued = db
         .issue_agent_enrollment(
@@ -53,15 +87,11 @@ fn enroll(
                 room_ids: vec![],
                 policy: AgentEnrollmentPolicy {
                     max_subagents: if purpose == AgentEnrollmentPurpose::Manager {
-                        1
+                        max_subagents
                     } else {
                         0
                     },
-                    max_cli_calls: if purpose == AgentEnrollmentPurpose::Manager {
-                        3
-                    } else {
-                        1
-                    },
+                    max_cli_calls: budget,
                 },
                 expires_at_unix_ms: now + 60_000,
             },
@@ -202,33 +232,13 @@ fn assigned_team_registration_checks_child_budget_when_aggregate_and_project_all
         manager: member(&root, 1),
         subagents: vec![member(&child, 2)],
     };
-    // Project permits up to two per member and the manager permits three in
-    // total; this must still fail because this child's frozen ceiling is one.
-    assert_eq!(
-        db.register_agent_team_plan(&manager, &root, 0, excess, "child-over-limit")
-            .unwrap_err()
-            .code(),
-        "agent_team_budget_exceeded"
-    );
+    db.register_agent_team_plan(&manager, &root, 0, excess, "child-over-old-limit")
+        .unwrap();
     assert_eq!(
         db.list_agent_team_plans(&manager, &root, 0, 20)
             .unwrap()
             .total_count,
-        0
-    );
-    db.register_agent_team_plan(
-        &manager,
-        &root,
-        0,
-        plan(&root, &child),
-        "valid-after-denial",
-    )
-    .unwrap();
-    assert_eq!(
-        db.list_agent_team_receipts(&manager, &root, 0, 20)
-            .unwrap()
-            .total_count,
-        0
+        1
     );
 }
 
@@ -265,15 +275,6 @@ fn assigned_team_registration_enforces_exact_role_delegation_and_total_budget() 
     assert!(db
         .register_agent_team_plan(&manager, &root, 0, plan(&root, &unrelated), "not-delegated")
         .is_err());
-    let mut excess = plan(&root, &child);
-    let extra = excess.subagents[0].cli_calls[0].clone();
-    excess.subagents[0].cli_calls.push(extra);
-    assert_eq!(
-        db.register_agent_team_plan(&manager, &root, 0, excess, "too-many-cli")
-            .unwrap_err()
-            .code(),
-        "agent_team_budget_exceeded"
-    );
     let registered = db
         .register_agent_team_plan(&manager, &root, 0, plan(&root, &child), "valid")
         .unwrap();
@@ -294,8 +295,53 @@ fn assigned_team_registration_enforces_exact_role_delegation_and_total_budget() 
         .unwrap()
         .plans
         .is_empty());
-    assert!(db.read_agent_team_plan(&child_run, &root, 0, 20).is_err());
-    assert!(db.read_agent_team_task(&manager, &child).is_err());
+    let child_view = db.read_agent_team_plan(&child_run, &root, 0, 20).unwrap();
+    assert!(child_view
+        .tasks
+        .iter()
+        .find(|task| task.task_id == root)
+        .unwrap()
+        .brief
+        .is_empty());
+    assert!(!child_view
+        .tasks
+        .iter()
+        .find(|task| task.task_id == child)
+        .unwrap()
+        .brief
+        .is_empty());
+    let manager_view = db.read_agent_team_plan(&manager, &root, 0, 20).unwrap();
+    assert!(!manager_view
+        .tasks
+        .iter()
+        .find(|task| task.task_id == root)
+        .unwrap()
+        .brief
+        .is_empty());
+    assert!(manager_view
+        .tasks
+        .iter()
+        .find(|task| task.task_id == child)
+        .unwrap()
+        .brief
+        .is_empty());
+    assert!(members(&manager_view.plan.plan).all(|member| member
+        .cli_calls
+        .iter()
+        .all(|call| call.instruction.is_none())));
+    assert!(db
+        .read_agent_team_task(&manager, &child)
+        .unwrap()
+        .brief
+        .is_empty());
+    let human_view = db
+        .read_office_team_plan(&owner(), PROJECT, &root, 0, 20)
+        .unwrap();
+    assert!(human_view.tasks.iter().all(|task| !task.brief.is_empty()));
+    assert!(members(&human_view.plan.plan).all(|member| member
+        .cli_calls
+        .iter()
+        .all(|call| call.instruction.is_some())));
     assert_eq!(
         db.read_agent_team_task(&child_run, &child).unwrap().title,
         "child"
@@ -397,18 +443,21 @@ fn assigned_team_receipts_are_scoped_paginated_and_never_replace_completion() {
     assert_eq!(first.receipts.total_count, 3);
     assert_eq!(first.receipts.receipts.len(), 1);
     assert_eq!(first.receipts.next_offset, Some(1));
-    assert!(!first.completion.minimums_satisfied);
+    assert!(first.completion.minimums_satisfied);
     assert_eq!(first.completion.confirmed_cli_calls, 1);
     let empty = db.read_agent_team_plan(&manager, &root, 3, 1).unwrap();
     assert!(empty.receipts.receipts.is_empty());
     assert_eq!(empty.receipts.total_count, 3);
-    assert!(!empty.completion.minimums_satisfied);
+    assert!(empty.completion.minimums_satisfied);
     assert_eq!(empty.completion.confirmed_cli_calls, 1);
     let own = db
         .list_agent_team_receipts(&child_run, &child, 0, 20)
         .unwrap();
-    assert_eq!(own.total_count, 1);
-    assert_eq!(own.receipts[0].source_task_id, child);
+    assert_eq!(own.total_count, 3);
+    assert!(own
+        .receipts
+        .iter()
+        .any(|receipt| receipt.source_task_id == root));
     assert!(db
         .list_agent_team_receipts(&child_run, &root, 0, 20)
         .is_err());
@@ -497,7 +546,12 @@ fn assigned_team_expired_member_delivery_preserves_reads_without_new_admission()
         None,
         "other-manager",
     );
-    assert!(db.read_agent_team_plan(&other, &root, 0, 20).is_err());
+    assert!(db
+        .read_agent_team_plan(&other, &root, 0, 20)
+        .unwrap()
+        .tasks
+        .iter()
+        .all(|task| task.brief.is_empty()));
     assert!(db.list_agent_team_receipts(&other, &root, 0, 20).is_err());
 }
 
@@ -539,7 +593,176 @@ fn assigned_team_reads_continue_while_draining_but_plan_mutations_are_fenced() {
 }
 
 #[test]
-fn operator_cli_round_preserves_history_and_requires_stopped_slots_and_exact_team() {
+fn operator_cli_round_unfunded_expired_peer_does_not_block_enrolled_member() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open(&temp.path().join("pending-peer.db")).unwrap();
+    let root = task(&db, "root");
+    let child = task(&db, "funded-member");
+    let pending = task(&db, "pending-peer");
+    let manager = enroll_with_limits(
+        &db,
+        &root,
+        AgentEnrollmentPurpose::Manager,
+        None,
+        "manager",
+        3,
+        2,
+    );
+    let worker = enroll_with_budget(
+        &db,
+        &child,
+        AgentEnrollmentPurpose::Member,
+        Some(&manager),
+        "member",
+        0,
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+    let issued = db
+        .issue_agent_enrollment(
+            NewAgentEnrollment {
+                purpose: AgentEnrollmentPurpose::Member,
+                owner_user: OWNER.into(),
+                project: PROJECT.into(),
+                principal_key: "office-principal".into(),
+                task_id: pending.clone(),
+                task_directory: format!("workspace/{pending}"),
+                brief: "Pending public assignment".into(),
+                inputs: vec![],
+                room_ids: vec![],
+                policy: AgentEnrollmentPolicy {
+                    max_subagents: 0,
+                    max_cli_calls: 0,
+                },
+                expires_at_unix_ms: now + 60_000,
+            },
+            Some(&manager),
+            "pending",
+            now,
+        )
+        .unwrap();
+    let base = TeamPlanInput {
+        manager: member(&root, 0),
+        subagents: vec![member(&child, 0), member(&pending, 0)],
+    };
+    db.register_agent_team_plan(&manager, &root, 0, base.clone(), "base")
+        .unwrap();
+    // Expiry is time, not revoked ownership. Preserve the original unknown
+    // delivery and pending run while granting only the other member's slot.
+    db.conn.lock().unwrap().execute("UPDATE wc_agent_enrollments SET delivery_expires_at_unix_ms=0,delivery_state='delivery_unknown' WHERE enrollment_id=?1", [&issued.enrollment_id]).unwrap();
+    let mut round = base.clone();
+    round.subagents[0] = member(&child, 1);
+    let mut invalid = round.clone();
+    invalid.subagents[1] = member(&pending, 1);
+    assert_eq!(
+        db.register_operator_team_cli_round(OWNER, &root, 0, 0, invalid, "invalid")
+            .unwrap_err()
+            .code(),
+        "agent_delegated_assignment_ambiguous"
+    );
+    let grant = db
+        .register_operator_team_cli_round(OWNER, &root, 0, 0, round, "grant")
+        .unwrap();
+    assert_eq!(grant.first_call_indices[&pending], 0);
+    assert!(grant.plan.subagents[1].cli_calls.is_empty());
+    db.read_agent_cli_planned_slot(&worker, &root, &child, 0)
+        .unwrap();
+    let conn = db.conn.lock().unwrap();
+    let retained: (String, String, String) = conn.query_row("SELECT e.state,e.delivery_state,r.state FROM wc_agent_enrollments e JOIN wc_agent_runs r ON r.run_id=e.run_id WHERE e.enrollment_id=?1", [&issued.enrollment_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(
+        retained,
+        ("issued".into(), "delivery_unknown".into(), "pending".into())
+    );
+    assert_eq!(plan_on(&conn, &owner(), &root).unwrap().plan, base);
+}
+
+#[test]
+fn operator_cli_round_funds_only_selected_zero_budget_member_and_preserves_original() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open(&temp.path().join("zero-budget-round.db")).unwrap();
+    let root = task(&db, "root");
+    let child = task(&db, "child");
+    let manager = enroll(&db, &root, AgentEnrollmentPurpose::Manager, None, "manager");
+    let worker = enroll_with_budget(
+        &db,
+        &child,
+        AgentEnrollmentPurpose::Member,
+        Some(&manager),
+        "child",
+        0,
+    );
+    let base = TeamPlanInput {
+        manager: member(&root, 0),
+        subagents: vec![member(&child, 0)],
+    };
+    db.register_agent_team_plan(&manager, &root, 0, base.clone(), "base")
+        .unwrap();
+    assert!(db
+        .authorize_agent_assignment(&worker, &child, crate::AgentAssignmentOperation::UseCli)
+        .is_ok());
+    assert!(db
+        .read_agent_cli_planned_slot(&worker, &root, &child, 0)
+        .is_err());
+    let round_plan = TeamPlanInput {
+        manager: member(&root, 0),
+        subagents: vec![member(&child, 2)],
+    };
+    assert!(db
+        .register_agent_team_plan(&manager, &root, 0, round_plan.clone(), "agent-expand")
+        .is_err());
+    assert!(db
+        .register_operator_team_cli_round("another-owner", &root, 0, 0, round_plan.clone(), "grant")
+        .is_err());
+    let grant = db
+        .register_operator_team_cli_round(OWNER, &root, 0, 0, round_plan.clone(), "grant")
+        .unwrap();
+    assert_eq!(grant.first_call_indices[&child], 0);
+    assert_eq!(
+        db.register_operator_team_cli_round(OWNER, &root, 0, 0, round_plan, "grant")
+            .unwrap()
+            .round,
+        1
+    );
+    db.authorize_agent_assignment(&worker, &child, crate::AgentAssignmentOperation::UseCli)
+        .unwrap();
+    for index in 0..2 {
+        db.read_agent_cli_planned_slot(&worker, &root, &child, index)
+            .unwrap();
+    }
+    assert!(db
+        .read_agent_cli_planned_slot(&worker, &root, &child, 2)
+        .is_err());
+    assert!(db
+        .read_agent_cli_planned_slot(&manager, &root, &root, 0)
+        .is_err());
+    assert!(db
+        .read_agent_cli_planned_slot(&manager, &root, &child, 0)
+        .is_err());
+    assert_eq!(
+        db.read_agent_enrollment(&worker)
+            .unwrap()
+            .policy
+            .max_cli_calls,
+        0
+    );
+    let view = db.read_agent_team_plan(&manager, &root, 0, 20).unwrap();
+    let mut projected = view.plan.clone();
+    projected.plan = base;
+    project_agent_plan(&mut projected);
+    assert_eq!(view.plan.plan, projected.plan);
+    assert_eq!(view.completion.planned_cli_calls, 2);
+    drop(db);
+    let db = Database::open(&temp.path().join("zero-budget-round.db")).unwrap();
+    db.authorize_agent_assignment(&worker, &child, crate::AgentAssignmentOperation::UseCli)
+        .unwrap();
+    db.read_agent_cli_planned_slot(&worker, &root, &child, 1)
+        .unwrap();
+    assert!(db
+        .read_agent_cli_planned_slot(&worker, &root, &child, 2)
+        .is_err());
+}
+
+#[test]
+fn operator_cli_round_preserves_history_and_exact_team() {
     let temp = tempfile::tempdir().unwrap();
     let db = Database::open(&temp.path().join("rounds.db")).unwrap();
     let root = task(&db, "root");
@@ -558,12 +781,6 @@ fn operator_cli_round_preserves_history_and_requires_stopped_slots_and_exact_tea
     assert!(db
         .register_operator_team_cli_round("other-owner", &root, 0, 0, base.clone(), "round")
         .is_err());
-    assert_eq!(
-        db.register_operator_team_cli_round(OWNER, &root, 0, 0, base.clone(), "round")
-            .unwrap_err()
-            .code(),
-        "team_round_previous_pending"
-    );
     for (source, index) in [(&root, 0), (&root, 1), (&child, 0)] {
         let a = db
             .reserve_team_cli_attempt(
@@ -596,12 +813,6 @@ fn operator_cli_round_preserves_history_and_requires_stopped_slots_and_exact_tea
         )
         .unwrap();
     }
-    let mut extra = base.clone();
-    let duplicate = extra.subagents[0].cli_calls[0].clone();
-    extra.subagents[0].cli_calls.push(duplicate);
-    assert!(db
-        .register_operator_team_cli_round(OWNER, &root, 0, 0, extra, "excess")
-        .is_err());
     let mut next = base.clone();
     next.subagents[0].cli_calls[0].inputs = vec![crate::AgentEnrollmentInput {
         name: "material".into(),
@@ -626,7 +837,10 @@ fn operator_cli_round_preserves_history_and_requires_stopped_slots_and_exact_tea
         .register_operator_team_cli_round(OWNER, &root, 0, 0, next.clone(), "new-key")
         .is_err());
     let view = db.read_agent_team_plan(&manager, &root, 0, 20).unwrap();
-    assert_eq!(view.plan.plan, base);
+    let mut projected = view.plan.clone();
+    projected.plan = base;
+    project_agent_plan(&mut projected);
+    assert_eq!(view.plan.plan, projected.plan);
     assert_eq!(view.cli_rounds.len(), 1);
     assert_eq!(view.receipts.total_count, 3);
     assert_eq!(view.completion.planned_cli_calls, 6);
@@ -755,8 +969,10 @@ fn operator_cli_round_resolves_saved_efforts_and_replays_original_policy_revisio
             .code(),
         "team_idempotency_conflict"
     );
+    let mut projected = db.read_team_plan(&owner(), &root).unwrap();
+    project_agent_plan(&mut projected);
     assert_eq!(
-        serde_json::to_value(db.read_team_plan(&owner(), &root).unwrap()).unwrap(),
+        serde_json::to_value(projected).unwrap(),
         serde_json::to_value(original.plan).unwrap()
     );
     assert_eq!(
@@ -766,5 +982,335 @@ fn operator_cli_round_resolves_saved_efforts_and_replays_original_policy_revisio
         )
         .unwrap(),
         serde_json::to_value(stopped).unwrap()
+    );
+}
+
+#[test]
+fn shared_team_lifecycle_exposes_peer_status_without_goal_memory_or_acceptance() {
+    use serde_json::json;
+    use webcodex_core::host_goal::HostGoalPlan;
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open(&temp.path().join("shared-lifecycle.db")).unwrap();
+    let root = task(&db, "shared-manager");
+    let child = db
+        .create_agent_task(
+            &owner(),
+            NewAgentTask {
+                title: "Shared child title".into(),
+                instruction: "private-brief-sentinel".into(),
+                assignee_agent_id: None,
+                source_conversation_id: None,
+                source_message_id: None,
+                referenced_project_id: Some(PROJECT.into()),
+                idempotency_key: "lifecycle-child".into(),
+            },
+        )
+        .unwrap()
+        .task
+        .summary
+        .task_id;
+    let manager = enroll(
+        &db,
+        &root,
+        AgentEnrollmentPurpose::Manager,
+        None,
+        "lifecycle-manager",
+    );
+    let worker = enroll(
+        &db,
+        &child,
+        AgentEnrollmentPurpose::Member,
+        Some(&manager),
+        "lifecycle-worker",
+    );
+    db.register_agent_team_plan(&manager, &root, 0, plan(&root, &child), "lifecycle-plan")
+        .unwrap();
+    db.start_agent_public_task(&worker, &child, "lifecycle-start")
+        .unwrap();
+    let context = db.ensure_agent_host_context(&worker, None).unwrap();
+    let goal_owner = worker.host_goal_owner_key();
+    let now = chrono::Utc::now().timestamp_millis();
+    let created = db
+        .create_host_goal_in_task_directory_in_context(
+            &goal_owner,
+            PROJECT,
+            "agent-private://private-path-sentinel",
+            &format!("workspace/{child}"),
+            "private-objective-sentinel",
+            "lifecycle-goal",
+            now,
+            Some(&context),
+        )
+        .unwrap()
+        .goal;
+    let planning = db.read_agent_team_task(&manager, &child).unwrap();
+    assert_eq!(
+        planning.goal_lifecycle.as_ref().unwrap()["goal_phase"],
+        "planning"
+    );
+    assert!(planning.brief.is_empty());
+    assert_eq!(planning.title, "Shared child title");
+    assert!(db
+        .read_host_goal_for_agent_run(&manager, &created.goal_id)
+        .is_err());
+    let criterion =
+        json!({"kind":"review","id":"check","description":"private-acceptance-sentinel"});
+    let private_plan: HostGoalPlan = serde_json::from_value(json!({
+        "objective":"private-plan-objective-sentinel","constraints":["private-constraint-sentinel"],
+        "deliverables":["private-plan-deliverable-sentinel"],"final_criteria":[criterion.clone()],
+        "nodes":[{"id":"node","title":"private-node-title-sentinel","work":"private-work-sentinel",
+            "outputs":["private-plan-output-sentinel"],"criterion_ids":["check"],"acceptance":[criterion],
+            "failure_action":"private-recovery-sentinel"}],
+        "state_management":{"facts":"private-facts-rule-sentinel","decisions":"private-decisions-rule-sentinel",
+            "issues":"private-issues-rule-sentinel","artifacts":"private-artifacts-rule-sentinel",
+            "checkpoint_triggers":["private-trigger-sentinel"],"resume_instructions":"private-resume-sentinel"}
+    })).unwrap();
+    let saved = db
+        .save_host_goal_plan_in_context(
+            &goal_owner,
+            &created.goal_id,
+            created.revision,
+            &private_plan,
+            None,
+            "save-private-plan",
+            now + 1,
+            Some(&context),
+        )
+        .unwrap();
+    let mut state = saved.goal.state.clone();
+    state
+        .facts
+        .insert("memory".into(), "private-memory-sentinel".into());
+    state.next_step = "private-next-step-sentinel".into();
+    db.bind_host_goal_window_in_context(
+        &goal_owner,
+        worker.run_id(),
+        &crate::HostGoalWindowBinding {
+            goal_id: created.goal_id.clone(),
+            project: PROJECT.into(),
+            project_root: created.project_root.clone(),
+            context_epoch: worker.run_id().into(),
+        },
+        Some(&context),
+    )
+    .unwrap();
+    db.checkpoint_host_goal_with_request_in_context(
+        &goal_owner,
+        &created.goal_id,
+        saved.goal.revision,
+        None,
+        &state,
+        crate::HostGoalCheckpointAction::Handoff,
+        "private-checkpoint-reason-sentinel",
+        "checkpoint",
+        "checkpoint-hash",
+        &[],
+        now + 2,
+        Some(&context),
+        &[],
+    )
+    .unwrap();
+    let handoff = db
+        .read_host_goal_handoff(&goal_owner, &created.goal_id)
+        .unwrap()
+        .unwrap();
+    let begun = db
+        .begin_host_goal_handoff_attempt(
+            &goal_owner,
+            &created.goal_id,
+            &handoff.handoff_id,
+            None,
+            now + 3,
+            60,
+        )
+        .unwrap();
+    db.fail_host_goal_handoff_attempt(
+        &goal_owner,
+        &created.goal_id,
+        &handoff.handoff_id,
+        begun.attempt_id.as_deref().unwrap(),
+        "private-failure-reason-sentinel",
+        now + 4,
+    )
+    .unwrap();
+    let shared = db.read_agent_team_task(&manager, &child).unwrap();
+    let lifecycle = shared.goal_lifecycle.as_ref().unwrap();
+    assert_eq!(lifecycle["goal_id"], created.goal_id);
+    assert_eq!(lifecycle["goal_phase"], saved.goal.phase.as_str());
+    assert_eq!(lifecycle["plan_version"], 1);
+    assert_eq!(
+        lifecycle["checkpoint_sequence"],
+        handoff.checkpoint_sequence
+    );
+    assert_eq!(lifecycle["handoff_attempt_count"], 1);
+    assert_eq!(lifecycle["handoff_failure_code"], "handoff_failed");
+    assert!(lifecycle["checkpoint_created_at"].is_i64());
+    let control = db
+        .read_host_goal_handoff_control_metadata(&goal_owner, &created.goal_id)
+        .unwrap();
+    assert_eq!(lifecycle, &control);
+    let view = db.read_agent_team_plan(&manager, &root, 0, 20).unwrap();
+    assert_eq!(
+        view.tasks
+            .iter()
+            .find(|task| task.task_id == child)
+            .unwrap()
+            .goal_lifecycle
+            .as_ref(),
+        Some(lifecycle)
+    );
+    for output in [
+        serde_json::to_value(&shared).unwrap(),
+        serde_json::to_value(&view).unwrap(),
+        control,
+    ] {
+        assert!(!output.to_string().contains("private-"));
+    }
+    let own = db
+        .read_host_goal_for_agent_run(&worker, &created.goal_id)
+        .unwrap();
+    assert_eq!(own.0.state.facts["memory"], "private-memory-sentinel");
+    assert_eq!(own.1.unwrap().plan.final_criteria[0].id(), "check");
+    let mut foreign = owner();
+    foreign.digest = format!("wc_commprincipal_{}", "0".repeat(64));
+    assert!(db
+        .read_office_team_plan(&foreign, PROJECT, &root, 0, 20)
+        .is_err());
+    assert!(db
+        .read_office_team_plan(&owner(), "agent:runner:other", &root, 0, 20)
+        .is_err());
+}
+
+#[test]
+fn manager_cli_append_keeps_unknown_and_unused_slots_unchanged() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open(&temp.path().join("append.db")).unwrap();
+    let root = task(&db, "append-root");
+    let child = task(&db, "append-child");
+    let manager = enroll(
+        &db,
+        &root,
+        AgentEnrollmentPurpose::Manager,
+        None,
+        "append-manager",
+    );
+    let member_run = enroll(
+        &db,
+        &child,
+        AgentEnrollmentPurpose::Member,
+        Some(&manager),
+        "append-member",
+    );
+    db.register_agent_team_plan(&manager, &root, 0, plan(&root, &child), "base")
+        .unwrap();
+    let old = db
+        .reserve_team_cli_attempt(
+            &owner(),
+            PROJECT,
+            &root,
+            &root,
+            0,
+            "original",
+            "default",
+            Some(60),
+        )
+        .unwrap()
+        .attempt;
+    let old = db
+        .claim_team_cli_dispatch(&owner(), &old.attempt_id)
+        .unwrap()
+        .attempt;
+    let old = db
+        .bind_team_cli_job(&owner(), &old.attempt_id, "original-job")
+        .unwrap();
+    let old = db
+        .reconcile_team_cli_attempt(
+            &owner(),
+            &old.attempt_id,
+            old.observation_revision,
+            TeamCliObservation {
+                job_id: Some("original-job".into()),
+                dispatch_state: TeamCliDispatchState::Unknown,
+                execution_state: Some(ShellCommandExecutionState::OutcomeUnknown),
+                error_code: Some("original-uncertain".into()),
+                result_summary: None,
+            },
+        )
+        .unwrap();
+    let mut extra = TeamPlanInput {
+        manager: member(&root, 1),
+        subagents: vec![member(&child, 0)],
+    };
+    extra.manager.cli_calls[0].model = Default::default();
+    extra.manager.cli_calls[0].effort = None;
+    extra.manager.cli_calls[0].instruction =
+        Some("Independent three-directory CRUD validation".into());
+    assert!(db
+        .register_agent_team_cli_round(&member_run, &root, 0, 0, extra.clone(), "not-manager")
+        .is_err());
+    let added = db
+        .register_agent_team_cli_round(&manager, &root, 0, 0, extra.clone(), "append")
+        .unwrap();
+    assert_eq!(added.round, 1);
+    assert_eq!(added.first_call_indices[&root], 2);
+    assert_eq!(added.first_call_indices[&child], 1);
+    assert_eq!(
+        serde_json::to_value(db.read_team_cli_attempt(&owner(), &old.attempt_id).unwrap()).unwrap(),
+        serde_json::to_value(&old).unwrap()
+    );
+    assert_eq!(
+        db.list_team_cli_attempts(&owner(), PROJECT, Some(&root), 0, 20)
+            .unwrap()
+            .total_count,
+        1
+    );
+    let slot = db
+        .read_agent_cli_planned_slot(&manager, &root, &root, 2)
+        .unwrap();
+    assert!(slot.model.is_cli_default() && slot.effort.is_none());
+    assert_eq!(
+        slot.instruction,
+        "Independent three-directory CRUD validation"
+    );
+    let next = db
+        .reserve_team_cli_attempt(
+            &owner(),
+            PROJECT,
+            &root,
+            &root,
+            2,
+            "new-independent-call",
+            "default",
+            Some(60),
+        )
+        .unwrap()
+        .attempt;
+    assert_ne!(next.attempt_id, old.attempt_id);
+    assert_eq!(
+        db.register_agent_team_cli_round(&manager, &root, 0, 0, extra.clone(), "append")
+            .unwrap()
+            .round,
+        1
+    );
+    assert_eq!(
+        db.register_agent_team_cli_round(&manager, &root, 0, 0, extra.clone(), "different-key")
+            .unwrap_err()
+            .code(),
+        "team_round_revision_conflict"
+    );
+    assert_eq!(
+        db.revoke_agent_run(
+            manager.owner_user(),
+            manager.project(),
+            manager.agent_id(),
+            manager.run_id()
+        )
+        .unwrap_err()
+        .code(),
+        "agent_execution_close_required"
+    );
+    assert_eq!(
+        serde_json::to_value(db.read_team_cli_attempt(&owner(), &old.attempt_id).unwrap()).unwrap(),
+        serde_json::to_value(&old).unwrap()
     );
 }

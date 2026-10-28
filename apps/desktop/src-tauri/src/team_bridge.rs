@@ -13,6 +13,8 @@ pub(crate) enum TeamOfficeAction {
     PlanList,
     PlanRead,
     TaskCreate,
+    CliDiscover,
+    CliModels,
 }
 
 impl TeamOfficeAction {
@@ -23,6 +25,8 @@ impl TeamOfficeAction {
             "plan-list" => Self::PlanList,
             "plan-read" => Self::PlanRead,
             "task-create" => Self::TaskCreate,
+            "cli-discover" => Self::CliDiscover,
+            "cli-models" => Self::CliModels,
             "plan-register" | "plan-cancel" | "cli-start" | "cli-observe" | "agent-start"
             | "agent-observe" => {
                 return Err(bridge_error(
@@ -45,6 +49,8 @@ impl TeamOfficeAction {
             Self::PlanList => "plan-list",
             Self::PlanRead => "plan-read",
             Self::TaskCreate => "task-create",
+            Self::CliDiscover => "cli-discover",
+            Self::CliModels => "cli-models",
         }
     }
 
@@ -60,6 +66,8 @@ impl TeamOfficeAction {
                 "attempts_limit",
             ],
             Self::TaskCreate => &["project", "title", "instruction", "idempotency_key"],
+            Self::CliDiscover => &["project"],
+            Self::CliModels => &["project", "provider_id"],
         }
     }
 }
@@ -168,9 +176,6 @@ pub(super) fn successful_team_output(envelope: Value) -> DesktopResult<Value> {
                     "Server 团队策略已更新，请载入最新版本后再编辑。"
                 }
                 "team_task_not_found" => "Server 未找到当前账户可以访问的团队任务。",
-                "team_cli_budget_unsatisfiable" => {
-                    "最低分工超过每轮团队总预算 32 次 CLI，请减少最少人数或每人最少调用次数。"
-                }
                 _ => "Server 未接受这次团队操作，请检查项目权限和最新任务状态。",
             };
             Err(bridge_error(code, message))

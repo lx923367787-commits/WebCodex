@@ -934,6 +934,7 @@ fn enrollment_deadline_is_resampled_after_sqlite_lock_wait() {
 fn enrollment_path_goal_and_immutable_policy_intersections_survive_recovery() {
     let (_temp, db) = database();
     let manager = manager(&db);
+    assert_eq!(db.agent_enrollment_goal(&manager).unwrap(), None);
     assert_eq!(
         db.agent_enrollment_task_directory(&manager)
             .unwrap()
@@ -1004,6 +1005,10 @@ fn enrollment_path_goal_and_immutable_policy_intersections_survive_recovery() {
         .goal;
     db.read_host_goal_for_agent_run(&manager, &goal.goal_id)
         .unwrap();
+    assert_eq!(
+        db.agent_enrollment_goal(&manager).unwrap().as_deref(),
+        Some(goal.goal_id.as_str())
+    );
     assert!(db
         .create_host_goal_in_task_directory_in_context(
             &owner,
@@ -1027,6 +1032,11 @@ fn enrollment_path_goal_and_immutable_policy_intersections_survive_recovery() {
         .recover_isolated_agent("user-id", "project", manager.agent_id(), 1)
         .unwrap();
     let new = db.authenticate_agent_run(&recovered.token).unwrap();
+    assert!(db.agent_enrollment_goal(&manager).is_err());
+    assert_eq!(
+        db.agent_enrollment_goal(&new).unwrap().as_deref(),
+        Some(goal.goal_id.as_str())
+    );
     assert_eq!(
         db.read_agent_enrollment(&new).unwrap().purpose,
         AgentEnrollmentPurpose::Manager
@@ -1775,5 +1785,61 @@ fn host_manager_binding_failed_native_commit_never_exposes_a_mixed_tuple() {
             .unwrap()
             .status,
         "prepared"
+    );
+}
+
+#[test]
+fn enrollment_resource_convention_is_soft_and_uses_real_existing_interfaces() {
+    let (_dir, db) = database();
+    let request = request(&db, "soft-convention", AgentEnrollmentPurpose::Manager);
+    let now = now_ms();
+    let issued = db
+        .issue_agent_enrollment(request, None, "soft-convention", now)
+        .unwrap();
+    let claim = db
+        .claim_agent_enrollment(
+            "oauth-principal",
+            "soft-convention-window",
+            &issued.enrollment_id,
+            &issued.grant.unwrap().into_secret(),
+            now,
+        )
+        .unwrap();
+    let convention = &claim.projection.resource_convention;
+    assert_eq!(convention["mode"], "soft_convention");
+    assert_eq!(convention["technical_read_isolation"], false);
+    assert_eq!(convention["agent_resources"]["memory"]["path"], "memory");
+    assert!(convention["agent_resources"]["execution_objective"]["directory"].is_null());
+    assert_eq!(
+        convention["cli_directories"]["memory_env"],
+        "WEBCODEX_MEMORY_DIR"
+    );
+    assert_eq!(
+        convention["cli_directories"]["execution_objectives_env"],
+        "WEBCODEX_OBJECTIVES_DIR"
+    );
+    assert_eq!(
+        convention["cli_directories"]["acceptance_criteria_env"],
+        "WEBCODEX_ACCEPTANCE_DIR"
+    );
+    assert!(convention["guidance"]
+        .as_str()
+        .unwrap()
+        .contains("logs, stdout/stderr"));
+    let bound = Database::agent_resource_convention(Some("goal-test"));
+    assert_eq!(
+        bound["agent_resources"]["execution_objective"]["directory"],
+        "goals/goal-test/plans"
+    );
+    assert_eq!(
+        bound["agent_resources"]["acceptance_criteria"]["goal_field"],
+        "plan.plan.final_criteria"
+    );
+    assert_eq!(claim.projection.brief, "Only the explicitly assigned work");
+    assert_eq!(
+        db.read_agent_enrollment(&claim.binding)
+            .unwrap()
+            .resource_convention,
+        *convention
     );
 }

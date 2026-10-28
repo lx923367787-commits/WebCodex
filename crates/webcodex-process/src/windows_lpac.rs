@@ -104,25 +104,25 @@ impl AppContainerSid {
 }
 
 fn lowbox_token(sid: &AppContainerSid, network: LpacNetwork) -> Result<OwnedHandle, SpawnFailure> {
-    type NtCreateLowBoxToken = unsafe extern "system" fn(
-        *mut HANDLE,
-        HANDLE,
-        u32,
-        *const core::ffi::c_void,
-        PSID,
-        u32,
-        *const SID_AND_ATTRIBUTES,
-        u32,
-        *const HANDLE,
-    ) -> i32;
-    let module_name = wide(OsStr::new("ntdll.dll"))?;
+    if let LpacNetwork::LocalService { port, policy_key } = network {
+        crate::windows_local_service::verify_permission(sid, policy_key, port)
+            .map_err(|_| invalid("lpac_local_service_policy_unverified"))?;
+    }
+    // KernelBase's token factory also prepares the per-AppContainer object
+    // namespace. Calling NtCreateLowBoxToken with zero namespace handles leaves
+    // Win32 IPC/async runtimes unable to create their own private objects.
+    // Chromium uses the same exported Windows 8+ API. No profile, broad ACL,
+    // extra capability or unsandboxed fallback is introduced here.
+    type CreateAppContainerToken =
+        unsafe extern "system" fn(HANDLE, *const SECURITY_CAPABILITIES, *mut HANDLE) -> i32;
+    let module_name = wide(OsStr::new("kernelbase.dll"))?;
     let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
     if module.is_null() {
         return Err(fail("lpac_native_module_unavailable"));
     }
-    let function = unsafe { GetProcAddress(module, c"NtCreateLowBoxToken".as_ptr().cast()) }
+    let function = unsafe { GetProcAddress(module, c"CreateAppContainerToken".as_ptr().cast()) }
         .ok_or_else(|| fail("lpac_lowbox_api_unavailable"))?;
-    let function: NtCreateLowBoxToken = unsafe { std::mem::transmute(function) };
+    let function: CreateAppContainerToken = unsafe { std::mem::transmute(function) };
     let mut parent = null_mut();
     if unsafe {
         OpenProcessToken(
@@ -160,11 +160,17 @@ fn lowbox_token(sid: &AppContainerSid, network: LpacNetwork) -> Result<OwnedHand
         })
         .collect::<Vec<_>>();
     let mut internet_sid = [0usize; 16];
-    if network == LpacNetwork::ReviewedFileWorkerInternetClient {
+    if network == LpacNetwork::ReviewedFileWorkerInternetClient
+        || matches!(network, LpacNetwork::LocalService { .. })
+    {
         let mut length = std::mem::size_of_val(&internet_sid) as u32;
         if unsafe {
             CreateWellKnownSid(
-                WinCapabilityInternetClientSid,
+                if matches!(network, LpacNetwork::LocalService { .. }) {
+                    WinCapabilityPrivateNetworkClientServerSid
+                } else {
+                    WinCapabilityInternetClientSid
+                },
                 null_mut(),
                 internet_sid.as_mut_ptr().cast(),
                 &mut length,
@@ -188,20 +194,15 @@ fn lowbox_token(sid: &AppContainerSid, network: LpacNetwork) -> Result<OwnedHand
             Attributes: SE_GROUP_ENABLED,
         });
     }
-    let mut token = null_mut();
-    let status = unsafe {
-        function(
-            &mut token,
-            parent.as_raw_handle(),
-            TOKEN_ALL_ACCESS,
-            null(),
-            sid.as_ptr(),
-            capabilities.len() as u32,
-            capabilities.as_ptr(),
-            0,
-            null(),
-        )
+    let security = SECURITY_CAPABILITIES {
+        AppContainerSid: sid.as_ptr(),
+        Capabilities: capabilities.as_mut_ptr(),
+        CapabilityCount: capabilities.len() as u32,
+        Reserved: 0,
     };
+    let mut token = null_mut();
+    let created = unsafe { function(parent.as_raw_handle(), &security, &mut token) };
+    let create_error = unsafe { GetLastError() };
     unsafe {
         for i in 0..group_count {
             LocalFree(*groups.add(i as usize));
@@ -212,10 +213,10 @@ fn lowbox_token(sid: &AppContainerSid, network: LpacNetwork) -> Result<OwnedHand
         }
         LocalFree(caps.cast());
     }
-    if status < 0 || token.is_null() {
+    if created == 0 || token.is_null() {
         return Err(SpawnFailure {
             code: "lpac_lowbox_token_failed",
-            os_code: status as u32,
+            os_code: create_error,
             execution_state: "not_started",
         });
     }
@@ -402,6 +403,10 @@ pub enum LpacNetwork {
     #[default]
     None,
     ReviewedFileWorkerInternetClient,
+    LocalService {
+        port: u16,
+        policy_key: [u8; 16],
+    },
 }
 
 fn token_has_capability(token: HANDLE, kind: WELL_KNOWN_SID_TYPE) -> Result<bool, SpawnFailure> {
@@ -444,10 +449,24 @@ fn verify_network_policy(token: HANDLE, network: LpacNetwork) -> Result<(), Spaw
         != (network == LpacNetwork::ReviewedFileWorkerInternetClient)
         || token_has_capability(token, WinCapabilityInternetClientServerSid)?
         || token_has_capability(token, WinCapabilityPrivateNetworkClientServerSid)?
+            != matches!(network, LpacNetwork::LocalService { .. })
     {
         return Err(invalid("lpac_network_policy_mismatch"));
     }
     Ok(())
+}
+
+/// Convert only Win32 extended spelling at the native application boundary.
+/// Callers keep canonical paths for authorization and immutable request hashes.
+pub fn native_host_path(path: &Path) -> std::path::PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        std::path::PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 pub struct LpacLaunch<'a> {
@@ -460,6 +479,7 @@ pub struct LpacLaunch<'a> {
 }
 
 pub struct LpacChild {
+    native_host: bool,
     job: Option<OwnedHandle>,
     process: OwnedHandle,
     pid: u32,
@@ -565,7 +585,26 @@ fn handle_signaled(handle: HANDLE) -> io::Result<bool> {
     }
 }
 impl LpacChild {
+    pub fn local_listeners(&self) -> io::Result<Vec<(u32, u16)>> {
+        match self.job.as_ref() {
+            Some(job) => crate::windows_local_service::owned_listeners(job.as_raw_handle()),
+            None => Ok(Vec::new()),
+        }
+    }
     pub fn spawn(request: LpacLaunch<'_>) -> Result<Self, SpawnFailure> {
+        Self::spawn_inner(request, false)
+    }
+
+    /// Launch with the Runner's normal OS identity and environment. This only
+    /// owns process-tree lifetime; it supplies no private-resource boundary.
+    pub fn spawn_host(request: LpacLaunch<'_>) -> Result<Self, SpawnFailure> {
+        Self::spawn_inner(request, true)
+    }
+
+    fn prepare_launch(
+        request: &LpacLaunch<'_>,
+        host: bool,
+    ) -> Result<(Vec<u16>, Vec<u16>, Vec<u16>, Vec<u16>), SpawnFailure> {
         if !request.program.is_absolute()
             || !request.cwd.is_absolute()
             || request
@@ -578,8 +617,18 @@ impl LpacChild {
         }
         // Win32 process creation does not consistently normalize '/' in the
         // explicit image name (unlike ordinary file I/O). Use native separators.
-        let mut program = wide(request.program.as_os_str())?;
-        let mut cwd = wide(request.cwd.as_os_str())?;
+        let native_program = if host {
+            native_host_path(request.program)
+        } else {
+            request.program.to_path_buf()
+        };
+        let native_cwd = if host {
+            native_host_path(request.cwd)
+        } else {
+            request.cwd.to_path_buf()
+        };
+        let mut program = wide(native_program.as_os_str())?;
+        let mut cwd = wide(native_cwd.as_os_str())?;
         for path in [&mut program, &mut cwd] {
             for c in path.iter_mut() {
                 if *c == b'/' as u16 {
@@ -587,7 +636,7 @@ impl LpacChild {
                 }
             }
         }
-        let mut command = quote(request.program.as_os_str())?;
+        let mut command = quote(native_program.as_os_str())?;
         for arg in request.args {
             command.push(b' ' as u16);
             command.extend(quote(OsStr::new(arg))?);
@@ -597,24 +646,55 @@ impl LpacChild {
             return Err(invalid("lpac_arguments_too_large"));
         }
         let mut environment = Vec::new();
-        let mut keys = std::collections::BTreeSet::new();
-        let mut ordered = request.environment.iter().collect::<Vec<_>>();
-        ordered.sort_by_cached_key(|(key, _)| key.to_ascii_uppercase());
-        for (key, value) in ordered {
-            if key.is_empty() || key.contains(['=', '\0']) || !keys.insert(key.to_ascii_uppercase())
-            {
+        let mut entries = BTreeMap::<String, (String, String)>::new();
+        for (key, value) in request.environment {
+            let bytes = key.as_bytes();
+            // Windows inherited blocks also contain hidden entries such as
+            // =C: (drive cwd); '=' is the leading marker, not the separator.
+            let hidden_entry =
+                host && bytes.len() > 1 && bytes[0] == b'=' && !key[1..].contains('=');
+            if key.is_empty() || key.contains('\0') || (key.contains('=') && !hidden_entry) {
                 return Err(invalid("lpac_environment_invalid"));
             }
+            let folded = key.to_ascii_uppercase();
+            if let Some((_, prior)) = entries.get_mut(&folded) {
+                if !host {
+                    return Err(invalid("lpac_environment_invalid"));
+                }
+                // Inherited Windows blocks can contain differently-cased aliases.
+                // Preserve the value returned by the OS when it is one of them;
+                // otherwise retain the first entry, as for a native env block.
+                if let Ok(effective) = std::env::var(key) {
+                    if &effective == value || &effective == prior {
+                        *prior = effective;
+                    }
+                }
+            } else {
+                entries.insert(folded, (key.clone(), value.clone()));
+            }
+        }
+        for (_, (key, value)) in entries {
             environment.extend(wide(OsStr::new(&format!("{key}={value}")))?);
         }
         environment.push(0);
         if environment.len() == 1 {
             environment.push(0);
         }
-        if environment.len() > 32767 {
+        if !host && environment.len() > 32767 {
             return Err(invalid("lpac_environment_too_large"));
         }
 
+        Ok((program, cwd, command, environment))
+    }
+
+    /// Pure encoding checks run before the Runner records a native creation
+    /// attempt. No Job, process, pipe, token or filesystem resource is created.
+    pub fn validate_host_launch(request: LpacLaunch<'_>) -> Result<(), SpawnFailure> {
+        Self::prepare_launch(&request, true).map(|_| ())
+    }
+
+    fn spawn_inner(request: LpacLaunch<'_>, host: bool) -> Result<Self, SpawnFailure> {
+        let (program, cwd, mut command, environment) = Self::prepare_launch(&request, host)?;
         let raw_job = unsafe { CreateJobObjectW(null(), null()) };
         if raw_job.is_null() {
             return Err(fail("lpac_job_create_failed"));
@@ -644,15 +724,24 @@ impl LpacChild {
             stdout_write.as_raw_handle(),
             stderr_write.as_raw_handle(),
         ];
-        let token = lowbox_token(request.sid, request.network)?;
-        let _pinned_launch_paths = pin_launch_paths(&token, &program, &cwd)?;
+        let token = if host {
+            None
+        } else {
+            Some(lowbox_token(request.sid, request.network)?)
+        };
+        let _pinned_launch_paths = token
+            .as_ref()
+            .map(|token| pin_launch_paths(token, &program, &cwd))
+            .transpose()?;
         let opt_out: u32 = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
         let jobs = [raw_job];
-        let mut attrs = Attributes::new(3)?;
-        attrs.set(
-            PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
-            &opt_out,
-        )?;
+        let mut attrs = Attributes::new(if host { 2 } else { 3 })?;
+        if !host {
+            attrs.set(
+                PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+                &opt_out,
+            )?;
+        }
         attrs.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs)?;
         attrs.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles)?;
         let mut startup = STARTUPINFOEXW::default();
@@ -668,19 +757,34 @@ impl LpacChild {
             | CREATE_NO_WINDOW
             | CREATE_UNICODE_ENVIRONMENT;
         if unsafe {
-            CreateProcessAsUserW(
-                token.as_raw_handle(),
-                program.as_ptr(),
-                command.as_mut_ptr(),
-                null(),
-                null(),
-                1,
-                flags,
-                environment.as_ptr().cast(),
-                cwd.as_ptr(),
-                &startup.StartupInfo,
-                &mut info,
-            )
+            if host {
+                CreateProcessW(
+                    program.as_ptr(),
+                    command.as_mut_ptr(),
+                    null(),
+                    null(),
+                    1,
+                    flags,
+                    environment.as_ptr().cast(),
+                    cwd.as_ptr(),
+                    &startup.StartupInfo,
+                    &mut info,
+                )
+            } else {
+                CreateProcessAsUserW(
+                    token.as_ref().unwrap().as_raw_handle(),
+                    program.as_ptr(),
+                    command.as_mut_ptr(),
+                    null(),
+                    null(),
+                    1,
+                    flags,
+                    environment.as_ptr().cast(),
+                    cwd.as_ptr(),
+                    &startup.StartupInfo,
+                    &mut info,
+                )
+            }
         } == 0
         {
             return Err(fail("lpac_process_create_failed"));
@@ -697,36 +801,39 @@ impl LpacChild {
             }
             return Err(fail("lpac_job_verification_failed"));
         }
-        let actual_token = match verify_token(process.as_raw_handle(), request.sid) {
-            Ok(token) => token,
-            Err(error) => {
+        if !host {
+            let actual_token = match verify_token(process.as_raw_handle(), request.sid) {
+                Ok(token) => token,
+                Err(error) => {
+                    unsafe {
+                        TerminateJobObject(raw_job, 1);
+                        WaitForSingleObject(process.as_raw_handle(), 5000);
+                    }
+                    return Err(error);
+                }
+            };
+            if let Err(error) = verify_network_policy(actual_token.as_raw_handle(), request.network)
+            {
                 unsafe {
                     TerminateJobObject(raw_job, 1);
                     WaitForSingleObject(process.as_raw_handle(), 5000);
                 }
                 return Err(error);
             }
-        };
-        if let Err(error) = verify_network_policy(actual_token.as_raw_handle(), request.network) {
-            unsafe {
-                TerminateJobObject(raw_job, 1);
-                WaitForSingleObject(process.as_raw_handle(), 5000);
-            }
-            return Err(error);
+            // CreateProcessAsUser opens the image as the trusted creator. Recheck
+            // under the final opt-out token before running any untrusted code, so
+            // an AAP-only executable/cwd cannot use the creator's access as a bypass.
+            let _final_launch_pins = match pin_launch_paths(&actual_token, &program, &cwd) {
+                Ok(pins) => pins,
+                Err(error) => {
+                    unsafe {
+                        TerminateJobObject(raw_job, 1);
+                        WaitForSingleObject(process.as_raw_handle(), 5000);
+                    }
+                    return Err(error);
+                }
+            };
         }
-        // CreateProcessAsUser opens the image as the trusted creator. Recheck
-        // under the final opt-out token before running any untrusted code, so
-        // an AAP-only executable/cwd cannot use the creator's access as a bypass.
-        let _final_launch_pins = match pin_launch_paths(&actual_token, &program, &cwd) {
-            Ok(pins) => pins,
-            Err(error) => {
-                unsafe {
-                    TerminateJobObject(raw_job, 1);
-                    WaitForSingleObject(process.as_raw_handle(), 5000);
-                }
-                return Err(error);
-            }
-        };
         // Register the original leader handle and the fresh Job's cumulative
         // baseline while the process is still suspended. No child/user code has
         // run, and later PID-list samples cannot replace this birth identity.
@@ -770,6 +877,7 @@ impl LpacChild {
             return Err(error);
         }
         Ok(Self {
+            native_host: host,
             job: Some(job),
             process,
             pid: info.dwProcessId,
@@ -819,7 +927,7 @@ impl LpacChild {
         };
         if value.total_processes < self.observation.initial_total
             || value.total_processes < self.observation.maximum_total
-            || value.total_processes as usize > LPAC_MAX_OBSERVED_MEMBERS
+            || (!self.native_host && value.total_processes as usize > LPAC_MAX_OBSERVED_MEMBERS)
             || value.active_processes > value.total_processes
             || self.observed_member_count() > value.total_processes as usize
         {
@@ -840,6 +948,13 @@ impl LpacChild {
         }
         let round_deadline = deadline.min(Instant::now() + MEMBER_CAPTURE_ROUND);
         self.checked_accounting()?;
+        if self.native_host {
+            // Ordinary host commands can launch short-lived descendants between
+            // polls. Atomic Job assignment and disabled breakaway retain every
+            // descendant in this kernel Job; historical PID sampling is not a
+            // prerequisite for the Job's authoritative empty-state observation.
+            return Ok(true);
+        }
         let pids = match self.process_ids() {
             Ok(pids) => pids,
             Err(_) => return self.observation_error("lpac_member_enumeration_failed"),
@@ -925,7 +1040,7 @@ impl LpacChild {
         if before.active_processes != 0 {
             return Ok(None);
         }
-        if before.total_processes as usize != self.observed_member_count() {
+        if !self.native_host && before.total_processes as usize != self.observed_member_count() {
             return self.observation_error("lpac_member_coverage_missing");
         }
         match handle_signaled(self.process.as_raw_handle()) {

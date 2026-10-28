@@ -4,9 +4,7 @@
 //! A handoff candidate needs either an exact control-plane registration or
 //! the current one-time preparation grant delivered by the trusted launcher;
 //! an attempt UUID by itself is correlation, never authority.
-use super::response::{
-    mcp_runtime_tool_result_fallback, mcp_stateless_result, rpc_error, rpc_result,
-};
+use super::response::{mcp_stateless_result, rpc_error, rpc_result};
 use super::{protocol, JsonRpcRequest, McpOutcome, McpProtocolEra};
 use crate::auth::{AuthContext, AuthKind};
 use crate::tool_runtime::{ToolResult, ToolRuntime};
@@ -38,11 +36,10 @@ struct GatewayCall {
 }
 
 fn status_arguments_valid(arguments: &Value) -> bool {
-    arguments.as_object().is_some_and(|args| {
-        args.iter().all(|(name, value)| {
-            matches!(name.as_str(), "compact" | "summary_only") && value.is_boolean()
-        })
-    })
+    matches!(
+        crate::tool_runtime::ToolCall::from_tool_name("runtime_status", arguments.clone()),
+        Ok(crate::tool_runtime::ToolCall::RuntimeStatus { .. })
+    )
 }
 
 fn connection_status(
@@ -60,8 +57,9 @@ fn connection_status(
         "connected":true,"scope":"current_window","runtime_exposure":"isolated_agent",
         "agent_state":"active","agent":{"agent_id":binding.agent_id(),
             "run_id":binding.run_id(),"generation":binding.generation(),"project":binding.project()},
-        "assignment":assignment,"project_access":project_access,"shared_runtime_access":false,
-        "next_action":"Read agent_assignment for this chat's task. Use tool_manifest to discover the current isolated tools."
+        "assignment":assignment,"project_access":project_access,"shared_runtime_access":true,
+        "privacy_mode":"soft_convention","technical_isolation":false,
+        "next_action":"Read agent_assignment for this chat's own task and three-folder privacy convention. Use tool_manifest to discover the available runtime tools."
     }))
 }
 
@@ -76,8 +74,8 @@ pub(super) async fn handle(
             let _ = db.record_agent_access_denied(None, code);
         }
         let mut error = rpc_error(request.id.clone(), -32003, code);
-        if auth.is_native_host() && code == "agent_tool_not_isolated" {
-            error["error"]["data"] = json!({"recovery":"Call tool_manifest without filters to discover the current isolated tools. Cached shared-runtime tools are unavailable; start a fresh Agent with runtime_status."});
+        if code == "unknown_tool" {
+            error["error"]["data"] = json!({"recovery":"Call tool_manifest to inspect the current tool names and input contracts. Ordinary runtime capabilities use the same project authorization."});
         }
         McpOutcome::Ok(error)
     };
@@ -161,7 +159,7 @@ pub(super) async fn handle(
                             specs.iter().any(|spec| spec["name"] == inner.tool)
                         }))
                 {
-                    return denied("agent_tool_not_isolated");
+                    return denied("unknown_tool");
                 }
                 call.name = inner.tool;
                 call.arguments = inner.arguments;
@@ -184,6 +182,8 @@ pub(super) async fn handle(
             {
                 return denied("agent_host_scope_denied");
             }
+            let browser_image = call.name == "agent_process"
+                && call.arguments.get("action").and_then(Value::as_str) == Some("browser_image");
             let result = if native_contract {
                 match contract::discover(&contract::native_catalog(), &call.arguments) {
                     Ok(metadata) => crate::tool_runtime::ToolResult::ok(metadata),
@@ -237,9 +237,39 @@ pub(super) async fn handle(
             } else if call.name == "goal_handoff" {
                 crate::agent_goal_handoff::call_host(db, &principal, window.key(), call.arguments)
             } else {
-                // Bootstrap only the validated, selector-free first-use calls.
-                // Complex business arguments must not create an Agent before
-                // their normal validation; discovery tells fresh chats where to start.
+                let coding_entry = if auth.is_native_host() && call.name == "work_on_project" {
+                    let parsed = match crate::tool_runtime::ToolCall::from_tool_name(
+                        "work_on_project",
+                        call.arguments.clone(),
+                    ) {
+                        Ok(parsed) => parsed,
+                        Err(_) => return denied("invalid_work_on_project_arguments"),
+                    };
+                    if let Err(error) =
+                        crate::tool_runtime::ToolRuntime::validate_work_on_project_call(&parsed)
+                    {
+                        let error = super::resources::mcp_isolated_browser_result(
+                            &call.name,
+                            browser_image,
+                            error,
+                        );
+                        return McpOutcome::Ok(rpc_result(
+                            request.id,
+                            if stateless {
+                                mcp_stateless_result(error, false)
+                            } else {
+                                error
+                            },
+                        ));
+                    }
+                    Some(parsed)
+                } else {
+                    None
+                };
+                // Bootstrap only after complete canonical input validation.
+                // Explicit coding targets are mapped inside the enrollment transaction.
+                // Selector-free identity/status calls retain their existing
+                // sole-project selection behavior.
                 let first_use = native_status
                     || (auth.is_native_host()
                         && matches!(call.name.as_str(), "agent_identity" | "agent_assignment")
@@ -247,7 +277,25 @@ pub(super) async fn handle(
                             .arguments
                             .as_object()
                             .is_some_and(|args| args.is_empty()));
-                let binding = if first_use {
+                let binding = if let Some(crate::tool_runtime::ToolCall::WorkOnProject {
+                    project,
+                    client_id,
+                    path,
+                    ..
+                }) = coding_entry
+                {
+                    match auth.native_host.as_ref() {
+                        Some(host) => db.ensure_native_host_coding_window(
+                            host,
+                            window.key(),
+                            &project,
+                            client_id.as_deref(),
+                            path.as_deref(),
+                            chrono::Utc::now().timestamp_millis(),
+                        ),
+                        None => return denied("agent_host_authorization_required"),
+                    }
+                } else if first_use {
                     match auth.native_host.as_ref() {
                         Some(host) => db.ensure_native_host_window(
                             host,
@@ -270,13 +318,27 @@ pub(super) async fn handle(
                     })
                 };
                 match binding {
-                    Ok(binding) if native_status => connection_status(db, &binding),
                     Ok(binding) => {
+                        let connection =
+                            native_status.then(|| connection_status(db, &binding).output);
                         let mut effective = AuthContext::new(AuthKind::ModelAgent);
                         effective.agent_run = Some(binding);
-                        runtime
+                        let mut result = runtime
                             .isolated_model_call_async(&call.name, call.arguments, Some(&effective))
-                            .await
+                            .await;
+                        // Preserve normal Runner/build/job observability. The
+                        // Agent connection facts supplement it instead of
+                        // replacing runtime_status with an identity-only view.
+                        if result.success {
+                            if let (Some(output), Some(Value::Object(connection))) =
+                                (result.output.as_object_mut(), connection)
+                            {
+                                for (name, value) in connection {
+                                    output.entry(name).or_insert(value);
+                                }
+                            }
+                        }
+                        result
                     }
                     Err(error) if error.code() == "workspace_selection_required" => ToolResult::ok(
                         json!({"connected":true,"agent_state":"project_selection_required","state_changed":false,"next_action":"Call agent_projects. Ask the user which named project to use, then call agent_select_project with its exact id. No project has been selected and no task has started."}),
@@ -293,7 +355,7 @@ pub(super) async fn handle(
                     Err(error) => {
                         let mut result = crate::agent_isolation::denial(error.code());
                         if auth.is_native_host() && error.code() == "agent_host_window_not_active" {
-                            result.output["recovery"] = json!("For a fresh chat, call runtime_status or agent_identity with no selectors to start its independent Agent. Retired or revoked windows cannot be reactivated this way.");
+                            result.output["recovery"] = json!("A fresh chat can call work_on_project with an authorized runtime project, or client_id + path, directly. Optional runtime_status/agent_identity can initialize the sole named project. Retired or revoked windows are never reactivated this way.");
                         }
                         result
                     }
@@ -304,7 +366,8 @@ pub(super) async fn handle(
                 // tool names, host IDs, arguments or private error payloads.
                 let _ = db.record_agent_access_denied(None, "agent_host_operation_denied");
             }
-            let result = mcp_runtime_tool_result_fallback(result);
+            let result =
+                super::resources::mcp_isolated_browser_result(&call.name, browser_image, result);
             McpOutcome::Ok(rpc_result(
                 request.id,
                 if stateless {

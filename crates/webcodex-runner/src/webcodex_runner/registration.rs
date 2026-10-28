@@ -13,7 +13,7 @@ use crate::webcodex_runner::{
 use reqwest::blocking::Client;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use webcodex_core::runner_protocol::{
     RunnerCapabilities, RunnerPolicySummary, RunnerProjectSummary, RunnerRegisterRequest,
@@ -200,6 +200,7 @@ pub(crate) fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabili
     // Configuration alone grants no isolated execution support. Only the
     // register builder replaces this after actual JobManager initialization.
     capabilities.agent_isolated_execution_v1 = false;
+    capabilities.agent_program_execution_v1 = false;
     // Detached process ownership is an independent additive authority. Until
     // each native backend is implemented and dogfooded it must fail closed
     // rather than being inferred from structured process + durable Jobs.
@@ -223,6 +224,7 @@ pub(crate) fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabili
     // startup-bound runner.toml path on every supported platform. Unix SIGHUP is
     // only an additional trigger and is not part of this capability contract.
     capabilities.runner_config_control = true;
+    capabilities.tool_connections = true;
     // MCP gateway support is fenced by the validated provider inventory in
     // registration rather than a separate capability bit. Older binaries omit
     // that inventory, so a newer Server will never target them.
@@ -294,29 +296,33 @@ mod capability_tests {
     #[test]
     fn agent_execution_registration_requires_ready_backend_and_verified_resources() {
         let empty = AgentExecutionResourcesConfig::default();
-        assert!(agent_execution_resource_registration(false, &empty).is_empty());
-        assert!(agent_execution_resource_registration(true, &empty).is_empty());
+        assert!(agent_execution_resource_registration(false, &empty)
+            .unwrap()
+            .is_empty());
+        assert!(agent_execution_resource_registration(true, &empty)
+            .unwrap()
+            .is_empty());
         let invalid: AgentExecutionResourcesConfig = serde_json::from_value(serde_json::json!({
             "profiles":[{"id":"fixture", "executable":"missing.exe", "executable_sha256":"invalid", "files":[]}]
         })).unwrap();
-        assert!(agent_execution_resource_registration(false, &invalid).is_empty());
-        assert!(agent_execution_resource_registration(true, &invalid).is_empty());
+        assert!(agent_execution_resource_registration(false, &invalid)
+            .unwrap()
+            .is_empty());
+        assert!(agent_execution_resource_registration(true, &invalid).is_err());
     }
 }
 
 fn agent_execution_resource_registration(
     backend_ready: bool,
     config: &super::jobs::agent_resources::AgentExecutionResourcesConfig,
-) -> Vec<runner_protocol::AgentExecutionResourceDescriptor> {
-    if !cfg!(windows) || !backend_ready {
-        return Vec::new();
+) -> Result<Vec<runner_protocol::AgentExecutionResourceDescriptor>, String> {
+    if !cfg!(windows) || !backend_ready || config.profiles.is_empty() {
+        return Ok(Vec::new());
     }
-    super::jobs::agent_resources::validate_profiles(config)
-        .and_then(|profiles| {
-            profiles.verify_sources()?;
-            Ok(profiles.descriptors())
-        })
-        .unwrap_or_default()
+    super::jobs::agent_resources::validate_profiles(config).and_then(|profiles| {
+        profiles.verify_sources()?;
+        Ok(profiles.descriptors())
+    })
 }
 
 #[cfg(test)]
@@ -352,11 +358,20 @@ pub(crate) fn build_register_request_with_provider_status(
 ) {
     let hot = runtime.snapshot();
     let mut capabilities = runner_register_capabilities(cfg);
-    let agent_execution_resources = agent_execution_resource_registration(
+    let agent_execution_resources = match agent_execution_resource_registration(
         runtime.agent_execution_ready(),
         &cfg.agent_execution_resources,
-    );
+    ) {
+        Ok(resources) => resources,
+        Err(error) => {
+            runtime.set_agent_execution_load_error("registration", &error);
+            Vec::new()
+        }
+    };
     capabilities.agent_isolated_execution_v1 = !agent_execution_resources.is_empty();
+    capabilities.agent_program_execution_v1 = agent_execution_resources
+        .iter()
+        .any(|r| r.provider.is_none() && r.reviewed_controls.is_none());
     let coding_agent_providers = runtime
         .coding_agents()
         .map(|manager| manager.providers())
@@ -376,12 +391,21 @@ pub(crate) fn build_register_request_with_provider_status(
             host_context: cfg.host_context.clone(),
             capabilities,
             agent_execution_resources,
-            policy: Some(register_policy_summary(
-                &hot,
-                prepared_cache_count,
-                tool_providers,
-                runtime.mcp_gateway().provider_inventory(),
-            )),
+            policy: Some({
+                let _guard = runtime
+                    .reload_lock
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                let mut policy = register_policy_summary(
+                    &hot,
+                    prepared_cache_count,
+                    tool_providers,
+                    runtime.mcp_gateway().provider_inventory(),
+                );
+                policy.mcp_gateway_revision =
+                    Some(runtime.connection_revision.load(Ordering::SeqCst));
+                policy
+            }),
             process_started_at: Some(process_started_at()),
             build: Some(runner_build_info()),
             job_concurrency_limit: Some(max_concurrent_jobs(cfg)),
@@ -522,6 +546,7 @@ pub(crate) fn register_policy_summary(
         )),
         tool_providers: Some(tool_providers),
         mcp_gateway_providers: Some(mcp_gateway_providers),
+        mcp_gateway_revision: None,
     }
 }
 

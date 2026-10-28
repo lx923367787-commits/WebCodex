@@ -474,6 +474,32 @@ mod tests {
     }
 
     #[test]
+    fn project_availability_does_not_gate_tray_connection_or_service_status() {
+        use crate::models::{aggregate_readiness, ExposureReadiness, ProjectReadiness};
+        for project in [
+            ProjectReadiness::None,
+            ProjectReadiness::Configured,
+            ProjectReadiness::ReloadRequired,
+            ProjectReadiness::Unknown,
+            ProjectReadiness::Ready,
+        ] {
+            let mut snapshot = local_snapshot();
+            snapshot.readiness = aggregate_readiness(
+                ServerReadiness::Ready,
+                RunnerReadiness::Ready,
+                ExposureReadiness::LocalReady,
+                project,
+            );
+            let projection = TrayProjection::from_snapshot(&snapshot, None);
+            assert_eq!(projection.runtime_status, RuntimeStatus::Ready);
+            assert_eq!(
+                projection.connection_action,
+                Some(ConnectionAction::Connect)
+            );
+        }
+    }
+
+    #[test]
     fn ready_runtime_projects_stop_and_connect_actions() {
         let mut snapshot = local_snapshot();
         snapshot.readiness.server = ServerReadiness::Ready;

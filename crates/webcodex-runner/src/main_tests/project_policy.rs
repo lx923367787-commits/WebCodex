@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn explicit_empty_roots_load_without_home_authority_and_deny_project_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("runner.toml");
+    std::fs::write(&config, "server_url = 'http://localhost'\ntoken = 'fixture'\nclient_id = 'empty'\nproject_registry_dir = 'project-registry'\n[policy]\nrequire_explicit_roots = true\nallowed_roots = []\nallow_cwd_anywhere = false\n").unwrap();
+    let cfg = load_config(&config).unwrap();
+    assert!(cfg.policy.allowed_roots.is_empty());
+    let req = project_request(
+        "register_project",
+        serde_json::json!({"id":"denied", "name":"Denied", "path":dir.path().to_string_lossy()}),
+    );
+    assert_eq!(
+        project_err(handle_project_op(
+            &cfg.policy,
+            &dir.path().join("registry"),
+            &req
+        )),
+        "path_outside_allowed_roots"
+    );
+}
+
+#[test]
 fn register_project_rejects_path_outside_allowed_roots() {
     let allowed = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();

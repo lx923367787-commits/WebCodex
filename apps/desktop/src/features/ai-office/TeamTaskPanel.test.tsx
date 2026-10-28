@@ -65,8 +65,8 @@ function completionDetail() {
 }
 
 describe("managed team task panel", () => {
-  it("limits the human action type to its five configuration and read operations", () => {
-    expectTypeOf<TeamAction>().toEqualTypeOf<"policy-get" | "policy-save" | "plan-list" | "plan-read" | "task-create">();
+  it("includes Runner inventory reads in the existing human bridge", () => {
+    expectTypeOf<TeamAction>().toEqualTypeOf<"policy-get" | "policy-save" | "plan-list" | "plan-read" | "task-create" | "cli-discover" | "cli-models">();
   });
 
   it("leaves demonstration and unavailable interfaces disconnected from live dispatch", () => {
@@ -279,17 +279,17 @@ describe("managed team task panel", () => {
     const team = fixture();
     team.mockImplementation(async (action) => action === "plan-list" ? { plans: [summary()], total_count: 1, next_offset: null } : completionDetail());
     render(<TeamTaskPanel projectId={project} api={{ team }} />);
-    await screen.findByText("最低执行要求尚未核实满足");
+    await screen.findByText("不设置最低执行门槛");
     expect(screen.getByLabelText("计划子 Agent 2")).toBeInTheDocument();
     expect(screen.getByLabelText("已核实派发 0")).toBeInTheDocument();
     expect(screen.getByLabelText("计划 CLI 调用 4")).toBeInTheDocument();
-    expect(screen.getByLabelText("已占用调用预算 3")).toBeInTheDocument();
+    expect(screen.getByLabelText("已登记调用尝试 3")).toBeInTheDocument();
     expect(screen.getByLabelText("已核实 CLI 调用 0")).toBeInTheDocument();
-    expect(screen.getByText(/当前不能将该团队任务标记为成功/)).toBeInTheDocument();
+    expect(screen.queryByText(/当前不能将该团队任务标记为成功/)).not.toBeInTheDocument();
     expect(screen.getByText(/为 0 表示尚无足够证据，不代表从未执行/)).toBeInTheDocument();
     const member = screen.getByRole("article", { name: "成员执行计数 child-a" });
     expect(within(member).getByText("派发证据待确认")).toBeInTheDocument();
-    expect(within(member).getByText(/最低调用证据尚未满足/)).toBeInTheDocument();
+    expect(within(member).getByText(/调用次数仅作记录/)).toBeInTheDocument();
   });
 
   it("does not impose a minimum in auto mode or substitute counts for absent completion data", async () => {
@@ -303,7 +303,7 @@ describe("managed team task panel", () => {
       return value;
     });
     const { unmount } = render(<TeamTaskPanel projectId={project} api={{ team }} />);
-    await screen.findByText("自主模式 · 不设置最低执行门槛");
+    await screen.findByText("不设置最低执行门槛");
     expect(screen.queryByText(/当前不能将该团队任务标记为成功/)).not.toBeInTheDocument();
     unmount();
     render(<TeamTaskPanel projectId={project} api={{ team: fixture() }} />);
@@ -322,8 +322,8 @@ describe("managed team task panel", () => {
       return value;
     });
     render(<TeamTaskPanel projectId={project} api={{ team }} />);
-    await screen.findByText("最低执行要求已核实满足");
-    expect(screen.getByText("数量条件已满足，仍须验收任务成果；这不等于业务成功。")).toBeInTheDocument();
+    await screen.findByText("不设置最低执行门槛");
+    expect(screen.getByText("子 Agent 和 CLI 均为可选，任务按实际成果验收。")).toBeInTheDocument();
   });
 
   it("does not call a truncated recovery list an empty slot", async () => {
@@ -354,7 +354,7 @@ describe("managed team task panel", () => {
 
   it("connects clickable real-task characters while leaving the manager and undispatched members idle", async () => {
     const team = fixture();
-    team.mockImplementation(async (action) => action === "plan-list" ? { plans: [summary()], total_count: 1, next_offset: null } : peopleDetail());
+    team.mockImplementation(async (action) => action === "plan-list" ? { plans: [summary()], total_count: 1, next_offset: null } : (() => { const value = peopleDetail(); return { ...value, task_summaries: value.task_summaries.map((task) => task.task_id === "child-a" ? { ...task, activity: { execution_state: "running", wait_reason: "", next_step: "", last_progress_at_unix_ms: Date.now() } } : task) }; })());
     render(<TeamTaskPanel projectId={project} api={{ team }} />);
     fireEvent.click(await screen.findByRole("button", { name: /展开任务小人办公室/ }));
     const manager = screen.getByRole("button", { name: "查看" + nicknameForTask("root-a") + "的任务" });
@@ -371,6 +371,37 @@ describe("managed team task panel", () => {
     fireEvent.click(running);
     expect(within(profile).getByText("discovered-balanced-profile")).toBeInTheDocument();
     expect(within(profile).getByText("child-a")).toBeInTheDocument();
+  });
+
+  it("does not infer execution from a dispatched conversation and accepts CLI default records", async () => {
+    const team = fixture();
+    team.mockImplementation(async (action) => {
+      if (action === "plan-list") return { plans: [summary()], total_count: 1, next_offset: null };
+      const value = peopleDetail();
+      return { ...value, attempts: { ...value.attempts, attempts: value.attempts.attempts.map((item) => ({ ...item, model: null, effort: null })) },
+        task_summaries: value.task_summaries.map((task) => task.task_id === "child-a" ? { ...task, activity: { execution_state: "waiting_dependencies", wait_reason: "等待公开协议", next_step: "核对后继续实现" } } : task) };
+    });
+    render(<TeamTaskPanel projectId={project} api={{ team }} />);
+    await screen.findByText("CLI 默认模型");
+    fireEvent.click(await screen.findByRole("button", { name: /展开任务小人办公室/ }));
+    const child = screen.getByRole("button", { name: "查看" + nicknameForTask("child-a") + "的任务" });
+    expect(child).not.toHaveClass("is-working");
+    fireEvent.click(child);
+    const profile = screen.getByRole("region", { name: "选中伙伴的真实任务" });
+    expect(within(profile).getByText("等待依赖")).toBeInTheDocument();
+    expect(within(profile).getByText("等待公开协议")).toBeInTheDocument();
+    expect(within(profile).getByText("核对后继续实现")).toBeInTheDocument();
+  });
+  it.each([undefined, null, "", "default"])("accepts a tool default profile %s without legacy quota fields", async (profile) => {
+    const team = fixture();
+    team.mockImplementation(async (action) => {
+      if (action === "plan-list") return { plans: [summary()], total_count: 1, next_offset: null };
+      const value = peopleDetail();
+      return { ...value, agents: value.agents.map(agent => ({ ...agent, thinking_profile_id: profile, counts_toward_regular_min: undefined, counts_toward_regular_max: undefined })) };
+    });
+    render(<TeamTaskPanel projectId={project} api={{ team }} />);
+    expect(await screen.findByText("工具默认设置")).toBeVisible();
+    expect(screen.queryByText("普通伙伴的项目或任务关联无效。")).not.toBeInTheDocument();
   });
 
   it("keeps missing agent/title fields explicitly unobserved", async () => {

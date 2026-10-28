@@ -112,6 +112,25 @@ class ThinkingProfileTests(unittest.TestCase):
         second = self.catalog()["profiles"]
         self.assertEqual(first, second)
 
+    def test_explicit_default_retains_current_setting_and_records_actual_readback(self):
+        self.browser.value = 1
+        result = self.select({"profile_id": "default", "mode": "default"})
+        self.assertEqual(1, self.browser.value)
+
+        self.assertEqual("default", result["thinking_profile"]["profile_id"])
+        self.assertEqual(1, result["thinking_profile"]["observed_profile"]["slider_value"])
+        self.assertFalse(any(a[0] == "key" for a in self.browser.actions))
+        self.browser.value = 4
+        inherited = self.select(result["thinking_profile"])
+        self.assertEqual(result, inherited)
+        self.assertEqual(1, self.browser.value)
+
+    def test_default_cannot_turn_missing_readback_into_highest_setting(self):
+        for observed in (None, {"profile_id":"default", "mode":"default"}):
+            with self.assertRaisesRegex(profiles.ThinkingProfileError, "snapshot_invalid"):
+                self.select({"profile_id":"default", "mode":"default", "observed_profile":observed})
+        self.assertEqual([], self.browser.actions)
+
     def test_exact_selection_reads_after_focus_click_moves_slider(self):
         wanted = self.catalog()["profiles"][0]
         self.browser.actions.clear()

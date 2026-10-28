@@ -49,6 +49,7 @@ mod host_goal_review;
 mod host_goal_takeover_access;
 mod runner_authorization;
 mod runner_config;
+mod tool_connection;
 #[cfg(test)]
 pub(crate) use git::{framed_clean_show_changes_test_stdout, framed_show_changes_test_block};
 mod git_committed;

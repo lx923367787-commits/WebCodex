@@ -1386,10 +1386,24 @@ pub(super) async fn handle_call(
         }
     };
     if auth.is_some_and(|auth| auth.agent_run.is_some()) {
+        if params.name == ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME {
+            let (target, arguments) =
+                match unwrap_adaptive_runtime_gateway_arguments(params.arguments, stateless_2026) {
+                    Ok(target) => target,
+                    Err(message) => return McpOutcome::BadRequest(rpc_error(id, -32602, message)),
+                };
+            params.name = target;
+            params.arguments = arguments;
+        }
+        let browser_image = params.name == "agent_process"
+            && params.arguments.get("action").and_then(Value::as_str) == Some("browser_image");
         let result = runtime
             .isolated_model_call_async(&params.name, params.arguments, auth)
             .await;
-        return McpOutcome::Ok(rpc_result(id, mcp_runtime_tool_result_fallback(result)));
+        return McpOutcome::Ok(rpc_result(
+            id,
+            super::resources::mcp_isolated_browser_result(&params.name, browser_image, result),
+        ));
     }
     if runtime.runtime_exposure() == RuntimeExposure::ProjectConnector {
         if let Some(lc) = lifecycle.as_deref() {

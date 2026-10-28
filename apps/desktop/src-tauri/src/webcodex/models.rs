@@ -41,9 +41,20 @@ pub struct LoginOutput {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerStatusOutput {
     pub http_reachable: bool,
+    #[serde(default)]
+    pub http_status_code: Option<u16>,
     pub probe_url: String,
     #[serde(default)]
     pub revision_check: Option<String>,
+}
+
+impl ServerStatusOutput {
+    /// A bootstrap credential cannot read the Human runtime-status route. A
+    /// 403 only permits trying enrollment; it is never service readiness or
+    /// project authority. The enrolled user must subsequently authenticate.
+    pub fn responding_for_enrollment(&self) -> bool {
+        self.http_reachable || self.http_status_code == Some(403)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -159,6 +170,17 @@ pub struct RegularTunnelConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_response_only_permits_enrollment_not_runtime_readiness() {
+        for code in [200, 401, 403, 500] {
+            let status: ServerStatusOutput = serde_json::from_value(serde_json::json!({
+                "http_reachable": false, "http_status_code": code, "probe_url": "http://127.0.0.1:1234"
+            })).unwrap();
+            assert_eq!(status.responding_for_enrollment(), code == 403);
+            assert!(!status.http_reachable);
+        }
+    }
 
     #[test]
     fn json_contracts_tolerate_unknown_fields_and_missing_optional_metadata() {

@@ -11,17 +11,17 @@ The normal path is intentionally product-level; you do not need to understand th
 ```text
 install Desktop
 → save the Tunnel ID and API key in Desktop
-→ choose the real project ChatGPT should use
-→ wait for Service / Runner / Project to become ready
+→ start Service / Runner without selecting a project
 → start the official OpenAI Secure Tunnel
 → connect ChatGPT with the Tunnel ID
 → Desktop shows “Tunnel ready; waiting for ChatGPT”
-→ perform one real project read from ChatGPT as final acceptance
+→ create a project and authorize its source folders in Projects
+→ bind that project to a chat and verify a real task
 ```
 
 **Important:** “OpenAI Secure Tunnel ready” proves only that the local Tunnel is ready **for** ChatGPT. It does **not** prove that ChatGPT has connected or that a project tool can already execute. The real project read in step 8 is the final proof. For CLI, an existing remote Server, production hosting, or advanced networking, use the [Full Setup](PERSONAL_SETUP.md) or [Deployment](DEPLOYMENT.md) guides instead.
 
-For everyday use after installation, see [Using Desktop](desktop-guide.md). Home now centers the current project and three usage steps; component details live under “View runtime diagnostics”. OpenAI Platform screenshots below are configuration references; follow the current Desktop control names in the text.
+For everyday use after installation, see [Using Desktop](desktop-guide.md). Home separates service status, connection status, and project availability. OpenAI Platform screenshots below are configuration references; follow the current Desktop control names in the text.
 
 ## 1. Install WebCodex Desktop
 
@@ -55,7 +55,7 @@ In **Settings → Background & startup**, **Launch WebCodex at login** registers
 ### Everyday controls
 
 - Use the sidebar to open Home, Projects, Connection, Activity, and Settings. Use **⌘ + 1–5** on macOS or **Ctrl + 1–5** on Windows. Navigation shortcuts also work inside inputs and language selectors; ordinary typing and text-editing shortcuts remain available.
-- Home shows the current project, next action, and three usage steps. Expand **View runtime diagnostics** to inspect all four components.
+- Home shows service, connection, and project availability separately. **View runtime diagnostics** contains runtime controls.
 - In **Activity**, search messages or sources, or select **Warnings and errors only**. Results are newest first. Filtering changes the view without deleting records.
 - Use Tab to focus main buttons and Enter to activate them. Navigation moves focus into page content.
 
@@ -114,33 +114,17 @@ For screenshots, window observation, keyboard or pointer control, grant the rele
 
 **Success looks like:** the source is the local file and both presence checks pass. Next, select the actual project ChatGPT should use.
 
-## 4. Start the local runtime and add your project
+## 4. Start services and create projects when needed
 
-On first use, choose **Local Full Runtime / Use WebCodex on this computer**, then select the **real repository directory you want ChatGPT to use**. Desktop prepares the local Service + Runner and makes the Runner load that exact project. Desktop's own default workspace is not a substitute for selecting your actual project.
+Choose **Use WebCodex on this computer** and apply setup. Desktop starts the local Service and Runner without a project. It creates no default management project and grants no implicit HOME directory access. Once both services are ready, the secure tunnel can start.
 
-Setup remains disabled until you select a project. If project setup or the optional Tunnel start fails, the setup page keeps your selection and shows the error so you can retry.
+Before a concrete task, create a named project in **Projects**, explicitly add source folders, and configure the team. Each chat binds its own project. Tasks validate that project and its directory authority; missing projects or permissions reject the task while services and connections remain available.
 
-This is an intentional authority boundary: the default Desktop project does not grant access to unrelated directories or the whole disk.
+Home separates service, connection, and project status. Project creation, edits, and removal do not require stopping the global connection. Existing registrations, folder authority, team policies, and chat bindings are preserved. Service recovery no longer requires the old current-project folder to exist. Quick Share remains a separate explicit single-folder sharing workflow and still requires a folder.
 
-For local pairing, Desktop derives a Server-compatible username from your OS username: names the Server already accepts are kept as-is; otherwise ASCII letters are lowercased, each run of unsupported characters becomes a single `-`, the name's own `-` characters are preserved, leading and trailing generated separators are removed, and the result is limited to 64 characters. Names with nothing left use `desktop`. This local pairing name is not an OS login identity; existing saved enrollment is reused on restart.
+**Service startup succeeds when:** Service and Runner are ready. **A project task can execute when:** its chat binding, available folders, and directory authority also pass validation. Connection readiness does not prove task readiness.
 
-Home puts overall readiness and the next action first, with direct shortcuts to Projects, Connection, and Activity. After a local Full Runtime is configured, **Choose another project** or **Add project** on Projects opens the folder picker and applies the selected exact project immediately. The full setup flow is reserved for first use or changing runtime topology.
-
-After setup, expand **View runtime diagnostics** on Home and confirm all three items:
-
-- Service: Running / Ready;
-- Runner: Connected / Ready;
-- Project: Ready, with the path you actually selected.
-
-If you see **Project not ready** / `project_not_loaded`, normal Desktop users do **not** need to inspect a project registry. Use the **Reload project** action in the error card. Desktop retries the same project and, when required, restarts only the Runner process it owns within a bounded readiness window.
-
-When the runtime is already running and you choose another project, do not manually stop the runtime or OpenAI Secure Tunnel first. Desktop extends the Runner policy with the exact selected root, hot-activates it when the Runner supports config reload, persists the new current project after readiness, and keeps the existing local Service and Tunnel. Only a legacy or incompatible Desktop-owned Runner is replaced. A failed transition must not leave the old project falsely displayed as ready.
-
-**Success looks like:** Service, Runner, and Project are all Ready, and the displayed project path is exact.
-
-**If it fails:** use **Reload project**, then inspect Activity/error details if it still fails. Do not broaden allowed roots or substitute a different Runner to bypass project authority.
-
-**Next:** start the OpenAI Secure Tunnel only after these three are ready.
+Check Activity and error details on failure; do not broaden directory authority to bypass task validation.
 
 ## 5. Configure Tunnel networking if needed
 
@@ -220,8 +204,8 @@ If Desktop shows a healthy Service / Runner / Project / Tunnel but ChatGPT still
 
 **Tunnel startup or ChatGPT connection times out:** check **Settings → OpenAI Tunnel network** first, then stop and restart the Tunnel after changing the proxy mode.
 
-**A repository is not accessible:** add that directory explicitly on the **Projects** page instead of broadening the default Desktop project's filesystem authority.
+**A repository is not accessible:** add that directory explicitly on the **Projects** page with its exact directory authority.
 
-**You see `project_not_loaded` / Project not ready:** use **Reload project**. Desktop retries the same project and manages only its own Runner; normal users do not need to edit or understand the internal project registry.
+**A project is unavailable:** inspect its source folders and authorization in **Projects**. Service startup and connection do not require a project to be ready.
 
 **I closed the window and reopened it, but new environment variables are still missing:** since the background-lifecycle change, closing the window hides Desktop in the tray/menu bar. Use **Quit WebCodex** there, then start a new process.

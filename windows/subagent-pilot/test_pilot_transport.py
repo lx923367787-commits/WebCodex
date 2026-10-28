@@ -114,14 +114,35 @@ class TransportTests(unittest.TestCase):
         self.assertEqual("launch_id_already_used", value["reason"])
         self.assertEqual(1, self.sessions)
 
-    def test_setup_failure_records_stage_without_exception_text_or_retry_claim(self):
+    def test_omission_sends_without_profile_read_or_adjustment(self):
+        pilot.edge_handoff.configure_chat.side_effect = AssertionError("must not inspect settings")
+        value = self.run_pilot()
+        self.assertEqual("sent", value["status"])
+        pilot.edge_handoff.configure_chat.assert_not_called()
+        browser = json.loads((self.root / self.config["launch_id"] / "browser.json").read_text())
+        self.assertEqual(browser["thinking_adjustment"]["status"], "not_requested")
+        self.assertNotIn("thinking_profile", browser)
+
+    def test_setting_failure_is_separate_from_sent_and_never_resends(self):
+        self.config["thinking_profile"] = {"profile_id": "explicit"}
         pilot.edge_handoff.configure_chat.side_effect = pilot.edge_handoff.FlowError("private diagnostic")
         value = self.run_pilot()
-        self.assertEqual("configure_chat", value["failure_stage"])
-        self.assertEqual("unknown", value["status"])
-        self.assertFalse(value["send_boundary_reached"])
-        self.assertEqual(0, self.browser.sends)
-        self.assertNotIn("private diagnostic", json.dumps(value))
+        self.assertEqual("sent", value["status"])
+        self.assertEqual(1, self.browser.sends)
+        browser = json.loads((self.root / self.config["launch_id"] / "browser.json").read_text())
+        self.assertEqual(browser["thinking_adjustment"]["status"], "not_adjusted")
+        self.assertNotIn("thinking_profile", browser)
+        self.assertNotIn("private diagnostic", json.dumps(browser))
+        self.run_pilot()
+        self.assertEqual(1, self.browser.sends)
+
+    def test_confirmed_setting_is_reported_separately(self):
+        self.config["thinking_profile"] = {"profile_id": "explicit"}
+        pilot.edge_handoff.configure_chat.return_value = {"thinking_profile": self.config["thinking_profile"]}
+        value = self.run_pilot()
+        self.assertEqual(value["status"], "sent")
+        browser = json.loads((self.root / self.config["launch_id"] / "browser.json").read_text())
+        self.assertEqual(browser["thinking_adjustment"]["status"], "applied")
 
     def test_preselected_app_chip_is_reused_without_duplicate_typing(self):
         self.browser.text = 'webcodex '

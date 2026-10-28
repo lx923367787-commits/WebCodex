@@ -38,6 +38,18 @@ fn main() {
         }
     };
     let (config_path, once, stop_on_stdin_eof) = match action {
+        RunnerCliAction::ConfigureNativeClis { config_path } => {
+            match webcodex_runner::native_cli_setup::configure(&config_path) {
+                Ok(value) => {
+                    println!("{value}");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    println!("{}", serde_json::json!({"success":false,"error":error}));
+                    std::process::exit(1);
+                }
+            }
+        }
         RunnerCliAction::Run {
             config_path,
             once,

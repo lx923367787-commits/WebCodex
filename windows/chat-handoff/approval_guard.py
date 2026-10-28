@@ -10,6 +10,12 @@ import time
 from urllib.parse import urlsplit
 
 
+USER_MESSAGES_JS = r'''
+  const userCandidates = [...document.querySelectorAll('[data-user-message-bubble="true"],[data-markdown-text-tone="user-message"],[data-message-author-role="user"]')];
+  const users = userCandidates.filter(e => !userCandidates.some(parent => parent !== e && parent.contains(e)));
+'''
+
+
 PROBE_JS = r'''function(_element, argument) {
   const args = JSON.parse(argument);
   const norm = s => (s || '').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
@@ -23,11 +29,12 @@ PROBE_JS = r'''function(_element, argument) {
     }
     return true;
   };
-  const currentUsers = [...document.querySelectorAll('[data-markdown-text-tone="user-message"]')];
-  const users = currentUsers.length ? currentUsers : [...document.querySelectorAll('[data-message-author-role="user"]')];
+''' + USER_MESSAGES_JS + r'''
   const matchingUsers = users.filter(e => (e.textContent || '').includes(args.launch_id)
     && (e.textContent || '').includes(args.goal_id));
-  const bound = matchingUsers.length === 1 && users.length === 1 && matchingUsers[0] === users[users.length - 1];
+  const expectedCount = args.expected_user_count || 1;
+  const bound = matchingUsers.length === 1 && users.length === expectedCount
+    && (matchingUsers[0] === users[users.length - 1] || args.approved_prior_launch === true);
   const surfaces = [...document.querySelectorAll('[data-codex-approval-surface="true"]')].filter(visible);
   const titleMatches = s => /^(?:允许\s*ChatGPT\s*使用\s*webcodex\s*(?:吗)?|Allow\s+ChatGPT\s+to\s+use\s+webcodex)\s*[?？]?$/i.test(norm(s));
   const cards = surfaces.map(card => {
@@ -80,9 +87,14 @@ def chat_url(value):
         return None
 
 
-def inspect(browser, request, scroll_signature=None):
+def inspect(browser, request, scroll_signature=None, *, approved_prior_launch=False):
+    count = request.get('expected_user_count', 1)
+    if type(count) is not int or not 1 <= count <= 10000:
+        raise ValueError('invalid_expected_message_count')
     data = browser.execute_javascript(PROBE_JS, json.dumps({
         'launch_id': request['launch_id'], 'goal_id': request['goal_id'],
+        'expected_user_count': count,
+        'approved_prior_launch': approved_prior_launch is True,
         'scroll_signature': scroll_signature}, ensure_ascii=False))
     if isinstance(data, str):
         data = json.loads(data)
@@ -122,7 +134,7 @@ def same_position(a, b):
             and all(abs(x - y) <= 2 for x, y in zip(a['center'], b['center'])))
 
 
-def run(browser, request, should_stop=lambda: False, timeout=180, clock=time.monotonic, sleep=time.sleep):
+def run(browser, request, should_stop=lambda: False, timeout=180, clock=time.monotonic, sleep=time.sleep, *, approved_prior_launch=False):
     """Observe one exact newly sent chat for a bounded approval window.
 
     sent means the recovery message was observed, never Goal/business success.
@@ -138,6 +150,11 @@ def run(browser, request, should_stop=lambda: False, timeout=180, clock=time.mon
     last_reason = 'message_not_observed'
     misses = 0
 
+    def observe(scroll_signature=None):
+        if approved_prior_launch is True:
+            return inspect(browser, request, scroll_signature=scroll_signature, approved_prior_launch=True)
+        return inspect(browser, request, scroll_signature=scroll_signature)
+
     def result(status, reason):
         return {'status': status, 'reason': reason, 'target_url': target_url,
                 'approved_tools': confirmed, 'approval_click_count': len(attempted),
@@ -147,7 +164,7 @@ def run(browser, request, should_stop=lambda: False, timeout=180, clock=time.mon
         if should_stop():
             return result('unknown', 'cancelled_after_send')
         try:
-            snapshot = inspect(browser, request)
+            snapshot = observe()
         except Exception:
             misses += 1
             if misses >= 3:
@@ -187,7 +204,7 @@ def run(browser, request, should_stop=lambda: False, timeout=180, clock=time.mon
             if should_stop():
                 return result('unknown', 'cancelled_after_send')
             try:
-                inspect(browser, request, scroll_signature=card['signature'])
+                observe(scroll_signature=card['signature'])
             except Exception:
                 return result('unknown', 'approval_scroll_failed')
             previous = None
@@ -199,7 +216,7 @@ def run(browser, request, should_stop=lambda: False, timeout=180, clock=time.mon
                     return result('blocked', 'approval_limit_reached')
                 # Refresh the exact browser, page, card and hit target again just before input.
                 try:
-                    fresh = inspect(browser, request)
+                    fresh = observe()
                 except Exception:
                     return result('unknown', 'browser_observation_failed')
                 fresh_card, fresh_reason = candidate(fresh)
@@ -218,7 +235,7 @@ def run(browser, request, should_stop=lambda: False, timeout=180, clock=time.mon
                 if len(elements) != 1:
                     return result('blocked', 'button_identity_changed')
                 try:
-                    after_resolution = inspect(browser, request)
+                    after_resolution = observe()
                 except Exception:
                     return result('unknown', 'browser_observation_failed')
                 resolved_card, resolved_reason = candidate(after_resolution)

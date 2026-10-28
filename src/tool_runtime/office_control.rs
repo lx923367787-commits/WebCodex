@@ -11,6 +11,13 @@ enum OfficeRequest {
     PolicyGet {
         project: String,
     },
+    CliDiscover {
+        project: String,
+    },
+    CliModels {
+        project: String,
+        provider_id: String,
+    },
     PolicySave {
         project: String,
         expected_revision: i64,
@@ -81,6 +88,8 @@ impl ToolRuntime {
         };
         let (project, write) = match &request {
             OfficeRequest::PolicyGet { project }
+            | OfficeRequest::CliDiscover { project }
+            | OfficeRequest::CliModels { project, .. }
             | OfficeRequest::PlanList { project, .. }
             | OfficeRequest::PlanRead { project, .. } => (project, false),
             OfficeRequest::PolicySave { project, .. }
@@ -102,6 +111,57 @@ impl ToolRuntime {
             Ok(value) if &value.resolved_id == project => value,
             _ => return denied("office_project_unavailable"),
         };
+        if matches!(
+            request,
+            OfficeRequest::CliDiscover { .. } | OfficeRequest::CliModels { .. }
+        ) {
+            let provider = match &request {
+                OfficeRequest::CliModels { provider_id, .. } => {
+                    match webcodex_core::agent_cli::AgentCliProvider::parse(provider_id) {
+                        Ok(provider) => Some(provider),
+                        Err(_) => return denied("agent_cli_invalid_provider_id"),
+                    }
+                }
+                _ => None,
+            };
+            let Some((client_id, _)) = resolved
+                .resolved_id
+                .strip_prefix("agent:")
+                .and_then(|value| value.split_once(':'))
+            else {
+                return denied("office_project_unavailable");
+            };
+            let Some(access) = crate::runner_http::runner_access_from_auth(Some(auth)) else {
+                return denied("office_project_unavailable");
+            };
+            let runner = match self
+                .runner_registry
+                .get_runner_semantic_view_checked_for_auth(client_id, Some(&access))
+                .await
+            {
+                Ok(runner) => runner,
+                Err(_) => return denied("agent_cli_runner_unavailable"),
+            };
+            let target = webcodex_core::runner_protocol::AgentExecutionTarget {
+                client_id: client_id.into(),
+                runner_instance_id: runner.view.runner_instance_id,
+            };
+            return match self
+                .runner_registry
+                .query_agent_cli_inventory(
+                    &access,
+                    &target,
+                    provider,
+                    crate::runner_http::requested_by_from_auth(Some(auth)),
+                )
+                .await
+            {
+                Ok(inventory) => {
+                    ToolResult::ok(crate::agent_team_execution::inventory_projection(inventory))
+                }
+                Err(reason) => denied(&reason),
+            };
+        }
         let principal = match super::communication::communication_principal(Some(auth)) {
             Ok(value) => value,
             Err(_) => return denied("office_human_pat_required"),
@@ -110,6 +170,9 @@ impl ToolRuntime {
             return denied("office_store_unavailable");
         };
         match request {
+            OfficeRequest::CliDiscover { .. } | OfficeRequest::CliModels { .. } => {
+                unreachable!("CLI reads return before accessing task storage")
+            }
             OfficeRequest::PolicyGet { .. } => {
                 serialized(db.get_team_policy(&principal, &resolved.resolved_id))
             }

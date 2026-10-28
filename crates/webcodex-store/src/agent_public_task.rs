@@ -176,8 +176,8 @@ fn audit(
     Ok(())
 }
 
-/// Shared transaction primitive. Only the independently authorized delivery
-/// review path may request success; the retained-observer API allows failure.
+/// Shared transaction primitive for a proven CLI execution outcome. Independent
+/// delivery review may record business acceptance separately.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn complete_cli_worker_task_on_connection(
     conn: &Connection,
@@ -281,8 +281,8 @@ pub(crate) fn complete_cli_worker_task_on_connection(
     {
         return Err(denied("public_task_success_not_proven"));
     }
-    // CliWorker is not a plan member and has zero delegation budget. Do not
-    // impose the requester's CLI minimum recursively on this worker Task.
+    // This execution receipt completes only its exact CLI WorkerTask. It does
+    // not complete the requesting task or impose any delegation/call quota.
     conn.execute("UPDATE wc_agent_public_executions SET state=?2,revision=revision+1,terminal_at_unix_ms=?3,completed_run_id=?4,completed_generation=?5,terminal_result=?6,terminal_reason=?7,completion_key_hash=?8,completion_request_hash=?9 WHERE task_id=?1",params![task_id,outcome.as_str(),now,executor.run.agent_run_id,executor.run.generation,result,reason,key,hash]).map_err(store_error)?;
     conn.execute("UPDATE wc_agent_tasks SET state=?2,terminal_attempt_id=?3,terminal_at_unix_ms=?4,updated_at_unix_ms=MAX(updated_at_unix_ms,?4) WHERE task_id=?1",params![task_id,outcome.as_str(),execution.execution_id,now]).map_err(store_error)?;
     conn.execute("INSERT INTO wc_agent_isolation_audit(event_id,agent_id,run_id,action,code,created_at_unix_ms) VALUES(?1,?2,?3,'complete_cli_worker_task','ok',?4)",params![uuid::Uuid::new_v4().to_string(),executor.run.agent_id,executor.run.agent_run_id,now]).map_err(store_error)?;
@@ -529,6 +529,14 @@ impl Database {
         // attempt: latest_attempt_id remains NULL, so no legacy lookup occurs.
         tx.execute("UPDATE wc_agent_tasks SET state=?2,terminal_attempt_id=?3,terminal_at_unix_ms=?4,updated_at_unix_ms=MAX(updated_at_unix_ms,?4) WHERE task_id=?1",params![task_id,outcome.as_str(),execution_id,now]).map_err(store_error)?;
         audit(&tx, binding, "complete_public_task")?;
+        crate::team_collaboration::task_completed_on(
+            &tx,
+            binding,
+            task_id,
+            execution_id,
+            outcome.as_str(),
+        )
+        .map_err(|_| denied("public_task_notification_unavailable"))?;
         let task =
             load_owned_task(&tx, &authority.communication_principal, task_id, now)?.summary(now);
         let execution = public_execution_on_connection(&tx, task_id)?
@@ -542,8 +550,9 @@ impl Database {
         })
     }
 
-    /// A retained observer can reconcile failure after revocation. It cannot
-    /// approve business success; that requires the current delivery reviewer.
+    /// A retained observer reconciles the exact CLI execution after its process
+    /// has stopped. Succeeded is the proven execution outcome, not acceptance
+    /// of the parent Goal or a requirement to publish/review an artifact.
     #[allow(clippy::too_many_arguments)]
     pub fn complete_agent_cli_worker_task(
         &self,
@@ -554,10 +563,7 @@ impl Database {
         terminal_reason: Option<&str>,
         completion_key: &str,
     ) -> Result<AgentPublicTaskMutation, CommunicationStoreError> {
-        if outcome == AgentTaskState::Succeeded {
-            return Err(denied("public_task_business_review_required"));
-        }
-        if outcome != AgentTaskState::Failed {
+        if !outcome.terminal() {
             return Err(denied("invalid_public_task_completion"));
         }
         let mut conn = self.conn.lock().unwrap();

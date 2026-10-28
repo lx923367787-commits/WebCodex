@@ -242,6 +242,7 @@ pub(crate) fn test_job_snapshot(job_id: &str) -> ShellJobSnapshot {
         error: None,
         command_execution_state: None,
         context: runner_protocol::ShellJobContext {
+            agent_program: None,
             agent_execution: None,
             document: None,
             runtime_project_id: None,
@@ -269,6 +270,7 @@ pub(crate) fn test_job_context(
     validation_steps: Vec<String>,
 ) -> runner_protocol::ShellJobContext {
     runner_protocol::ShellJobContext {
+        agent_program: None,
         agent_execution: None,
         document: None,
         runtime_project_id: None,

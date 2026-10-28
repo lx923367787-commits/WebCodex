@@ -124,7 +124,10 @@ fn agent_handoff_control_failed_recovery_is_operator_only_and_metadata_only() {
     // Fail actual broker publication after the Store transaction has committed.
     // This blocker is a file we create in this fixture's own temporary root.
     let blocker = f.db.agent_private_root();
-    assert!(blocker.starts_with(f._directory.path()));
+    // Database::open canonicalizes its path. Compare the same path form on
+    // Windows, where canonicalization adds the extended-length prefix.
+    let fixture_root = std::fs::canonicalize(f._directory.path()).unwrap();
+    assert!(blocker.starts_with(&fixture_root));
     assert!(!blocker.exists());
     std::fs::write(&blocker, b"synthetic publication blocker").unwrap();
     assert_eq!(

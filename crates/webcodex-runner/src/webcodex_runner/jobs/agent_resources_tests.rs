@@ -1,6 +1,54 @@
 use super::*;
 use webcodex_core::runner_protocol::*;
 
+#[test]
+fn program_resource_layout_is_compact_retains_full_identity_and_preserves_legacy_history() {
+    use base64::Engine;
+    let temporary = tempfile::tempdir().unwrap();
+    let resources = temporary.path().join("resources");
+    std::fs::create_dir(&resources).unwrap();
+    let binding: webcodex_core::agent_program::AgentProgramBinding = serde_json::from_value(serde_json::json!({
+        "version":1,"program_id":"program","enrollment_id":"enrollment","task_id":"task",
+        "run":{"agent_id":"agent","agent_run_id":"run","generation":1},"project":"project",
+        "target":{"client_id":"runner","runner_instance_id":"instance"},
+        "job_id":"job","start_request_id":"request","workspace_project":"agent:runner:project",
+        "workspace_root":path("project"),"relative_cwd":".","resource_set_id":"python",
+        "resource_manifest_hash":"a".repeat(64),"launch_intent_hash":"b".repeat(64),"expires_at_unix_ms":1
+    })).unwrap();
+    let compact = program_resource_directory(&resources, &binding).unwrap();
+    let name = compact.file_name().unwrap().to_str().unwrap();
+    assert_eq!(name.len(), 45);
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&name[2..])
+        .unwrap();
+    assert_eq!(bytes.len(), 32);
+    assert_eq!(
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        binding.identity_hash().unwrap()
+    );
+    let legacy = resources.join(format!("program-{}", binding.identity_hash().unwrap()));
+    std::fs::create_dir(&legacy).unwrap();
+    assert_eq!(
+        program_resource_directory(&resources, &binding).unwrap(),
+        legacy
+    );
+    std::fs::create_dir(&compact).unwrap();
+    assert_eq!(
+        program_resource_directory(&resources, &binding).unwrap_err(),
+        "agent_program_resource_layout_ambiguous"
+    );
+    std::fs::remove_dir(&legacy).unwrap();
+    let store =
+        crate::webcodex_runner::detached_job::DetachedJobStore::new(temporary.path().join("state"));
+    store.initialize_agent_execution_metadata().unwrap();
+    assert_eq!(
+        store
+            .initialize_agent_program_metadata(&resources)
+            .unwrap_err(),
+        "agent_program_missing_dispatch_history"
+    );
+}
+
 fn path(name: &str) -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(format!("C:/resource-fixture/{name}"))
@@ -11,6 +59,8 @@ fn path(name: &str) -> PathBuf {
 
 fn profile() -> AgentExecutionResourceProfile {
     AgentExecutionResourceProfile {
+        host_cli: None,
+        native_worker: None,
         id: "worker-v1".into(),
         provider: None,
         reviewed_controls: None,
@@ -35,6 +85,8 @@ fn profile() -> AgentExecutionResourceProfile {
 
 fn validated(profile: AgentExecutionResourceProfile) -> ValidatedResourceProfiles {
     validate_profiles(&AgentExecutionResourcesConfig {
+        native_cli: None,
+        browser: None,
         profiles: vec![profile],
     })
     .unwrap()
@@ -158,6 +210,8 @@ fn descriptors_are_ordered_and_bind_the_configured_executable_digest() {
     second.id = "other-worker".into();
     second.executable_sha256 = "d".repeat(64);
     let profiles = validate_profiles(&AgentExecutionResourcesConfig {
+        native_cli: None,
+        browser: None,
         profiles: vec![profile(), second],
     })
     .unwrap();
@@ -187,6 +241,8 @@ fn provider_mapping_is_explicit_unique_and_manifest_bound() {
     second.id = "worker-v2".into();
     assert_eq!(
         validate_profiles(&AgentExecutionResourcesConfig {
+            native_cli: None,
+            browser: None,
             profiles: vec![first, second.clone()]
         })
         .unwrap_err(),
@@ -194,6 +250,8 @@ fn provider_mapping_is_explicit_unique_and_manifest_bound() {
     );
     second.provider = Some(AgentCliProvider::Antigravity);
     assert!(validate_profiles(&AgentExecutionResourcesConfig {
+        native_cli: None,
+        browser: None,
         profiles: vec![original, second]
     })
     .is_ok());
@@ -270,18 +328,30 @@ fn user_https_proxy_defaults_off_and_preserves_previous_payloads() {
 #[test]
 fn profile_rejects_duplicate_ids_and_non_native_or_unpinned_executable() {
     let config = AgentExecutionResourcesConfig {
+        native_cli: None,
+        browser: None,
         profiles: vec![profile(), profile()],
     };
     assert!(validate_profiles(&config).is_err());
     for executable in [PathBuf::from("worker.exe"), path("worker.cmd")] {
         let mut p = profile();
         p.executable = executable;
-        assert!(validate_profiles(&AgentExecutionResourcesConfig { profiles: vec![p] }).is_err());
+        assert!(validate_profiles(&AgentExecutionResourcesConfig {
+            native_cli: None,
+            browser: None,
+            profiles: vec![p]
+        })
+        .is_err());
     }
     for hash in ["", "a", &"A".repeat(64), &"g".repeat(64)] {
         let mut p = profile();
         p.executable_sha256 = hash.into();
-        assert!(validate_profiles(&AgentExecutionResourcesConfig { profiles: vec![p] }).is_err());
+        assert!(validate_profiles(&AgentExecutionResourcesConfig {
+            native_cli: None,
+            browser: None,
+            profiles: vec![p]
+        })
+        .is_err());
     }
 }
 
@@ -325,7 +395,12 @@ fn resource_destinations_reject_case_and_parent_file_collisions() {
             sha256: "d".repeat(64),
         });
         assert!(
-            validate_profiles(&AgentExecutionResourcesConfig { profiles: vec![p] }).is_err(),
+            validate_profiles(&AgentExecutionResourcesConfig {
+                native_cli: None,
+                browser: None,
+                profiles: vec![p]
+            })
+            .is_err(),
             "accepted {name}"
         );
     }
@@ -509,3 +584,56 @@ mod snapshots;
 
 #[path = "agent_resource_controls_tests.rs"]
 mod controls;
+
+#[cfg(windows)]
+#[test]
+fn host_cli_catalog_accepts_installer_hardlinks_and_verifies_actual_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let installed = directory.path().join("installed.exe");
+    let launcher = directory.path().join("launcher.exe");
+    std::fs::write(&installed, b"metadata-only fixture, never executed").unwrap();
+    std::fs::hard_link(&installed, &launcher).unwrap();
+    let first = pin_discovered_catalog_executable(&installed, AgentCliProvider::WorkBuddy).unwrap();
+    let linked = pin_discovered_catalog_executable(&launcher, AgentCliProvider::WorkBuddy).unwrap();
+    assert_eq!(
+        first.descriptor.executable_identity,
+        linked.descriptor.executable_identity
+    );
+    assert!(open_host_executable(&launcher, Some(&"0".repeat(64))).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn workbuddy_shared_auto_memory_switch_is_the_only_environment_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let ordinary = validated(profile());
+    let args = vec!["--print".into(), "-y".into()];
+    let baseline = prepare_host(
+        &ordinary.0["worker-v1"],
+        &args,
+        directory.path().into(),
+        "memory-environment-check",
+    )
+    .unwrap();
+    let mut cli = profile();
+    cli.provider = Some(AgentCliProvider::WorkBuddy);
+    let cli = validated(cli);
+    let prepared = prepare_host(
+        &cli.0["worker-v1"],
+        &args,
+        directory.path().into(),
+        "memory-environment-check",
+    )
+    .unwrap();
+    let mut expected = baseline.environment.clone();
+    expected.insert("CODEBUDDY_DISABLE_AUTO_MEMORY".into(), "1".into());
+    // Do not print an inherited environment, including in an assertion failure.
+    assert!(
+        prepared.environment == expected,
+        "only the verified auto-memory switch may differ"
+    );
+    assert_eq!(prepared.args, baseline.args);
+    assert_eq!(prepared.cwd, baseline.cwd);
+    assert_eq!(prepared.program, baseline.program);
+    assert!(prepared.native_host);
+}

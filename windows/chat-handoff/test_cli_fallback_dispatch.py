@@ -330,7 +330,7 @@ class DispatchTests(unittest.TestCase):
 
 
 class ServiceIdentityTests(unittest.TestCase):
-    def test_both_dispatchers_wait_for_refresh_then_keep_one_request_and_frozen_profile(self):
+    def test_both_dispatchers_ignore_profile_expiry_and_keep_one_request(self):
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "chat-agents"))
         import chat_agents
         import team_agent_dispatch
@@ -356,22 +356,13 @@ class ServiceIdentityTests(unittest.TestCase):
                 service.selected_profile(envelope["thinking_profile_id"])
                 control = Control(envelope)
                 cache(1)  # The catalog expires after manager admission, before dispatch.
-                for _ in range(5):
-                    result = dispatcher.dispatch(control, service, envelope[identifier])
-                    self.assertEqual(result["state"], "profile_unavailable")
-                    self.assertIsNone(result["request_id"])
-                    if dispatcher is adapter:
-                        self.assertFalse(result["slot_held"])
-                self.assertFalse((runtime / "tasks").exists())
-                self.assertTrue(all(record["state"] == "profile_unavailable" for record in control.records))
-                cache(time.time())
-                control.envelope["dispatch_attempt_id"] = "9fefbca3-46fc-4fd4-85a8-75691cbaf405"
                 started = dispatcher.dispatch(control, service, envelope[identifier])
                 expected = dispatcher._launch_arguments(envelope)[1]
                 self.assertEqual(started["request_id"], expected)
                 self.assertEqual(started["state"], "unknown")  # Fake thread never executes a browser operation.
+                self.assertEqual(started["chat_state"]["requested_thinking_profile"]["setting_error"], "thinking_profile_unavailable")
                 control.envelope["dispatch_permitted"] = False
-                cache(1)
+                cache(time.time())
                 replayed = dispatcher.dispatch(control, service, envelope[identifier])
                 self.assertEqual(replayed["request_id"], expected)
                 self.assertEqual(replayed["state"], "unknown")

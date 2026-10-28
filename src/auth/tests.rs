@@ -1372,16 +1372,18 @@ fn enforce_token_surface_matrix() {
         (
             "issued model run",
             model,
-            vec!["/mcp", "/api/tools/list", "/api/tools/call"],
+            vec![
+                "/mcp",
+                "/api/tools/list",
+                "/api/tools/call",
+                "/api/jobs/list",
+                "/api/projects/read_file",
+                "/api/projects/run_job",
+            ],
             runner_transport
                 .iter()
                 .copied()
-                .chain([
-                    "/api/runtime/status",
-                    "/api/projects/list",
-                    "/api/jobs/list",
-                    "/api/users/me",
-                ])
+                .chain(["/api/runtime/status", "/api/projects/list", "/api/users/me"])
                 .collect(),
             "agent_credential_audience_denied",
         ),

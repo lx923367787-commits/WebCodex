@@ -59,9 +59,11 @@ pub enum RunnerFeature {
     JobStateReconciliation,
     CodingAgentRuns,
     AgentIsolatedExecutionV1,
+    AgentProgramExecutionV1,
     NativeToolPlugins,
     ManagedSshResources,
     RunnerConfigControl,
+    ToolConnections,
     ComputerControl,
     ComputerScrollToElement,
     ComputerKeyInput,
@@ -69,7 +71,7 @@ pub enum RunnerFeature {
     ComputerTextInput,
 }
 
-const ALL_RUNNER_FEATURES: [RunnerFeature; 59] = [
+const ALL_RUNNER_FEATURES: [RunnerFeature; 61] = [
     RunnerFeature::Shell,
     RunnerFeature::FileRead,
     RunnerFeature::FileWrite,
@@ -121,9 +123,11 @@ const ALL_RUNNER_FEATURES: [RunnerFeature; 59] = [
     RunnerFeature::JobStateReconciliation,
     RunnerFeature::CodingAgentRuns,
     RunnerFeature::AgentIsolatedExecutionV1,
+    RunnerFeature::AgentProgramExecutionV1,
     RunnerFeature::NativeToolPlugins,
     RunnerFeature::ManagedSshResources,
     RunnerFeature::RunnerConfigControl,
+    RunnerFeature::ToolConnections,
     RunnerFeature::ComputerControl,
     RunnerFeature::ComputerScrollToElement,
     RunnerFeature::ComputerKeyInput,
@@ -210,10 +214,12 @@ impl RunnerFeature {
             Self::JobStateReconciliation => wire::RUNNER_CAPABILITY_JOB_STATE_RECONCILIATION,
             Self::CodingAgentRuns => wire::RUNNER_CAPABILITY_CODING_AGENT_RUNS,
             Self::AgentIsolatedExecutionV1 => wire::RUNNER_CAPABILITY_AGENT_ISOLATED_EXECUTION_V1,
+            Self::AgentProgramExecutionV1 => wire::RUNNER_CAPABILITY_AGENT_PROGRAM_EXECUTION_V1,
             Self::NativeToolPlugins => wire::RUNNER_CAPABILITY_NATIVE_TOOL_PLUGINS,
             Self::ManagedSshResources => wire::RUNNER_CAPABILITY_MANAGED_SSH_RESOURCES,
             Self::RunnerConfigControl => wire::RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL,
             Self::LocalCli => wire::RUNNER_CAPABILITY_LOCAL_CLI,
+            Self::ToolConnections => webcodex_core::tool_connection::TOOL_CONNECTION_CAPABILITY,
             Self::ComputerControl => wire::RUNNER_CAPABILITY_COMPUTER_CONTROL,
             Self::ComputerScrollToElement => wire::RUNNER_CAPABILITY_COMPUTER_SCROLL_TO_ELEMENT,
             Self::ComputerKeyInput => wire::RUNNER_CAPABILITY_COMPUTER_KEY_INPUT,
@@ -284,10 +290,12 @@ impl RunnerFeature {
             wire::RUNNER_CAPABILITY_JOB_STATE_RECONCILIATION => Self::JobStateReconciliation,
             wire::RUNNER_CAPABILITY_CODING_AGENT_RUNS => Self::CodingAgentRuns,
             wire::RUNNER_CAPABILITY_AGENT_ISOLATED_EXECUTION_V1 => Self::AgentIsolatedExecutionV1,
+            wire::RUNNER_CAPABILITY_AGENT_PROGRAM_EXECUTION_V1 => Self::AgentProgramExecutionV1,
             wire::RUNNER_CAPABILITY_NATIVE_TOOL_PLUGINS => Self::NativeToolPlugins,
             wire::RUNNER_CAPABILITY_MANAGED_SSH_RESOURCES => Self::ManagedSshResources,
             wire::RUNNER_CAPABILITY_RUNNER_CONFIG_CONTROL => Self::RunnerConfigControl,
             wire::RUNNER_CAPABILITY_LOCAL_CLI => Self::LocalCli,
+            webcodex_core::tool_connection::TOOL_CONNECTION_CAPABILITY => Self::ToolConnections,
             wire::RUNNER_CAPABILITY_COMPUTER_CONTROL => Self::ComputerControl,
             wire::RUNNER_CAPABILITY_COMPUTER_SCROLL_TO_ELEMENT => Self::ComputerScrollToElement,
             wire::RUNNER_CAPABILITY_COMPUTER_KEY_INPUT => Self::ComputerKeyInput,
@@ -350,9 +358,11 @@ impl RunnerFeature {
             | Self::JobStateReconciliation
             | Self::CodingAgentRuns
             | Self::AgentIsolatedExecutionV1
+            | Self::AgentProgramExecutionV1
             | Self::NativeToolPlugins
             | Self::ManagedSshResources
             | Self::RunnerConfigControl
+            | Self::ToolConnections
             | Self::ComputerControl
             | Self::ComputerScrollToElement
             | Self::ComputerKeyInput
@@ -421,9 +431,11 @@ impl RunnerFeature {
             Self::CodingAgentRuns => capabilities.coding_agent_runs,
             // No baseline or neighboring capability implies this contract.
             Self::AgentIsolatedExecutionV1 => capabilities.agent_isolated_execution_v1(),
+            Self::AgentProgramExecutionV1 => capabilities.agent_program_execution_v1(),
             Self::NativeToolPlugins => capabilities.native_tool_plugins,
             Self::ManagedSshResources => capabilities.managed_ssh_resources,
             Self::RunnerConfigControl => capabilities.runner_config_control,
+            Self::ToolConnections => capabilities.tool_connections,
             Self::ComputerControl => capabilities.computer_control,
             Self::ComputerScrollToElement => capabilities.computer_scroll_to_element,
             Self::ComputerKeyInput => capabilities.computer_key_input,

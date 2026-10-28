@@ -182,6 +182,14 @@ fn no_start_code(code: &str) -> bool {
 }
 
 pub(crate) fn init_agent_host_dispatch_tables(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wc_agent_enrollment_renewals(
+        renewal_id TEXT PRIMARY KEY,enrollment_id TEXT NOT NULL,original_request_id TEXT NOT NULL,
+        key_hash TEXT NOT NULL,previous_expiry INTEGER NOT NULL,expires_at INTEGER NOT NULL,
+        source_run_id TEXT NOT NULL,source_generation INTEGER NOT NULL,created_at INTEGER NOT NULL,
+        UNIQUE(enrollment_id,key_hash));
+        CREATE TRIGGER IF NOT EXISTS wc_enrollment_renewal_immutable BEFORE UPDATE ON wc_agent_enrollment_renewals BEGIN SELECT RAISE(ABORT,'renewal history is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS wc_enrollment_renewal_preserved BEFORE DELETE ON wc_agent_enrollment_renewals BEGIN SELECT RAISE(ABORT,'renewal history is preserved'); END;")?;
+
     conn.execute_batch("CREATE TABLE IF NOT EXISTS wc_agent_host_dispatch_bindings (
       queue_kind TEXT NOT NULL CHECK(queue_kind IN ('member','fallback')), queue_id TEXT NOT NULL,
       owner_user TEXT NOT NULL, project TEXT NOT NULL, root_task_id TEXT NOT NULL, source_task_id TEXT NOT NULL,
@@ -1081,3 +1089,84 @@ pub(crate) fn require_agent_host_dispatch_quiescent_on_connection(
 #[cfg(test)]
 #[path = "agent_host_dispatch_tests.rs"]
 mod tests;
+
+/// Trusted Host has verified the original message in its original chat. Renew
+/// only that expired, still-unclaimed one-time capability; never mint another
+/// identity, re-send the business task, or turn Unknown into NotSent.
+impl Database {
+    pub fn renew_original_member_delivery(
+        &self,
+        manager: &VerifiedAgentRun,
+        queue_id: &str,
+        original_request: &str,
+        recovery_key: &str,
+    ) -> Result<serde_json::Value> {
+        if uuid::Uuid::parse_str(original_request)
+            .map(|u| u.to_string())
+            .ok()
+            .as_deref()
+            != Some(original_request)
+            || recovery_key.trim().is_empty()
+            || recovery_key.len() > 128
+            || recovery_key.chars().any(char::is_control)
+        {
+            return Err(denied());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(unavailable)?;
+        let row = binding(&tx, AgentHostQueueKind::Member, queue_id)?.ok_or_else(denied)?;
+        let owner = authorize_binding(&tx, manager, &row, true)?;
+        crate::agent_isolation::ensure_agent_run_execution_open_on_connection(
+            &tx,
+            &webcodex_core::runner_protocol::AgentRunRef {
+                agent_id: manager.agent_id().into(),
+                agent_run_id: manager.run_id().into(),
+                generation: manager.generation(),
+            },
+        )?;
+        let queue = queue_view(&tx, &owner, AgentHostQueueKind::Member, queue_id)?;
+        matches_queue(&row, &queue)?;
+        if queue.cancelled
+            || !matches!(queue.state.as_str(), "unknown" | "running")
+            || queue.request.as_deref() != Some(original_request)
+            || queue.dispatch != row.delivery_attempt_id
+            || !matches!(task_state(&tx, &row)?.as_str(), "ready" | "active")
+        {
+            return Err(denied());
+        }
+        let key = digest(recovery_key);
+        let prior:Option<(String,i64)>=tx.query_row("SELECT renewal_id,expires_at FROM wc_agent_enrollment_renewals WHERE enrollment_id=?1 AND key_hash=?2 AND original_request_id=?3",params![row.binding.enrollment_id,key,original_request],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(unavailable)?;
+        if let Some((id, expiry)) = prior {
+            return Ok(
+                serde_json::json!({"renewal_id":id,"renewed":false,"replayed":true,"expires_at_unix_ms":expiry,"original_request_id":original_request,"enrollment_id":row.binding.enrollment_id,"task_id":row.binding.task_id,"business_task_resent":false}),
+            );
+        }
+        let prior_expiry:Option<i64>=tx.query_row("SELECT e.delivery_expires_at_unix_ms FROM wc_agent_enrollments e JOIN wc_agent_runs r ON r.run_id=e.run_id WHERE e.enrollment_id=?1 AND e.agent_id=?2 AND e.task_id=?3 AND e.source_agent_id=?4 AND e.state='issued' AND e.delivery_state='delivery_unknown' AND e.delivery_secret_hash IS NOT NULL AND e.delivery_expires_at_unix_ms<=?5 AND r.state='pending' AND r.previous_run_id IS NULL AND r.execution_close_id IS NULL AND NOT EXISTS(SELECT 1 FROM wc_agent_enrollment_assignments a WHERE a.agent_id=e.agent_id) AND NOT EXISTS(SELECT 1 FROM wc_agent_host_windows w WHERE w.run_id=e.run_id)",params![row.binding.enrollment_id,row.binding.agent_id,row.binding.task_id,manager.agent_id(),now()],|r|r.get(0)).optional().map_err(unavailable)?;
+        let prior_expiry = prior_expiry
+            .ok_or_else(|| AgentIsolationError::new("enrollment_original_renewal_ineligible"))?;
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM wc_agent_enrollment_renewals WHERE enrollment_id=?1",
+                [&row.binding.enrollment_id],
+                |r| r.get(0),
+            )
+            .map_err(unavailable)?;
+        if count >= 3 {
+            return Err(AgentIsolationError::new(
+                "enrollment_original_renewal_limit",
+            ));
+        }
+        let expiry = now() + 5 * 60 * 1000;
+        let id = format!("wc_enrollment_renewal_{}", uuid::Uuid::new_v4().simple());
+        tx.execute("INSERT INTO wc_agent_enrollment_renewals(renewal_id,enrollment_id,original_request_id,key_hash,previous_expiry,expires_at,source_run_id,source_generation,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![id,row.binding.enrollment_id,original_request,key,prior_expiry,expiry,manager.run_id(),manager.generation(),now()]).map_err(unavailable)?;
+        // The original secret hash, delivery key and Unknown record are retained.
+        tx.execute("UPDATE wc_agent_enrollments SET delivery_expires_at_unix_ms=?2,delivery_source_run_id=?3,delivery_source_generation=?4 WHERE enrollment_id=?1",params![row.binding.enrollment_id,expiry,manager.run_id(),manager.generation()]).map_err(unavailable)?;
+        tx.execute("UPDATE wc_agent_runs SET expires_at_unix_ms=MAX(expires_at_unix_ms,?2) WHERE run_id=(SELECT run_id FROM wc_agent_enrollments WHERE enrollment_id=?1) AND state='pending'",params![row.binding.enrollment_id,now()+crate::agent_isolation::AGENT_RUN_LIFETIME_MS]).map_err(unavailable)?;
+        tx.commit().map_err(unavailable)?;
+        Ok(
+            serde_json::json!({"renewal_id":id,"renewed":true,"replayed":false,"expires_at_unix_ms":expiry,"original_request_id":original_request,"enrollment_id":row.binding.enrollment_id,"task_id":row.binding.task_id,"business_task_resent":false}),
+        )
+    }
+}

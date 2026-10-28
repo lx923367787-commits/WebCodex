@@ -15,6 +15,7 @@ fn query() -> AgentCliCatalogQuery {
 }
 fn resource() -> AgentExecutionResourceDescriptor {
     AgentExecutionResourceDescriptor {
+        host_cli: None,
         project_workspace_copy: false,
         resource_set_id: "fixed-profile".into(),
         manifest_hash: "a".repeat(64),
@@ -108,5 +109,51 @@ fn oversized_typed_result_never_falls_back_to_raw_stdout() {
     assert_eq!(
         output.error.as_deref(),
         Some("agent_cli_response_too_large")
+    );
+}
+
+#[test]
+fn cli_load_error_keeps_installation_separate_from_execution_readiness() {
+    let inventory = serde_json::from_value(serde_json::json!({
+        "version":1,"target":{"client_id":"runner","runner_instance_id":"instance"},
+        "observed_at_ms":1,"expires_at_ms":60001,"installations":[{
+            "providerId":"codex","label":"Codex","installed":true,"native":true,
+            "adapterAvailable":true,"status":"discovered","message":"Installed",
+            "executionReady":true,"executionMode":"native_host"
+        }]
+    }))
+    .unwrap();
+    let code = "cli_resource_configuration_failed:agent_execution_metadata_invalid";
+    let projected = inventory_with_load_status(Ok(inventory), Some(code.into())).unwrap();
+    let entry = &projected.installations[0];
+    assert!(entry.installed);
+    assert_eq!(entry.execution_ready, Some(false));
+    assert_eq!(entry.reason_code.as_deref(), Some(code));
+    assert!(entry.message.contains(code));
+    assert_eq!(
+        inventory_with_load_status(Err("metadata_query_failed".into()), Some(code.into()))
+            .unwrap_err(),
+        code
+    );
+}
+
+#[test]
+fn optional_cli_load_error_does_not_disable_another_registered_cli() {
+    let inventory = serde_json::from_value(serde_json::json!({
+        "version":1,"target":{"client_id":"runner","runner_instance_id":"instance"},
+        "observed_at_ms":1,"expires_at_ms":60001,"installations":[
+            {"providerId":"codex","label":"Codex","installed":true,"native":true,"adapterAvailable":true,"status":"discovered","message":"Loaded","executionReady":true},
+            {"providerId":"claude","label":"Claude","installed":true,"native":true,"adapterAvailable":true,"status":"discovered","message":"Found","executionReady":false}
+        ]
+    })).unwrap();
+    let errors =
+        std::collections::BTreeMap::from([("claude".into(), "native_cli_open_failed:32".into())]);
+    let projected = inventory_with_resource_errors(Ok(inventory), &errors).unwrap();
+    assert_eq!(projected.installations[0].execution_ready, Some(true));
+    assert!(projected.installations[0].reason_code.is_none());
+    assert!(projected.installations[1].installed);
+    assert_eq!(
+        projected.installations[1].reason_code.as_deref(),
+        Some("native_cli_open_failed:32")
     );
 }

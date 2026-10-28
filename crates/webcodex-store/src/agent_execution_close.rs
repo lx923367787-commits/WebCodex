@@ -156,7 +156,7 @@ pub(crate) fn validate_agent_execution_admission_on_connection(
             conn, &verified, task, operation,
         )?;
     }
-    let requester:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_agent_enrollments e JOIN wc_agent_runs r ON r.agent_id=e.agent_id JOIN wc_agent_enrollment_assignments a ON a.agent_id=e.agent_id JOIN wc_agent_tasks t ON t.task_id=e.task_id WHERE e.enrollment_id=?1 AND e.agent_id=?2 AND e.owner_user=?3 AND e.project=?4 AND e.task_id=?5 AND e.state='claimed' AND e.purpose IN ('manager','member') AND json_extract(e.policy_json,'$.max_cli_calls')>0 AND a.state='active' AND t.state IN ('ready','active') AND r.run_id=?6 AND r.generation=?7 AND r.state='active')",params![binding.requester.enrollment_id,binding.requester.run.agent_id,owner,binding.project,binding.requester.source_task_id,binding.requester.run.agent_run_id,binding.requester.run.generation],|r|r.get(0)).map_err(sql)?;
+    let requester:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_agent_enrollments e JOIN wc_agent_runs r ON r.agent_id=e.agent_id JOIN wc_agent_enrollment_assignments a ON a.agent_id=e.agent_id JOIN wc_agent_tasks t ON t.task_id=e.task_id WHERE e.enrollment_id=?1 AND e.agent_id=?2 AND e.owner_user=?3 AND e.project=?4 AND e.task_id=?5 AND e.state='claimed' AND e.purpose IN ('manager','member') AND a.state='active' AND t.state IN ('ready','active') AND r.run_id=?6 AND r.generation=?7 AND r.state='active')",params![binding.requester.enrollment_id,binding.requester.run.agent_id,owner,binding.project,binding.requester.source_task_id,binding.requester.run.agent_run_id,binding.requester.run.generation],|r|r.get(0)).map_err(sql)?;
     let worker:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wc_agent_enrollments e JOIN wc_agent_runs r ON r.agent_id=e.agent_id JOIN wc_agent_enrollment_assignments a ON a.agent_id=e.agent_id JOIN wc_agent_tasks t ON t.task_id=e.task_id WHERE e.enrollment_id=?1 AND e.agent_id=?2 AND e.owner_user=?3 AND e.project=?4 AND e.task_id=?5 AND e.state='claimed' AND e.purpose='cli_worker' AND json_extract(e.policy_json,'$.max_subagents')=0 AND json_extract(e.policy_json,'$.max_cli_calls')=0 AND a.state='active' AND t.state IN ('ready','active') AND e.source_agent_id=?6 AND COALESCE(e.delivery_source_run_id,e.source_run_id)=?7 AND COALESCE(e.delivery_source_generation,e.source_generation)=?8 AND r.run_id=?9 AND r.generation=?10 AND r.state='active')",params![binding.executor.enrollment_id,binding.executor.run.agent_id,owner,binding.project,binding.executor.task_id,binding.requester.run.agent_id,binding.requester.run.agent_run_id,binding.requester.run.generation,binding.executor.run.agent_run_id,binding.executor.run.generation],|r|r.get(0)).map_err(sql)?;
     if !requester || !worker {
         return Err(error("agent_execution_assignment_denied"));
@@ -478,7 +478,17 @@ fn plan_on_connection(
             return Err(error("agent_execution_close_conflict"));
         }
     }
-    let requires_explicit_close = !requests.is_empty()
+    let mut pending_programs = 0usize;
+    for run in &runs {
+        // These requests never crossed the Store dispatch fence. Closing them
+        // atomically cannot claim to stop a process that may have launched.
+        conn.execute("UPDATE wc_agent_programs SET state='cancelled',updated_at=?2 WHERE run_id=?1 AND state='prepared'",params![run.agent_run_id,now()]).map_err(sql)?;
+        conn.execute("UPDATE wc_agent_browser_actions SET state='cancelled' WHERE run_id=?1 AND state='prepared'",[&run.agent_run_id]).map_err(sql)?;
+        pending_programs += crate::agent_program::pending_on(conn, &run.agent_run_id)
+            .map_err(|_| error("agent_program_store_unavailable"))?;
+    }
+    let requires_explicit_close = pending_programs > 0
+        || !requests.is_empty()
         || !blocked.is_empty()
         || reserved.iter().any(|(_, _, prepared)| prepared.is_some());
     let plan = AgentExecutionClosePlan {
@@ -490,7 +500,8 @@ fn plan_on_connection(
         blocked_attempt_ids: blocked,
         requires_explicit_close,
     };
-    let complete = plan.requests.is_empty() && plan.blocked_attempt_ids.is_empty();
+    let complete =
+        pending_programs == 0 && plan.requests.is_empty() && plan.blocked_attempt_ids.is_empty();
     for run in &plan.runs {
         conn.execute("UPDATE wc_agent_runs SET execution_close_id=?2,execution_closed_at_unix_ms=?3 WHERE run_id=?1 AND execution_close_id IS NULL",params![run.agent_run_id,plan.close_ref.close_id,complete.then(now)]).map_err(sql)?;
     }
@@ -519,12 +530,25 @@ fn progress(
     let (done,saved):(Option<i64>,String)=conn.query_row("SELECT execution_closed_at_unix_ms,execution_close_receipts_json FROM wc_agent_runs WHERE run_id=?1 AND execution_close_id=?2",params![plan.close_ref.source.agent_run_id,plan.close_ref.close_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(sql)?;
     let receipts: Vec<AgentExecutionCloseReceipt> =
         serde_json::from_str(&saved).map_err(invalid)?;
+    let pending_programs = plan
+        .runs
+        .iter()
+        .try_fold(0usize, |count, run| {
+            crate::agent_program::pending_on(conn, &run.agent_run_id).map(|n| count + n)
+        })
+        .map_err(|_| error("agent_program_store_unavailable"))?;
+    let complete = pending_programs == 0
+        && (done.is_some()
+            || (receipts.len() == plan.requests.len() && plan.blocked_attempt_ids.is_empty()));
+    if complete && done.is_none() {
+        conn.execute("UPDATE wc_agent_runs SET execution_closed_at_unix_ms=?2 WHERE execution_close_id=?1 AND execution_closed_at_unix_ms IS NULL",params![plan.close_ref.close_id,now()]).map_err(sql)?;
+    }
     Ok(AgentExecutionCloseProgress {
         close_id: plan.close_ref.close_id.clone(),
-        complete: done.is_some(),
+        complete,
         accepted_targets: receipts.len(),
         required_targets: plan.requests.len(),
-        unresolved_attempts: plan.blocked_attempt_ids.len(),
+        unresolved_attempts: plan.blocked_attempt_ids.len() + pending_programs,
     })
 }
 
@@ -758,9 +782,20 @@ pub(crate) fn require_agent_run_execution_closed_on_connection(
     run_owned(conn, owner, project, run)?;
     let (id,done):(Option<String>,Option<i64>)=conn.query_row("SELECT execution_close_id,execution_closed_at_unix_ms FROM wc_agent_runs WHERE run_id=?1",[&run.agent_run_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(sql)?;
     if done.is_some() {
+        if crate::agent_program::pending_on(conn, &run.agent_run_id)
+            .map_err(|_| error("agent_program_store_unavailable"))?
+            > 0
+        {
+            return Err(error("agent_program_stop_proof_required"));
+        }
         return Ok(());
     }
     if id.is_some() {
+        if let Some(plan) = stored_plan(conn, run)? {
+            if progress(conn, &plan)?.complete {
+                return Ok(());
+            }
+        }
         return Err(error("agent_execution_close_pending"));
     }
     let plan = plan_on_connection(conn, owner, project, run, now().saturating_add(30_000))?;
@@ -899,7 +934,12 @@ impl Database {
             params![plan.close_ref.source.agent_run_id, encode(&receipts)?],
         )
         .map_err(sql)?;
-        if receipts.len() == plan.requests.len() && plan.blocked_attempt_ids.is_empty() {
+        if receipts.len() == plan.requests.len()
+            && plan.blocked_attempt_ids.is_empty()
+            && plan.runs.iter().all(|run| {
+                crate::agent_program::pending_on(&tx, &run.agent_run_id).is_ok_and(|n| n == 0)
+            })
+        {
             tx.execute("UPDATE wc_agent_runs SET execution_closed_at_unix_ms=?2 WHERE execution_close_id=?1 AND execution_closed_at_unix_ms IS NULL",params![plan.close_ref.close_id,now()]).map_err(sql)?;
         }
         let result = progress(&tx, &plan)?;

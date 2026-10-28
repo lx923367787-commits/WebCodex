@@ -1,9 +1,11 @@
 //! Side-effect-free shared protocol contracts and helpers for WebCodex.
 
 pub mod activity_contract;
+pub mod agent_browser;
 pub mod agent_cli;
 pub mod agent_cli_controls;
 pub mod agent_private_path;
+pub mod agent_program;
 pub mod apply_edits_shared;
 pub mod apply_patch_shared;
 pub mod artifact_policy;
@@ -15,6 +17,7 @@ pub mod cli_fallback;
 pub mod cli_result;
 pub mod coding_agent;
 pub mod goal;
+pub mod host_cli;
 pub mod host_goal;
 pub mod job_observation;
 pub mod local_cli;
@@ -35,6 +38,7 @@ pub mod shell_quote;
 pub mod skill_metadata;
 pub mod skill_store;
 pub mod ssh_resource;
+pub mod tool_connection;
 pub mod validation_bridge;
 pub mod validation_evidence;
 

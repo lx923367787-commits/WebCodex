@@ -272,7 +272,7 @@ fn proxy_payload_requires_a_matching_review_and_changes_the_frozen_manifest() {
     let original_start = codebuddy_files_start(&baseline);
     assert_eq!(
         baseline.cleanup_requirements(&original_start).unwrap(),
-        (true, false)
+        (false, false)
     );
     let mut proxy = p;
     proxy.user_https_proxy = true;
@@ -315,7 +315,7 @@ fn proxy_payload_requires_a_matching_review_and_changes_the_frozen_manifest() {
         profiles
             .cleanup_requirements(&codebuddy_files_start(&profiles))
             .unwrap(),
-        (true, true)
+        (false, false)
     );
     let mut invalid = profiles.clone();
     invalid.0.get_mut("worker-v1").unwrap().user_https_proxy = false;
@@ -384,6 +384,8 @@ fn codebuddy_files_materialization_rejects_replaced_control_or_argv() {
     let mut changed = p;
     changed.files[0].sha256 = "f".repeat(64);
     assert!(validate_profiles(&AgentExecutionResourcesConfig {
+        native_cli: None,
+        browser: None,
         profiles: vec![changed]
     })
     .is_err());
@@ -451,7 +453,12 @@ fn reviewed_start(profiles: &ValidatedResourceProfiles) -> AgentExecutionStart {
 }
 
 fn failure(p: AgentExecutionResourceProfile) -> String {
-    validate_profiles(&AgentExecutionResourcesConfig { profiles: vec![p] }).unwrap_err()
+    validate_profiles(&AgentExecutionResourcesConfig {
+        native_cli: None,
+        browser: None,
+        profiles: vec![p],
+    })
+    .unwrap_err()
 }
 
 #[test]
@@ -644,6 +651,8 @@ fn reviewed_input_rejects_approval_claims_and_writable_control_locations() {
         let mut changed = reviewed_profile();
         changed.reviewed_controls.as_mut().unwrap().control_files[0].path = path.into();
         assert!(validate_profiles(&AgentExecutionResourcesConfig {
+            native_cli: None,
+            browser: None,
             profiles: vec![changed]
         })
         .is_err());

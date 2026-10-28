@@ -226,6 +226,112 @@ fn resolve_project_source(
     })
 }
 
+struct ValidatedWorkOnProjectInput {
+    source: CodingProjectSource,
+    mode: String,
+    base_ref: Option<String>,
+    instruction: String,
+    session_id: Option<String>,
+}
+
+// One pure preflight for the canonical runtime and native first-use enrollment.
+// Validation must precede creating either an Agent or a Workflow Session.
+fn validate_work_on_project_input(
+    project: String,
+    client_id: Option<String>,
+    path: Option<String>,
+    mode: Option<String>,
+    base_ref: Option<String>,
+    instruction: String,
+    session_id: Option<String>,
+) -> Result<ValidatedWorkOnProjectInput, ToolResult> {
+    let source = resolve_project_source(project, client_id, path)?;
+    let mode = mode.unwrap_or_else(|| "checkout".into());
+    if !matches!(mode.as_str(), "checkout" | "worktree") {
+        return Err(invalid_project_source(
+            "mode must be 'checkout' or 'worktree'",
+            json!({"field":"mode","allowed":["checkout","worktree"]}),
+        ));
+    }
+    if mode == "checkout" && base_ref.is_some() {
+        return Err(invalid_project_source(
+            "base_ref is only valid with mode='worktree'",
+            json!({"field":"base_ref","requires":{"mode":"worktree"}}),
+        ));
+    }
+    if base_ref
+        .as_deref()
+        .is_some_and(|value| value.is_empty() || value.len() > 1024 || value.contains('\0'))
+    {
+        return Err(invalid_project_source(
+            "base_ref must contain 1..=1024 non-NUL bytes",
+            json!({"field":"base_ref"}),
+        ));
+    }
+    if mode == "worktree" && matches!(source, CodingProjectSource::Existing { .. }) {
+        return Err(invalid_project_source(
+            "mode='worktree' requires client_id + path source checkout",
+            json!({"field":"mode","required_with":"client_id + path"}),
+        ));
+    }
+    let instruction = instruction.trim().to_string();
+    if instruction.is_empty()
+        || instruction.chars().count() > sessions::MAX_CODING_INSTRUCTION_CHARS
+    {
+        return Err(ToolResult::err_with_output(
+            format!(
+                "instruction must contain 1..={} characters",
+                sessions::MAX_CODING_INSTRUCTION_CHARS
+            ),
+            json!({"error_kind":"invalid_coding_instruction","field":"instruction","max_chars":sessions::MAX_CODING_INSTRUCTION_CHARS,"state_changed":false}),
+        ));
+    }
+    if session_id
+        .as_deref()
+        .is_some_and(|value| value != value.trim() || !sessions::is_valid_session_id(value))
+    {
+        return Err(ToolResult::err_with_output(
+            "session_id must be a valid wc_sess_* Workflow Session id",
+            json!({"error_kind":"invalid_session_id","failure_kind":"invalid_arguments","field":"session_id","expected_format":"wc_sess_*","state_changed":false}),
+        ));
+    }
+    Ok(ValidatedWorkOnProjectInput {
+        source,
+        mode,
+        base_ref,
+        instruction,
+        session_id,
+    })
+}
+
+impl ToolRuntime {
+    pub(crate) fn validate_work_on_project_call(call: &ToolCall) -> Result<(), ToolResult> {
+        let ToolCall::WorkOnProject {
+            project,
+            client_id,
+            path,
+            mode,
+            base_ref,
+            instruction,
+            session_id,
+            ..
+        } = call
+        else {
+            return Err(ToolResult::err("Expected work_on_project input"));
+        };
+        validate_work_on_project_input(
+            project.clone(),
+            client_id.clone(),
+            path.clone(),
+            mode.clone(),
+            base_ref.clone(),
+            instruction.clone(),
+            session_id.clone(),
+        )
+        .map(|_| ())
+    }
+}
+
 fn registration_scope_denied(auth: Option<&AuthContext>, operation: &str) -> Option<ToolResult> {
     auth.is_some_and(|auth| !auth.has_scope(crate::auth::SCOPE_PROJECT_WRITE))
         .then(|| {
@@ -1236,84 +1342,31 @@ impl ToolRuntime {
         transport: SessionTransport,
         correlation: &mut ToolCallCorrelation,
     ) -> ToolResult {
-        let project_source = match resolve_project_source(project, client_id, path) {
-            Ok(source) => source,
-            Err(result) => return result,
-        };
-        let mode = mode.as_deref().unwrap_or("checkout");
-        if !matches!(mode, "checkout" | "worktree") {
-            return invalid_project_source(
-                "mode must be 'checkout' or 'worktree'",
-                json!({"field": "mode", "allowed": ["checkout", "worktree"]}),
-            );
-        }
-        if mode == "checkout" && base_ref.is_some() {
-            return invalid_project_source(
-                "base_ref is only valid with mode='worktree'",
-                json!({"field": "base_ref", "requires": {"mode": "worktree"}}),
-            );
-        }
-        if let Some(base_ref) = base_ref.as_deref() {
-            if base_ref.is_empty() || base_ref.len() > 1024 || base_ref.contains('\0') {
-                return invalid_project_source(
-                    "base_ref must contain 1..=1024 non-NUL bytes",
-                    json!({"field": "base_ref"}),
-                );
-            }
-        }
-        if mode == "worktree" && matches!(project_source, CodingProjectSource::Existing { .. }) {
-            return invalid_project_source(
-                "mode='worktree' requires client_id + path source checkout",
-                json!({"field": "mode", "required_with": "client_id + path"}),
-            );
-        }
-        let managed_worktree = (mode == "worktree").then(|| ManagedWorktreeRequest {
+        let validated = match validate_work_on_project_input(
+            project,
+            client_id,
+            path,
+            mode,
             base_ref,
+            instruction,
+            session_id,
+        ) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let managed_worktree = (validated.mode == "worktree").then(|| ManagedWorktreeRequest {
+            base_ref: validated.base_ref,
             operation_id: uuid::Uuid::new_v4().to_string(),
             resume_project_id: None,
         });
-        let (project, client_id, path) = match project_source {
+        let (project, client_id, path) = match validated.source {
             CodingProjectSource::Existing { project } => (project, None, None),
             CodingProjectSource::RunnerPath { client_id, path } => {
                 (String::new(), Some(client_id), Some(path))
             }
         };
-        let instruction = instruction.trim().to_string();
-        if instruction.is_empty()
-            || instruction.chars().count() > sessions::MAX_CODING_INSTRUCTION_CHARS
-        {
-            return ToolResult::err_with_output(
-                format!(
-                    "instruction must contain 1..={} characters",
-                    sessions::MAX_CODING_INSTRUCTION_CHARS
-                ),
-                json!({
-                    "error_kind": "invalid_coding_instruction",
-                    "field": "instruction",
-                    "max_chars": sessions::MAX_CODING_INSTRUCTION_CHARS,
-                    "state_changed": false,
-                }),
-            );
-        }
-        let session_id = match session_id {
-            Some(session_id)
-                if session_id != session_id.trim()
-                    || !sessions::is_valid_session_id(&session_id) =>
-            {
-                return ToolResult::err_with_output(
-                    "session_id must be a valid wc_sess_* Workflow Session id",
-                    json!({
-                        "error_kind": "invalid_session_id",
-                        "failure_kind": "invalid_arguments",
-                        "field": "session_id",
-                        "expected_format": "wc_sess_*",
-                        "state_changed": false,
-                    }),
-                );
-            }
-            Some(session_id) => Some(session_id),
-            None => None,
-        };
+        let instruction = validated.instruction;
+        let session_id = validated.session_id;
         // Map onto the canonical coding workflow engine. The work-on-project
         // profile keeps the standard shared brief,
         // including rules, semantic navigation, workspace, and job metadata,

@@ -8,8 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const POLICY_FILE: &str = "ai-office-policies.json";
 const MAX_PROJECTS: usize = 128;
-const MAX_SUBAGENTS: u32 = 32;
-const MAX_CLI_PER_AGENT: u32 = 32;
 static PREVIEW_POLICY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,8 +48,14 @@ impl Default for OfficePolicyInput {
     fn default() -> Self {
         Self {
             mode: PolicyMode::Auto,
-            subagents: CountRange { min: 0, max: 4 },
-            cli_per_agent: CountRange { min: 0, max: 2 },
+            subagents: CountRange {
+                min: 0,
+                max: u32::MAX,
+            },
+            cli_per_agent: CountRange {
+                min: 0,
+                max: u32::MAX,
+            },
             providers: Vec::new(),
         }
     }
@@ -103,9 +107,12 @@ pub struct OfficeSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct OfficeCliCall {
     pub provider_id: String,
-    pub model: String,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    #[serde(default)]
+    pub instruction: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,13 +176,6 @@ fn known_provider(id: &str) -> bool {
 }
 
 fn validate_policy(policy: &OfficePolicyInput) -> DesktopResult<()> {
-    if policy.subagents.min > policy.subagents.max
-        || policy.subagents.max > MAX_SUBAGENTS
-        || policy.cli_per_agent.min > policy.cli_per_agent.max
-        || policy.cli_per_agent.max > MAX_CLI_PER_AGENT
-    {
-        return Err(office_error("ai_office_invalid_policy", "Count ranges must be ordered; at most 32 subagents and 32 CLI calls per agent are supported."));
-    }
     let mut seen = BTreeSet::new();
     if policy.providers.len() > webcodex_core::cli_adapter::MAX_CLI_ADAPTERS
         || policy.providers.iter().any(|p| {
@@ -187,30 +187,11 @@ fn validate_policy(policy: &OfficePolicyInput) -> DesktopResult<()> {
     {
         return Err(office_error("ai_office_invalid_policy", "Provider preferences must be unique supported providers with bounded model and effort values."));
     }
-    if policy.mode == PolicyMode::Custom
-        && policy.cli_per_agent.min > 0
-        && !policy.providers.iter().any(|p| p.enabled)
-    {
-        return Err(office_error(
-            "ai_office_invalid_policy",
-            "A positive CLI minimum requires an enabled provider.",
-        ));
-    }
     Ok(())
 }
 
 fn validate_policy_for_save(policy: &OfficePolicyInput) -> DesktopResult<()> {
-    validate_policy(policy)?;
-    // Older policies must remain readable so the user can revise them.
-    if policy.mode == PolicyMode::Custom
-        && (policy.subagents.min + 1) * policy.cli_per_agent.min > 32
-    {
-        return Err(office_error(
-            "ai_office_invalid_policy",
-            "最低分工超过每轮团队总预算 32 次 CLI，请减少最少人数或每人最少调用次数。",
-        ));
-    }
-    Ok(())
+    validate_policy(policy)
 }
 
 fn read_store(path: &Path) -> DesktopResult<PolicyStore> {
@@ -441,18 +422,7 @@ pub fn evaluate_plan(
     plan: &OfficePlan,
 ) -> DesktopResult<OfficePlanEvaluation> {
     validate_policy(&policy.settings)?;
-    if plan.subagents.len() > MAX_SUBAGENTS as usize
-        || std::iter::once(&plan.manager)
-            .chain(&plan.subagents)
-            .any(|a| a.cli_calls.len() > MAX_CLI_PER_AGENT as usize)
-    {
-        return Err(office_error(
-            "ai_office_plan_too_large",
-            "The plan exceeds the demo's bounded agent or CLI-call limit.",
-        ));
-    }
     let mut violations = Vec::new();
-    let custom = policy.settings.mode == PolicyMode::Custom;
     let mut add = |code, message: String, agent_id: Option<String>| {
         violations.push(OfficeViolation {
             code,
@@ -460,22 +430,6 @@ pub fn evaluate_plan(
             agent_id,
         })
     };
-    let minimum_subagents = if custom {
-        policy.settings.subagents.min
-    } else {
-        0
-    };
-    if !(minimum_subagents..=policy.settings.subagents.max).contains(&(plan.subagents.len() as u32))
-    {
-        add(
-            "subagent_count",
-            format!(
-                "The plan requires {}–{} child assignments.",
-                minimum_subagents, policy.settings.subagents.max
-            ),
-            None,
-        );
-    }
     let mut ids = BTreeSet::new();
     let mut cli_call_count = 0;
     for agent in std::iter::once(&plan.manager).chain(&plan.subagents) {
@@ -495,72 +449,22 @@ pub fn evaluate_plan(
             );
         }
         cli_call_count += agent.cli_calls.len();
-        if custom
-            && !(policy.settings.cli_per_agent.min..=policy.settings.cli_per_agent.max)
-                .contains(&(agent.cli_calls.len() as u32))
-        {
-            add(
-                "cli_count",
-                format!(
-                    "This agent requires {}–{} CLI calls in the complete plan.",
-                    policy.settings.cli_per_agent.min, policy.settings.cli_per_agent.max
-                ),
-                Some(agent.id.clone()),
-            );
-        }
         for call in &agent.cli_calls {
             if !known_provider(&call.provider_id)
-                || !valid_text(&call.model, 256)
+                || call
+                    .model
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty() && !valid_text(value, 256))
                 || call.effort.as_deref().is_some_and(|v| !valid_text(v, 64))
+                || call
+                    .instruction
+                    .as_deref()
+                    .is_some_and(|value| !valid_text(value, 4096))
             {
-                add("cli_selection", "Every CLI call needs a supported provider and an explicit bounded model selection.".into(), Some(agent.id.clone()));
+                add("cli_selection", "Every CLI call needs a supported provider; model and effort overrides are optional.".into(), Some(agent.id.clone()));
                 continue;
             }
-            if custom {
-                let pref = policy
-                    .settings
-                    .providers
-                    .iter()
-                    .find(|p| p.provider_id == call.provider_id && p.enabled);
-                match pref {
-                    None => add(
-                        "provider_disabled",
-                        format!("{} is not enabled in the project policy.", call.provider_id),
-                        Some(agent.id.clone()),
-                    ),
-                    Some(pref) => {
-                        if pref.model.as_deref().is_some_and(|m| m != call.model) {
-                            add(
-                                "model_mismatch",
-                                "The planned model differs from the project's pinned model.".into(),
-                                Some(agent.id.clone()),
-                            );
-                        }
-                        if pref
-                            .effort
-                            .as_ref()
-                            .is_some_and(|e| call.effort.as_ref() != Some(e))
-                        {
-                            add(
-                                "effort_mismatch",
-                                "The planned effort differs from the project's pinned effort."
-                                    .into(),
-                                Some(agent.id.clone()),
-                            );
-                        }
-                    }
-                }
-            }
         }
-    }
-    let maximum_cli_calls =
-        ((policy.settings.subagents.max + 1) * policy.settings.cli_per_agent.max).min(32);
-    if cli_call_count > maximum_cli_calls as usize {
-        add(
-            "cli_total_budget",
-            format!("此分工需要 {cli_call_count} 次 CLI，超过新聊天的团队总预算 {maximum_cli_calls} 次。"),
-            None,
-        );
     }
     Ok(OfficePlanEvaluation {
         admitted: violations.is_empty(),

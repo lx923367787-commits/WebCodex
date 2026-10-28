@@ -1,5 +1,5 @@
 //! Task-owned receipts for generic local CLI jobs. CLI names and versions do not
-//! grant authority; the live assignment and its existing call budget do.
+//! grant authority; the live assignment and project authorization do.
 use crate::agent_isolation::{
     authorize_agent_assignment_on_connection, enrollment_projection_on_connection,
 };
@@ -43,30 +43,6 @@ pub(crate) fn init_tables(conn: &Connection) -> rusqlite::Result<()> {
         UNIQUE(agent_id,task_id,key_sha256));
         CREATE INDEX IF NOT EXISTS wc_local_cli_task ON wc_local_cli_calls(task_id);",
     )
-}
-
-pub(crate) fn call_count(conn: &Connection, task: &str) -> rusqlite::Result<u32> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM wc_local_cli_calls WHERE task_id=?1",
-        [task],
-        |r| r.get(0),
-    )
-}
-
-pub(crate) fn family_counts(conn: &Connection, root: &str) -> rusqlite::Result<(u32, u32)> {
-    let native:u32=conn.query_row("SELECT COUNT(*) FROM wc_local_cli_calls c
-        JOIN wc_agent_enrollments e ON e.agent_id=c.agent_id AND e.task_id=c.task_id
-        JOIN wc_agent_tasks t ON t.task_id=c.task_id JOIN wc_agent_tasks r ON r.task_id=?1
-        WHERE t.owner_principal_kind=r.owner_principal_kind AND t.owner_principal_digest=r.owner_principal_digest
-        AND t.referenced_project_id=r.referenced_project_id
-        AND (e.task_id=?1 OR e.source_agent_id IN (SELECT agent_id FROM wc_agent_enrollments WHERE task_id=?1 AND purpose='manager'))",
-        [root],|r|r.get(0))?;
-    let legacy: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM wc_team_cli_attempts WHERE root_task_id=?1",
-        [root],
-        |r| r.get(0),
-    )?;
-    Ok((native, legacy))
 }
 
 pub(crate) fn completion_counts(
@@ -124,7 +100,7 @@ impl Database {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(unavailable)?;
         let assignment = enrollment_projection_on_connection(&tx, binding)?;
-        let authority = authorize_agent_assignment_on_connection(
+        authorize_agent_assignment_on_connection(
             &tx,
             binding,
             &assignment.task_id,
@@ -150,30 +126,6 @@ impl Database {
                 return Err(error("local_cli_idempotency_conflict"));
             }
             return Ok((record, false));
-        }
-        let legacy: u32 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM wc_team_cli_attempts WHERE source_task_id=?1",
-                [&assignment.task_id],
-                |r| r.get(0),
-            )
-            .map_err(unavailable)?;
-        if legacy.saturating_add(call_count(&tx, &assignment.task_id).map_err(unavailable)?)
-            >= authority.policy.max_cli_calls
-        {
-            return Err(error("local_cli_budget_exhausted"));
-        }
-        let root_task = if authority.purpose == crate::AgentEnrollmentPurpose::Manager {
-            assignment.task_id.clone()
-        } else {
-            tx.query_row("SELECT parent.task_id FROM wc_agent_enrollments child JOIN wc_agent_enrollments parent
-                ON parent.agent_id=child.source_agent_id WHERE child.agent_id=?1 AND child.task_id=?2
-                AND parent.owner_user=child.owner_user AND parent.project=child.project AND parent.purpose='manager'",
-                params![binding.agent_id(),assignment.task_id],|r|r.get::<_,String>(0)).map_err(unavailable)?
-        };
-        let (family_native, family_legacy) = family_counts(&tx, &root_task).map_err(unavailable)?;
-        if family_native.saturating_add(family_legacy) >= 32 {
-            return Err(error("local_cli_team_budget_exhausted"));
         }
         let record = LocalCliCall {
             call_id: format!("wc_local_cli_{}", uuid::Uuid::new_v4().simple()),

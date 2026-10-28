@@ -2,7 +2,7 @@
 
 入口为 **WebCodex 桌面端侧栏「AI 办公室」**，项目卡片提供「团队设置」。本机网页用于独立预览，不嵌入 GPT 聊天。
 
-实现保存在独立集成副本 `E:\wbecodex\.local\work\cli-fallback-20261023`，宿主配套文件位于 `E:\wbecodex\.local\work\cli-fallback-host-20261023`。没有覆盖其他 Agent 正在修改的原 `source`，也没有部署、发布或重启正式服务。
+桌面端实现位于 `apps/desktop`，宿主配套工具位于 `windows`。预览使用当前源码副本；正式部署按项目的部署流程单独执行。
 
 ## 查看演示
 
@@ -37,14 +37,14 @@ Server 提供 `team_policy_get/save`、`team_plan_register/list/read/cancel`、`
 
 ## 总经理调用顺序
 
-1. 读取真实项目与当前团队策略；发现实际 CLI 模型/effort，通过 `chat-agents.discover_chat_profiles` 发现真实 GPT 档位。
+1. 读取真实项目与当前团队策略；发现实际 CLI 模型/effort，仅在需要查看可选 GPT 强度选项时调用 `chat-agents.discover_chat_profiles`。
 2. 用已有 `create_agent_task` 创建同项目的主任务和普通子任务，保留真实 ID。
 3. 用 `team_plan_register` 一次登记完整成员和 CLI 调用计划，携带策略版本与幂等键。
-4. 需要 GPT 子任务时调用 `team_agent_start`，明确传入总经理选择的 `thinking_profile_id`，沿用新建 ChatGPT 对话、关联 WebCodex、填写任务的现有宿主流程。
+4. 需要 GPT 子任务时调用 `team_agent_start`，可以省略 `thinking_profile_id` 保持页面原设置；显式参数只请求可选调整，沿用新建 ChatGPT 对话、关联 WebCodex、填写任务的现有宿主流程。
 5. 需要 CLI 时调用 `team_cli_start`，指定冻结成员和 `call_index`，并传入失败接管所用的 `fallback_thinking_profile_id`；执行参数来自冻结槽，不接受任意命令。
 6. 通过团队只读工具和原 Job 工具观察同一次执行；相同幂等意图返回原记录，未知结果不换 key 重发。
 
-档位由总经理选择，不自动选最高档或默认档。Server 使用纯缓存 `read_chat_profiles` 核实精确选择、ready 和有效期；发现与缓存读取不同。已有尝试重放保留原选择，不因目录后来过期而重新派发。
+思考强度不参与 `team_agent_start` 准入；不指定时不查询档位目录或读回页面设置。显式调整失败时 Host 单独报告“未调整”，合法任务仍继续派发。已有尝试重放保留原请求，不因目录过期、设置失败或刷新而重复派发。
 
 ## 本机 CLI 适配
 

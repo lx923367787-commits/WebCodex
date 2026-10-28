@@ -19,10 +19,13 @@ pub struct AgentTeamPolicy {
 pub struct AgentTeamTask {
     pub task_id: String,
     pub title: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub brief: String,
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_execution: Option<crate::agent_task::AgentPublicTaskExecution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_lifecycle: Option<serde_json::Value>,
 }
 
 /// Explicit allowlist: no raw logs, CLI result text, private Goal or Memory.
@@ -34,7 +37,8 @@ pub struct AgentTeamReceipt {
     pub source_task_id: String,
     pub call_index: u32,
     pub provider_id: String,
-    pub model: String,
+    #[serde(default)]
+    pub model: webcodex_core::cli_adapter::CliModelSelection,
     pub effort: Option<String>,
     pub fallback_thinking_profile_id: String,
     pub timeout_secs: Option<u64>,
@@ -90,10 +94,36 @@ fn public_task_on(
     task_id(id)?;
     let task = conn.query_row("SELECT task_id,title,instruction,state FROM wc_agent_tasks WHERE task_id=?1 AND owner_principal_kind=?2 AND owner_principal_digest=?3 AND referenced_project_id=?4",
         params![id,principal.kind,principal.digest,project], |r|Ok(AgentTeamTask {
-            task_id:r.get(0)?,title:r.get(1)?,brief:r.get(2)?,state:r.get(3)?,public_execution:None,
+            task_id:r.get(0)?,title:r.get(1)?,brief:r.get(2)?,state:r.get(3)?,public_execution:None,goal_lifecycle:None,
         })).optional().map_err(store_error)?.ok_or_else(not_found)?;
     let mut task = task;
     task.public_execution = crate::agent_task::public_execution_on_connection(conn, id)?;
+    // Task ownership above is authoritative. Association rows are established
+    // by enrollment under the same owner/project; a caller cannot supply an Agent.
+    let goal: Option<(String, String)> = conn
+        .query_row(
+            "SELECT g.owner_key,g.goal_id FROM wc_agent_enrollment_assignments a
+         JOIN wc_agent_enrollment_goals eg ON eg.agent_id=a.agent_id
+         JOIN wc_host_goals g ON g.goal_id=eg.goal_id AND g.project=a.project
+         WHERE a.task_id=?1 AND a.project=?2
+           AND ((?3 IS NOT NULL AND a.agent_id=?3) OR (?3 IS NULL AND a.state='active'))",
+            params![
+                id,
+                project,
+                task.public_execution
+                    .as_ref()
+                    .map(|execution| execution.agent_id.as_str())
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(store_error)?;
+    if let Some((owner, goal_id)) = goal {
+        task.goal_lifecycle = Some(
+            Database::host_goal_lifecycle_metadata_on_connection(conn, &owner, &goal_id)
+                .map_err(|cause| error(cause.code(), "Task lifecycle metadata is unavailable"))?,
+        );
+    }
     Ok(task)
 }
 
@@ -107,9 +137,6 @@ fn receipts_on(
     limit: usize,
 ) -> Result<AgentTeamReceiptPage> {
     page_bounds(offset, limit)?;
-    if root.is_none() && source.is_none() {
-        return Err(not_found());
-    }
     let total:i64=conn.query_row("SELECT COUNT(*) FROM wc_team_cli_attempts WHERE owner_principal_kind=?1 AND owner_principal_digest=?2 AND project_id=?3 AND (?4 IS NULL OR root_task_id=?4) AND (?5 IS NULL OR source_task_id=?5)",
         params![principal.kind,principal.digest,project,root,source],|r|r.get(0)).map_err(store_error)?;
     let ids = {
@@ -193,6 +220,16 @@ fn public_plan_on(
     })
 }
 
+// A delegated CLI instruction belongs to that CLI instance. Keep its public
+// provider/model/status metadata while removing this private copy from Agent views.
+fn project_agent_plan(plan: &mut TeamPlanRecord) {
+    for member in std::iter::once(&mut plan.plan.manager).chain(plan.plan.subagents.iter_mut()) {
+        for call in &mut member.cli_calls {
+            call.instruction = None;
+        }
+    }
+}
+
 fn delegated_plan_on(
     conn: &Connection,
     binding: &VerifiedAgentRun,
@@ -226,8 +263,8 @@ impl Database {
         Ok(AgentTeamPolicy {
             project: authority.project.clone(),
             policy: policy_on(&tx, &authority.communication_principal, &policy_project)?,
-            max_subagents: authority.policy.max_subagents,
-            max_cli_calls: authority.policy.max_cli_calls,
+            max_subagents: u32::MAX,
+            max_cli_calls: u32::MAX,
         })
     }
 
@@ -252,39 +289,15 @@ impl Database {
         .map_err(assignment_error)?;
         manager(authority.purpose)?;
         agent_run_business_gate_on_connection(&tx, binding).map_err(assignment_error)?;
-        let cli_count = members(&plan)
-            .try_fold(0usize, |count, member| {
-                count.checked_add(member.cli_calls.len())
-            })
-            .ok_or_else(|| {
-                error(
-                    "agent_team_budget_exceeded",
-                    "The plan exceeds the assignment budget",
-                )
-            })?;
-        if plan.subagents.len() > authority.policy.max_subagents as usize
-            || cli_count > authority.policy.max_cli_calls as usize
-        {
-            return Err(error(
-                "agent_team_budget_exceeded",
-                "The plan exceeds the assignment budget",
-            ));
-        }
         delegated_plan_on(&tx, binding, &plan)?;
         for child in &plan.subagents {
-            let child_limit = delegated_cli_budget_on_connection(&tx, binding, &child.task_id)
+            delegated_cli_budget_on_connection(&tx, binding, &child.task_id)
                 .map_err(assignment_error)?;
-            if child.cli_calls.len() > child_limit as usize {
-                return Err(error(
-                    "agent_team_budget_exceeded",
-                    "The member plan exceeds its own assignment budget",
-                ));
-            }
         }
         let policy_project = crate::native_workspaces::team_target_on_connection(&tx, binding)
             .map_err(assignment_error)?
             .map_or_else(|| authority.project.clone(), |f| f.project);
-        let result = register_team_plan_on_connection(
+        let mut result = register_team_plan_on_connection(
             &tx,
             &authority.communication_principal,
             &authority.project,
@@ -295,6 +308,7 @@ impl Database {
             &policy_project,
         )?;
         tx.commit().map_err(store_error)?;
+        project_agent_plan(&mut result.plan);
         Ok(result)
     }
 
@@ -303,21 +317,29 @@ impl Database {
         binding: &VerifiedAgentRun,
         task: &str,
     ) -> Result<AgentTeamTask> {
+        let own_task = self
+            .read_agent_enrollment(binding)
+            .map_err(assignment_error)?
+            .task_id;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(store_error)?;
         let authority = authorize_agent_assignment_on_connection(
             &tx,
             binding,
-            task,
+            &own_task,
             AgentAssignmentOperation::Read,
         )
         .map_err(assignment_error)?;
-        public_task_on(
+        let mut public = public_task_on(
             &tx,
             &authority.communication_principal,
             &authority.project,
             task,
-        )
+        )?;
+        if task != own_task {
+            public.brief.clear();
+        }
+        Ok(public)
     }
 
     pub fn read_agent_team_plan(
@@ -327,26 +349,34 @@ impl Database {
         offset: usize,
         limit: usize,
     ) -> Result<AgentTeamPlanView> {
+        let own_task = self
+            .read_agent_enrollment(binding)
+            .map_err(assignment_error)?
+            .task_id;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(store_error)?;
         let authority = authorize_agent_assignment_on_connection(
             &tx,
             binding,
-            root,
+            &own_task,
             AgentAssignmentOperation::Read,
         )
         .map_err(assignment_error)?;
-        manager(authority.purpose)?;
-        let plan = plan_on(&tx, &authority.communication_principal, root)?;
-        delegated_plan_on(&tx, binding, &plan.plan)?;
-        public_plan_on(
+        let mut view = public_plan_on(
             &tx,
             &authority.communication_principal,
             &authority.project,
             root,
             offset,
             limit,
-        )
+        )?;
+        project_agent_plan(&mut view.plan);
+        for task in &mut view.tasks {
+            if task.task_id != own_task {
+                task.brief.clear();
+            }
+        }
+        Ok(view)
     }
 
     pub fn list_agent_team_plans(
@@ -418,46 +448,17 @@ impl Database {
             &authority.project,
             task,
         )?;
-        if authority.purpose == AgentEnrollmentPurpose::Manager {
-            let plan = match plan_on(&tx, &authority.communication_principal, task) {
-                Ok(plan) => plan,
-                Err(error) if error.code() == "team_task_not_found" => {
-                    // An authorized native manager exists before registering a
-                    // team plan. It can already inspect its own receipts, but
-                    // absence of a plan grants no access to other tasks.
-                    return receipts_on(
-                        &tx,
-                        &authority.communication_principal,
-                        &authority.project,
-                        None,
-                        Some(task),
-                        offset,
-                        limit,
-                    );
-                }
-                Err(error) => return Err(error),
-            };
-            delegated_plan_on(&tx, binding, &plan.plan)?;
-            receipts_on(
-                &tx,
-                &authority.communication_principal,
-                &authority.project,
-                Some(task),
-                None,
-                offset,
-                limit,
-            )
-        } else {
-            receipts_on(
-                &tx,
-                &authority.communication_principal,
-                &authority.project,
-                None,
-                Some(task),
-                offset,
-                limit,
-            )
-        }
+        // Execution metadata is shared within the authenticated owner/project.
+        // Purpose, memory, acceptance and raw prompt-bearing logs are not projected.
+        receipts_on(
+            &tx,
+            &authority.communication_principal,
+            &authority.project,
+            None,
+            None,
+            offset,
+            limit,
+        )
     }
 
     /// Human PAT bridge: exact project authorization is retained in the runtime.

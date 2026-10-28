@@ -39,6 +39,8 @@ impl CliResultVerifier {
             .trim_start_matches('\u{feff}');
         let values: Vec<serde_json::Value> = match contract.format {
             CliResultFormat::Json => {
+                // Native CLIs may emit either one result object or a complete
+                // JSON transcript. Inspect only top-level protocol events.
                 match serde_json::from_str(text).map_err(|_| "agent_cli_result_invalid")? {
                     serde_json::Value::Array(events) => events,
                     value => vec![value],
@@ -80,7 +82,7 @@ impl CliResultVerifier {
         if results.len() != 1 {
             return Err("agent_cli_terminal_result_missing_or_ambiguous");
         }
-        if contract.format == CliResultFormat::JsonLines && values.last() != Some(results[0]) {
+        if values.last() != Some(results[0]) {
             return Err("agent_cli_terminal_result_missing_or_ambiguous");
         }
         if contract.failure_flag.is_empty() && !contract.failure_events.is_empty() {
@@ -107,6 +109,38 @@ mod tests {
             failure_events: vec![],
             terminal_field: None,
             terminal_value: None,
+        }
+    }
+    #[test]
+    fn workbuddy_accepts_its_real_json_transcript_only_with_one_final_result() {
+        let adapter = crate::cli_adapter::cli_adapters(&[])
+            .unwrap()
+            .into_iter()
+            .find(|adapter| adapter.id == "workbuddy")
+            .unwrap();
+        let contract = adapter.invocation.unwrap().result;
+        for text in [
+            r#"{"type":"result","is_error":false,"result":"done"}"#,
+            r#"[{"type":"message","role":"assistant"},{"type":"result","subtype":"success","is_error":false,"result":"done"}]"#,
+        ] {
+            let mut verifier = CliResultVerifier::new(contract.clone());
+            verifier.observe_stdout(text.as_bytes());
+            assert_eq!(verifier.finish(), Ok(()));
+        }
+        for text in [
+            r#"[]"#,
+            r#"[{"type":"message","content":[{"type":"result","is_error":false}]}]"#,
+            r#"[{"type":"result","is_error":true}]"#,
+            r#"[{"type":"result","is_error":false},{"type":"message"}]"#,
+            r#"[{"type":"result","is_error":false},{"type":"result","is_error":false}]"#,
+            r#"[{"type":"result","subtype":"success"}]"#,
+        ] {
+            let mut verifier = CliResultVerifier::new(contract.clone());
+            verifier.observe_stdout(text.as_bytes());
+            assert!(
+                verifier.finish().is_err(),
+                "accepted invalid transcript: {text}"
+            );
         }
     }
     #[test]

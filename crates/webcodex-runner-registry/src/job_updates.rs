@@ -856,6 +856,7 @@ impl RunnerRegistry {
             .map(|step| step.name.clone())
             .collect::<Vec<_>>();
         let job_context = ShellJobContext {
+            agent_program: None,
             agent_execution: None,
             document: metadata.document.clone(),
             runtime_project_id: metadata.project_id.clone(),
@@ -1088,6 +1089,7 @@ impl RunnerRegistry {
             Some(job_id.clone()),
         )?;
         let job = ShellJobRecord {
+            agent_program: None,
             agent_execution: None,
             document: metadata.document,
             job_id: job_id.clone(),
@@ -1793,13 +1795,25 @@ impl RunnerRegistry {
         job_id: &str,
         requested_by: String,
     ) -> Result<ShellJobInfo, String> {
+        self.stop_job_for_auth_inner(auth, job_id, requested_by, None)
+            .await
+    }
+
+    pub(super) async fn stop_job_for_auth_inner(
+        &self,
+        auth: Option<&crate::RunnerAccess>,
+        job_id: &str,
+        requested_by: String,
+        expected_program: Option<&webcodex_core::agent_program::AgentProgramBinding>,
+    ) -> Result<ShellJobInfo, String> {
         validate_id(job_id, "job_id")?;
         let mut inner = self.inner.lock().await;
         refresh_job_status_locked(&mut inner, job_id);
         let Some(job) = inner.jobs_by_id.get(job_id).cloned() else {
             return Err(format!("unknown shell job: {}", job_id));
         };
-        if job.visibility != ShellJobVisibility::Public
+        if (job.visibility != ShellJobVisibility::Public && expected_program.is_none())
+            || expected_program.is_some_and(|b| job.agent_program.as_ref() != Some(b))
             || !shell_job_visible_to_auth(auth, &inner, &job)
         {
             return Err(format!("unknown shell job: {}", job_id));

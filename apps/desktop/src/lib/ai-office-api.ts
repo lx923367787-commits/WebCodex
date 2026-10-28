@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { demoNickname } from "./office-nicknames";
-import type { AiOfficeApi, OfficeMember, OfficeSnapshot, OfficePolicy, TeamAction } from "../features/ai-office/types";
+import type { AiOfficeApi, CliCatalog, CliInstallation, OfficeMember, OfficeSnapshot, OfficePolicy, TeamAction } from "../features/ai-office/types";
 
 export class AiOfficeTeamError extends Error {
   constructor(readonly code: string, message: string) {
@@ -40,8 +40,17 @@ export const aiOfficeApi: AiOfficeApi = {
   team: teamRequest,
   snapshot: (projectId) => invoke("get_ai_office_snapshot", { request: { projectId: projectId ?? null } }),
   savePolicy: (projectId, expectedRevision, policy) => invoke("save_ai_office_policy", { request: { projectId, expectedRevision, policy } }),
-  discoverCli: () => invoke("discover_ai_office_clis"),
-  refreshCli: (providerId) => invoke("refresh_ai_office_cli", { providerId }),
+  discoverCli: async (projectId) => {
+    const output = objectValue(await teamRequest("cli-discover", { project: projectId }));
+    if (!Array.isArray(output?.installations)) throw new AiOfficeTeamError("cli_inventory_invalid", "Runner 未返回 CLI 执行目录。");
+    return output.installations as CliInstallation[];
+  },
+  refreshCli: async (providerId, projectId) => {
+    const output = objectValue(await teamRequest("cli-models", { project: projectId, provider_id: providerId }));
+    const capabilities = objectValue(output?.capabilities);
+    if (!capabilities || capabilities.providerId !== providerId) throw new AiOfficeTeamError("cli_catalog_unavailable", "Runner 未返回所选 CLI 的能力；请重新扫描并查看具体原因。");
+    return { ...capabilities, checkedAt: typeof output?.observed_at_ms === "number" ? new Date(output.observed_at_ms).toISOString() : "" } as unknown as CliCatalog;
+  },
   evaluatePlan: (projectId, expectedRevision, plan) => invoke("evaluate_ai_office_plan", { request: { projectId, expectedRevision, plan } }),
 };
 
@@ -86,7 +95,7 @@ export const aiOfficeDemoApi: AiOfficeApi = {
       source: "demo", observed_at_ms: Date.now(), selected_project_id: selected,
       projects: DEMO_PROJECTS.map((project) => ({ ...project, connected: true, policy: policies.find((p) => p.id === project.id)!.policy })),
       members: membersFor(selected), enforcement: "demo_plan_only",
-      limitations: ["办公室人物和进度为演示数据。策略保存、配额验证与 CLI 模型刷新使用本机服务。", "当前验证委派计划，不启动 AI 或 CLI 任务；配置尚未约束其它对话或现有调度器。"],
+      limitations: ["办公室人物和进度为演示数据。CLI 发现与模型刷新使用本机服务。", "演示不启动 AI 或 CLI 任务；真实执行记录请在运行环境中查看。"],
     };
     return snapshot;
   },

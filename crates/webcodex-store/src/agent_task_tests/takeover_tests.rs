@@ -159,7 +159,7 @@ fn provider_failure_handoff_survives_restart_and_freezes_replacement_prompt() {
 }
 
 #[test]
-fn per_task_run_budget_survives_reassignment_and_reopen() {
+fn coding_run_history_does_not_limit_new_attempts_after_reopen() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("budget.db");
     let db = Database::open(&path).unwrap();
@@ -167,7 +167,7 @@ fn per_task_run_budget_survives_reassignment_and_reopen() {
     let assignee = agent(&db, &owner, "bounded");
     let task = create_assigned_task(&db, &owner, &assignee, "bounded-task");
     let now = wall_now_ms();
-    for n in 0..8 {
+    for n in 0..10 {
         let attempt = start(&db, &owner, &task, &assignee, &format!("attempt-{n}"), now);
         let intent = coding_binding_intent(&format!("budget-{n}"));
         prepare_coding_binding(&db, &owner, &task, &assignee, &attempt, &intent, now);
@@ -196,7 +196,7 @@ fn per_task_run_budget_survives_reassignment_and_reopen() {
     drop(db);
     let db = Database::open(&path).unwrap();
     let attempt = start(&db, &owner, &task, &assignee, "attempt-over-budget", now);
-    let error = db
+    let prepared = db
         .prepare_agent_task_coding_run_at(
             &owner,
             "agent:special:reference-only",
@@ -208,8 +208,8 @@ fn per_task_run_budget_survives_reassignment_and_reopen() {
             &coding_binding_intent("budget-overflow"),
             now,
         )
-        .unwrap_err();
-    assert_eq!(error.code(), "agent_task_run_budget_exhausted");
+        .unwrap();
+    assert!(!prepared.replayed);
     assert_eq!(
         db.read_agent_task(&owner, &task).unwrap().summary.state,
         AgentTaskState::Active

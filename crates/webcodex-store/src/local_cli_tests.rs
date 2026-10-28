@@ -88,7 +88,7 @@ fn reserve(
 }
 
 #[test]
-fn local_cli_receipts_replay_exact_intent_and_persist_without_refunding_budget() {
+fn local_cli_receipts_replay_exact_intent_and_persist_without_count_quotas() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
     let db = Database::open(&path).unwrap();
@@ -102,12 +102,7 @@ fn local_cli_receipts_replay_exact_intent_and_persist_without_refunding_budget()
             .code(),
         "local_cli_idempotency_conflict"
     );
-    assert_eq!(
-        reserve(&db, &agent, "two", &"b".repeat(64))
-            .unwrap_err()
-            .code(),
-        "local_cli_budget_exhausted"
-    );
+    assert!(reserve(&db, &agent, "two", &"b".repeat(64)).unwrap().1);
     db.record_local_cli_job(&agent, &first.call_id, "detached-fixture", "completed")
         .unwrap();
     drop(db);
@@ -116,12 +111,7 @@ fn local_cli_receipts_replay_exact_intent_and_persist_without_refunding_budget()
     assert!(!created);
     assert_eq!(same.call_id, first.call_id);
     assert_eq!(same.state, "completed");
-    assert_eq!(
-        reserve(&db, &agent, "another", &"a".repeat(64))
-            .unwrap_err()
-            .code(),
-        "local_cli_budget_exhausted"
-    );
+    assert!(reserve(&db, &agent, "another", &"a".repeat(64)).unwrap().1);
 }
 
 #[test]
@@ -180,11 +170,15 @@ fn local_cli_unknown_execution_blocks_completion_and_terminal_receipts_do_not_re
 }
 
 #[test]
-fn local_cli_requires_existing_cli_authority_and_does_not_store_prompt_or_login() {
+fn local_cli_legacy_zero_budget_does_not_deny_and_receipts_omit_prompt_or_login() {
     let temp = tempfile::tempdir().unwrap();
     let db = Database::open(&temp.path().join("state.db")).unwrap();
-    let denied = enroll(&db, "denied", 0);
-    assert!(reserve(&db, &denied, "run", &"a".repeat(64)).is_err());
+    let zero_budget = enroll(&db, "zero-budget", 0);
+    assert!(
+        reserve(&db, &zero_budget, "run", &"a".repeat(64))
+            .unwrap()
+            .1
+    );
     let agent = enroll(&db, "allowed", 1);
     let (record, _) = reserve(&db, &agent, "private-replay-key", &"a".repeat(64)).unwrap();
     let raw: String = db
@@ -203,7 +197,7 @@ fn local_cli_requires_existing_cli_authority_and_does_not_store_prompt_or_login(
 }
 
 #[test]
-fn local_cli_shared_team_ceiling_and_lost_response_receipt_recovery() {
+fn local_cli_shared_team_has_no_count_ceiling_and_recovers_lost_receipts() {
     let temp = tempfile::tempdir().unwrap();
     let db = Database::open(&temp.path().join("state.db")).unwrap();
     let manager = enroll(&db, "manager", 20);
@@ -212,11 +206,10 @@ fn local_cli_shared_team_ceiling_and_lost_response_receipt_recovery() {
         reserve(&db, &manager, &format!("manager-{index}"), &"a".repeat(64)).unwrap();
         reserve(&db, &member, &format!("member-{index}"), &"b".repeat(64)).unwrap();
     }
-    assert_eq!(
-        reserve(&db, &manager, "would-exceed-team", &"a".repeat(64))
-            .unwrap_err()
-            .code(),
-        "local_cli_team_budget_exhausted"
+    assert!(
+        reserve(&db, &manager, "exceeds-old-team-ceiling", &"a".repeat(64))
+            .unwrap()
+            .1
     );
     let calls = db.list_local_cli_calls(&member).unwrap();
     assert_eq!(calls.len(), 16);
@@ -227,12 +220,12 @@ fn local_cli_shared_team_ceiling_and_lost_response_receipt_recovery() {
         !reserve(&db, &member, "member-0", &"b".repeat(64))
             .unwrap()
             .1,
-        "A replay at the ceiling must not spend another call"
+        "A replay must preserve the original call"
     );
 }
 
 #[test]
-fn local_cli_native_job_evidence_counts_toward_the_original_team_minimum_only() {
+fn local_cli_native_job_evidence_is_reported_without_becoming_a_minimum() {
     use crate::{
         TeamAgentPlan, TeamCliCall, TeamCountRange, TeamPlanInput, TeamPolicyInput, TeamPolicyMode,
         TeamProviderPreference,
@@ -287,14 +280,15 @@ fn local_cli_native_job_evidence_counts_toward_the_original_team_minimum_only() 
         .unwrap();
     assert_eq!(reserved.consumed_cli_calls, 1);
     assert_eq!(reserved.confirmed_cli_calls, 0);
-    assert!(!reserved.minimums_satisfied);
+    assert!(reserved.minimums_satisfied);
+    assert_eq!(reserved.members[0].required_cli_calls, 0);
     db.record_local_cli_job(&agent, &call.call_id, "native-job", "failed")
         .unwrap();
-    assert!(
-        !db.read_team_completion(&principal, agent.project(), &assignment.task_id)
-            .unwrap()
-            .minimums_satisfied
-    );
+    let unconfirmed = db
+        .read_team_completion(&principal, agent.project(), &assignment.task_id)
+        .unwrap();
+    assert_eq!(unconfirmed.confirmed_cli_calls, 0);
+    assert!(unconfirmed.minimums_satisfied);
     db.record_local_cli_observation(&agent, &call.call_id, "native-job", "failed", true)
         .unwrap();
     let observed = db
@@ -303,6 +297,6 @@ fn local_cli_native_job_evidence_counts_toward_the_original_team_minimum_only() 
     assert_eq!(observed.confirmed_cli_calls, 1);
     assert!(
         observed.minimums_satisfied,
-        "Quota evidence is separate from task/CLI success"
+        "Execution evidence is reported without a count quota"
     );
 }

@@ -190,6 +190,11 @@ impl RunnerJobOperation {
             })
             .unwrap_or((None, None, None));
         match self {
+            Self::StartProcess(operation) if operation.context.agent_program.is_some() => {
+                crate::agent_program::AgentProgramStart::from_job(operation)
+                    .ok()
+                    .and_then(|s| s.context().structured_execution)
+            }
             Self::StartIsolatedProcess(operation) => {
                 crate::runner_protocol::isolated_job_context(&operation.start).structured_execution
             }
@@ -517,6 +522,8 @@ pub struct RunnerPersistentShellOperation {
 /// fields.
 #[derive(Debug, Clone)]
 pub enum RunnerOperation {
+    AgentProgramInspect(crate::agent_program::AgentProgramInspect),
+    AgentBrowser(crate::agent_browser::AgentBrowserRequest),
     RunShell(RunnerShellOperation),
     RunProcess(RunnerProcessOperation),
     RunScript(RunnerScriptOperation),
@@ -545,11 +552,14 @@ pub enum RunnerOperation {
     SkillStore(SkillStoreRequest),
     SshResource(SshResourceRequest),
     RunnerConfig(RunnerConfigOperationRequest),
+    ToolConnection(crate::tool_connection::ToolConnectionRequest),
 }
 
 impl RunnerOperation {
     pub fn wire_kind(&self) -> &'static str {
         match self {
+            Self::AgentBrowser(_) => crate::agent_browser::AGENT_BROWSER_KIND,
+            Self::AgentProgramInspect(_) => crate::agent_program::AGENT_PROGRAM_INSPECT_KIND,
             Self::RunShell(_) => "run_shell",
             Self::RunProcess(_) => "run_process",
             Self::RunScript(_) => "run_script",
@@ -557,6 +567,9 @@ impl RunnerOperation {
             Self::Job(operation) => match operation {
                 RunnerJobOperation::StartShell(_) => "start_job",
                 RunnerJobOperation::StartValidation(_) => "start_validation_job",
+                RunnerJobOperation::StartProcess(p) if p.context.agent_program.is_some() => {
+                    crate::agent_program::AGENT_PROGRAM_START_KIND
+                }
                 RunnerJobOperation::StartProcess(_) => "start_process_job",
                 RunnerJobOperation::StartDetachedProcess(_) => "start_detached_process_job",
                 RunnerJobOperation::StartScript(_) => "start_script_job",
@@ -582,6 +595,7 @@ impl RunnerOperation {
             Self::SkillStore(_) => "skill_store",
             Self::SshResource(_) => "ssh_resource",
             Self::RunnerConfig(_) => RUNNER_CONFIG_REQUEST_KIND,
+            Self::ToolConnection(_) => crate::tool_connection::TOOL_CONNECTION_KIND,
         }
     }
 
@@ -779,6 +793,24 @@ fn encode_operation(
     metadata: RunnerInvocationMetadata,
     operation: RunnerOperation,
 ) -> Result<RunnerRequest, String> {
+    if let RunnerOperation::Job(RunnerJobOperation::StartProcess(ref process)) = &operation {
+        if process.context.agent_program.is_some() {
+            let start = crate::agent_program::AgentProgramStart::from_job(process)?;
+            if metadata.request_id != start.binding.start_request_id
+                || metadata.client_id != start.binding.target.client_id
+            {
+                return Err("agent_program_request_identity_mismatch".into());
+            }
+            let mut wire = empty_wire(
+                metadata,
+                crate::agent_program::AGENT_PROGRAM_START_KIND,
+                start.timeout_secs,
+            );
+            wire.content =
+                Some(serde_json::to_string(&start).map_err(|_| "agent_program_encoding_failed")?);
+            return Ok(wire);
+        }
+    }
     if let RunnerOperation::AgentExecutionClose(close) = operation {
         return RunnerAgentExecutionOperation::Close(close).into_v2_request(metadata);
     }
@@ -794,6 +826,23 @@ fn encode_operation(
     let kind = operation.wire_kind();
     let mut wire = empty_wire(metadata, kind, 30);
     match operation {
+        RunnerOperation::AgentBrowser(query) => {
+            query.validate()?;
+            if wire.client_id != query.target.client_id {
+                return Err("agent_browser_target_mismatch".into());
+            }
+            wire.content =
+                Some(serde_json::to_string(&query).map_err(|_| "agent_browser_encoding_failed")?);
+            wire.timeout_secs = 45;
+        }
+        RunnerOperation::AgentProgramInspect(query) => {
+            query.validate()?;
+            if wire.client_id != query.target.client_id {
+                return Err("agent_program_inspect_target_mismatch".into());
+            }
+            wire.content =
+                Some(serde_json::to_string(&query).map_err(|_| "agent_program_encoding_failed")?);
+        }
         RunnerOperation::AgentExecutionClose(_) => unreachable!("handled before generic encoding"),
         RunnerOperation::LocalCliDiscover(query) => {
             query.validate()?;
@@ -949,6 +998,13 @@ fn encode_operation(
             wire.content = Some(content);
             wire.timeout_secs = 60;
         }
+        RunnerOperation::ToolConnection(operation) => {
+            operation.validate()?;
+            wire.content = Some(
+                serde_json::to_string(&operation).map_err(|_| "invalid tool connection request")?,
+            );
+            wire.timeout_secs = 120;
+        }
         RunnerOperation::RunnerConfig(operation) => {
             operation
                 .validate()
@@ -965,7 +1021,7 @@ fn encode_operation(
     if wire
         .job_context
         .as_ref()
-        .is_some_and(|context| context.agent_execution.is_some())
+        .is_some_and(|context| context.agent_execution.is_some() || context.agent_program.is_some())
     {
         return Err("agent_execution_requires_dedicated_kind".into());
     }
@@ -1059,10 +1115,92 @@ fn encode_job_operation(
 }
 
 fn decode_operation(wire: &RunnerRequest) -> Result<RunnerOperation, String> {
+    if wire.kind == crate::agent_browser::AGENT_BROWSER_KIND {
+        let raw = wire
+            .content
+            .as_deref()
+            .filter(|s| s.len() <= 65536)
+            .ok_or("agent_browser_payload_invalid")?;
+        let query: crate::agent_browser::AgentBrowserRequest =
+            serde_json::from_str(raw).map_err(|_| "agent_browser_payload_invalid")?;
+        query.validate()?;
+        let operation = RunnerOperation::AgentBrowser(query);
+        let expected = encode_operation(
+            RunnerInvocationMetadata {
+                request_id: wire.request_id.clone(),
+                client_id: wire.client_id.clone(),
+                requested_by: wire.requested_by.clone(),
+                created_at: wire.created_at,
+            },
+            operation.clone(),
+        )?;
+        if serde_json::to_value(wire).map_err(|_| "agent_browser_encoding_failed")?
+            != serde_json::to_value(expected).map_err(|_| "agent_browser_encoding_failed")?
+        {
+            return Err("agent_browser_wire_mismatch".into());
+        }
+        return Ok(operation);
+    }
+
+    if wire.kind == crate::agent_program::AGENT_PROGRAM_INSPECT_KIND {
+        let raw = wire
+            .content
+            .as_deref()
+            .filter(|s| s.len() <= 16384)
+            .ok_or("agent_program_inspect_invalid_payload")?;
+        let query: crate::agent_program::AgentProgramInspect =
+            serde_json::from_str(raw).map_err(|_| "agent_program_inspect_invalid_payload")?;
+        query.validate()?;
+        let operation = RunnerOperation::AgentProgramInspect(query);
+        let expected = encode_operation(
+            RunnerInvocationMetadata {
+                request_id: wire.request_id.clone(),
+                client_id: wire.client_id.clone(),
+                requested_by: wire.requested_by.clone(),
+                created_at: wire.created_at,
+            },
+            operation.clone(),
+        )?;
+        if serde_json::to_value(wire).map_err(|_| "agent_program_encoding_failed")?
+            != serde_json::to_value(expected).map_err(|_| "agent_program_encoding_failed")?
+        {
+            return Err("agent_program_inspect_wire_mismatch".into());
+        }
+        return Ok(operation);
+    }
+    if wire.kind == crate::agent_program::AGENT_PROGRAM_START_KIND {
+        let raw = wire
+            .content
+            .as_deref()
+            .ok_or("agent_program_payload_required")?;
+        if raw.len() > 2 * 1024 * 1024 {
+            return Err("agent_program_payload_too_large".into());
+        }
+        let start: crate::agent_program::AgentProgramStart =
+            serde_json::from_str(raw).map_err(|_| "agent_program_invalid_payload")?;
+        start.validate()?;
+        let operation = RunnerOperation::Job(start.into_job());
+        let expected = encode_operation(
+            RunnerInvocationMetadata {
+                request_id: wire.request_id.clone(),
+                client_id: wire.client_id.clone(),
+                requested_by: wire.requested_by.clone(),
+                created_at: wire.created_at,
+            },
+            operation.clone(),
+        )?;
+        // Canonical shape excludes generic shell, path and environment fields.
+        if serde_json::to_value(wire).map_err(|_| "agent_program_encoding_failed")?
+            != serde_json::to_value(expected).map_err(|_| "agent_program_encoding_failed")?
+        {
+            return Err("agent_program_wire_mismatch".into());
+        }
+        return Ok(operation);
+    }
     if wire
         .job_context
         .as_ref()
-        .is_some_and(|context| context.agent_execution.is_some())
+        .is_some_and(|context| context.agent_execution.is_some() || context.agent_program.is_some())
     {
         return Err("agent_execution_requires_dedicated_kind".into());
     }
@@ -1391,6 +1529,19 @@ fn decode_operation(wire: &RunnerRequest) -> Result<RunnerOperation, String> {
             }
             Ok(RunnerOperation::AgentCliDelivery(query))
         }
+        crate::tool_connection::TOOL_CONNECTION_KIND => {
+            ensure_special_payloads_absent(wire)?;
+            ensure_empty_generic_execution_fields(wire, true)?;
+            let content = bounded_content(
+                wire,
+                crate::tool_connection::TOOL_CONNECTION_MAX_BYTES,
+                "tool_connection",
+            )?;
+            let operation: crate::tool_connection::ToolConnectionRequest =
+                serde_json::from_str(content).map_err(|_| "invalid tool connection payload")?;
+            operation.validate()?;
+            Ok(RunnerOperation::ToolConnection(operation))
+        }
         RUNNER_CONFIG_REQUEST_KIND => {
             ensure_special_payloads_absent(wire)?;
             ensure_empty_generic_execution_fields(wire, true)?;
@@ -1638,7 +1789,7 @@ fn validate_job_context_coherence(
     cwd: Option<&str>,
     context: &ShellJobContext,
 ) -> Result<(), String> {
-    if context.agent_execution.is_some() {
+    if context.agent_execution.is_some() || context.agent_program.is_some() {
         return Err("agent_execution_requires_dedicated_kind".into());
     }
     if let Some(document) = context.document.as_ref() {
@@ -1948,6 +2099,7 @@ mod tests {
 
     fn job_context(cwd: Option<&str>) -> ShellJobContext {
         ShellJobContext {
+            agent_program: None,
             agent_execution: None,
             document: None,
             runtime_project_id: None,

@@ -555,6 +555,21 @@ pub(super) fn mcp_expire_artifact_export_for_test(uri: &str) {
     }
 }
 
+/// Both direct Agent-token and native Host brokers use this same narrow image
+/// framing after the authenticated browser artifact read has succeeded.
+pub(super) fn mcp_isolated_browser_result(
+    tool_name: &str,
+    image_requested: bool,
+    mut result: ToolResult,
+) -> Value {
+    if tool_name == "agent_process" && image_requested && result.success {
+        return mcp_native_image_tool_result(tool_name, &mut result, None).unwrap_or_else(|_| {
+            mcp_runtime_tool_result_fallback(ToolResult::err("agent_browser_image_invalid"))
+        });
+    }
+    mcp_runtime_tool_result_fallback(result)
+}
+
 pub(super) fn mcp_runtime_tool_result_with_snapshot_resource(
     tool_name: &str,
     as_image_requested: bool,

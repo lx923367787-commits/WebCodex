@@ -1067,3 +1067,155 @@ fn host_dispatch_member_lookup_is_read_only_exact_intent_without_profile_refresh
     assert_eq!(status.dispatch_count, 0);
     assert_eq!(status.delivery_state, "reserved");
 }
+
+#[test]
+fn original_expired_member_delivery_renews_same_capability_without_resend_or_identity_change() {
+    let f = Fixture::new(0);
+    let b = f.bind_member();
+    let claim =
+        f.db.claim_agent_host_dispatch(&f.manager, AgentHostQueueKind::Member, &b.queue_id)
+            .unwrap();
+    let fence = claim.status.dispatch_attempt_id.clone().unwrap();
+    let original = uuid::Uuid::new_v4().to_string();
+    let secret = claim.grant.unwrap().into_secret();
+    f.db.record_team_agent_observation(
+        &f.owner,
+        &b.queue_id,
+        &fence,
+        TeamAgentObservation::Unknown {
+            request_id: Some(original.clone()),
+        },
+    )
+    .unwrap();
+    assert!(f
+        .db
+        .renew_original_member_delivery(&f.manager, &b.queue_id, &original, "renewal")
+        .is_err());
+    let old_hash: String = {
+        let conn = f.db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE wc_agent_enrollments SET delivery_expires_at_unix_ms=?2 WHERE enrollment_id=?1",
+            params![b.enrollment_id, now() - 1],
+        )
+        .unwrap();
+        conn.query_row(
+            "SELECT delivery_secret_hash FROM wc_agent_enrollments WHERE enrollment_id=?1",
+            [&b.enrollment_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(f
+        .db
+        .claim_agent_enrollment(
+            HOST,
+            "original-child-window",
+            &b.enrollment_id,
+            &secret,
+            now()
+        )
+        .is_err());
+    assert!(f
+        .db
+        .renew_original_member_delivery(
+            &f.manager,
+            &b.queue_id,
+            &uuid::Uuid::new_v4().to_string(),
+            "wrong-request"
+        )
+        .is_err());
+    let renewed =
+        f.db.renew_original_member_delivery(&f.manager, &b.queue_id, &original, "renewal")
+            .unwrap();
+    assert_eq!(renewed["renewed"], true);
+    assert_eq!(renewed["business_task_resent"], false);
+    let replay =
+        f.db.renew_original_member_delivery(&f.manager, &b.queue_id, &original, "renewal")
+            .unwrap();
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["expires_at_unix_ms"], renewed["expires_at_unix_ms"]);
+    let same_hash: String =
+        f.db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT delivery_secret_hash FROM wc_agent_enrollments WHERE enrollment_id=?1",
+                [&b.enrollment_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(old_hash, same_hash);
+    let status =
+        f.db.read_agent_host_dispatch(&f.manager, AgentHostQueueKind::Member, &b.queue_id)
+            .unwrap();
+    assert_eq!(status.queue_state, "unknown");
+    assert_eq!(status.dispatch_count, 1);
+    assert_eq!(status.request_id.as_deref(), Some(original.as_str()));
+    let child =
+        f.db.claim_agent_enrollment(
+            HOST,
+            "original-child-window",
+            &b.enrollment_id,
+            &secret,
+            now(),
+        )
+        .unwrap();
+    assert_eq!(child.binding.agent_id(), b.agent_id);
+    assert_eq!(child.projection.task_id, b.task_id);
+    assert!(f
+        .db
+        .renew_original_member_delivery(&f.manager, &b.queue_id, &original, "another")
+        .is_err());
+    assert!(!serde_json::to_string(&renewed).unwrap().contains("wc_en_"));
+}
+#[test]
+fn original_delivery_renewal_is_bounded_and_refuses_closed_manager() {
+    let f = Fixture::new(0);
+    let b = f.bind_member();
+    let claim =
+        f.db.claim_agent_host_dispatch(&f.manager, AgentHostQueueKind::Member, &b.queue_id)
+            .unwrap();
+    let fence = claim.status.dispatch_attempt_id.clone().unwrap();
+    let original = uuid::Uuid::new_v4().to_string();
+    f.db.record_team_agent_observation(
+        &f.owner,
+        &b.queue_id,
+        &fence,
+        TeamAgentObservation::Unknown {
+            request_id: Some(original.clone()),
+        },
+    )
+    .unwrap();
+    for index in 0..4 {
+        f.db.conn.lock().unwrap().execute("UPDATE wc_agent_enrollments SET delivery_expires_at_unix_ms=?2 WHERE enrollment_id=?1",params![b.enrollment_id,now()-1]).unwrap();
+        let result = f.db.renew_original_member_delivery(
+            &f.manager,
+            &b.queue_id,
+            &original,
+            &format!("renew-{index}"),
+        );
+        assert_eq!(result.is_ok(), index < 3);
+    }
+    let count: i64 =
+        f.db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM wc_agent_enrollment_renewals",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(count, 3);
+    let source = AgentRunRef {
+        agent_id: f.manager.agent_id().into(),
+        agent_run_id: f.manager.run_id().into(),
+        generation: f.manager.generation(),
+    };
+    f.db.begin_agent_execution_close(OWNER, PROJECT, &source, now() + 30000)
+        .unwrap();
+    assert!(f
+        .db
+        .renew_original_member_delivery(&f.manager, &b.queue_id, &original, "after-close")
+        .is_err());
+}

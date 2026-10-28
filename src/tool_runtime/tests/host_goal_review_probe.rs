@@ -220,6 +220,7 @@ async fn host_goal_review_probe_unknown_recovers_original_job_then_requires_curr
                     structured_script_payload: true,
                     structured_execution_jobs: true,
                     agent_isolated_execution_v1: false,
+                    agent_program_execution_v1: false,
                     ..Default::default()
                 },
                 policy: None,

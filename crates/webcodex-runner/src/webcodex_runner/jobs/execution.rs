@@ -14,6 +14,14 @@ use webcodex_core::runner_protocol::ShellCommandExecutionState;
 
 impl JobManager {
     pub(crate) fn start_structured_job(&self, start: PendingJobStart) {
+        if start
+            .operation
+            .context()
+            .is_some_and(|c| c.agent_program.is_some())
+        {
+            self.start_agent_program_job(start);
+            return;
+        }
         let PendingJobStart {
             generation,
             policy,

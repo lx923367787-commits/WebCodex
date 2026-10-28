@@ -76,6 +76,7 @@ impl CheckFixture {
                 cwd: Some(temp.path().to_string_lossy().into_owned()),
                 profile: None,
                 timeout_secs: Some(timeout_secs),
+                env: Default::default(),
                 runtime_lifecycle: None,
             }],
         };

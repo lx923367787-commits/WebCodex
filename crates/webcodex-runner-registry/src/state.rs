@@ -397,6 +397,7 @@ pub(super) struct DetachedIdempotencyIntent {
 
 #[derive(Debug, Clone)]
 pub(super) struct ShellJobRecord {
+    pub(super) agent_program: Option<webcodex_core::agent_program::AgentProgramBinding>,
     pub(super) agent_execution: Option<crate::agent_execution::AgentExecutionJobState>,
     pub(super) document: Option<webcodex_core::runner_protocol::DocumentJobMetadata>,
     pub(super) job_id: String,

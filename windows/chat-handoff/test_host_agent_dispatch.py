@@ -187,6 +187,21 @@ class HostDispatchTests(unittest.TestCase):
     def dispatch(self):
         return self.route.dispatch(self.control, self.service, self.legacy.queue_id)
 
+    def test_member_without_profile_keeps_real_enrollment_and_one_send(self):
+        self.configure("member")
+        self.legacy.record_value["thinking_profile_id"] = ""
+        self.legacy.status["binding"]["thinking_profile_id"] = ""
+        first = self.dispatch()
+        self.assertEqual(first["state"], "starting")
+        self.service.input()
+        for request in self.service.requests.values():
+            request.pop("requested_thinking_profile")
+            request["thinking_adjustment"] = {"status": "not_requested"}
+        repeated = self.dispatch()
+        self.assertEqual(repeated["state"], "dispatched")
+        self.assertEqual(self.service.sends, 1)
+        self.assertEqual(self.service.spawn_calls, 1)
+
     def test_both_routes_claim_only_at_input_record_before_send_and_confirm_real_attach(self):
         for kind in ("member", "fallback"):
             with self.subTest(kind=kind):

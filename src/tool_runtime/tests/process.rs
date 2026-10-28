@@ -76,6 +76,7 @@ async fn register_process_job_agent(
         structured_script_payload: true,
         structured_execution_jobs: true,
         agent_isolated_execution_v1: false,
+        agent_program_execution_v1: false,
         ..Default::default()
     };
     register_agent_with_projects(
@@ -103,6 +104,7 @@ async fn register_detached_process_job_agent(
         structured_process_argv: true,
         structured_execution_jobs: true,
         agent_isolated_execution_v1: false,
+        agent_program_execution_v1: false,
         detached_process_jobs,
         ..Default::default()
     };
@@ -282,35 +284,21 @@ async fn run_process_enqueues_only_typed_argv_and_reports_completed_exit_codes()
         .await;
         let result = task.await.unwrap();
         assert_eq!(result.success, expected_success);
-        if expected_success {
-            for omitted in [
-                "execution_state",
-                "command_started",
-                "command_completed",
-                "command_ok",
-                "exit_code",
-                "duration_ms",
-                "purpose",
-                "cwd",
-                "executor",
-                "execution_source",
-                "process_summary",
-            ] {
-                assert!(
-                    result.output.get(omitted).is_none(),
-                    "{omitted}: {}",
-                    result.output
-                );
-            }
-        } else {
-            assert_eq!(result.output["execution_state"], "completed");
-            assert_eq!(result.output["command_started"], true);
-            assert_eq!(result.output["command_completed"], true);
-            assert_eq!(result.output["exit_code"], exit_code);
-            assert_eq!(result.output["execution_source"], "run_process");
-            assert!(result.output["process_summary"].as_str().is_some());
-            assert_eq!(result.output["purpose"], "diagnostic");
-        }
+        assert_eq!(result.output["execution_state"], "completed");
+        assert_eq!(result.output["command_started"], true);
+        assert_eq!(result.output["command_completed"], true);
+        assert_eq!(result.output["command_ok"], expected_success);
+        assert_eq!(result.output["exit_code"], exit_code);
+        assert_eq!(result.output["execution_source"], "run_process");
+        assert!(result.output["process_summary"].as_str().is_some());
+        assert_eq!(result.output["purpose"], "diagnostic");
+        assert_eq!(result.output["cwd"], ".");
+        assert_eq!(result.output["executor"], "agent");
+        assert_eq!(result.output["duration_ms"], 7);
+        assert_eq!(result.output["stdout_tail"], "stdout");
+        assert_eq!(result.output["stderr_tail"], "stderr");
+        assert_eq!(result.output["stdout_truncated"], false);
+        assert_eq!(result.output["stderr_truncated"], false);
     }
 }
 
@@ -382,6 +370,7 @@ async fn detached_process_requires_job_run_and_detach_scopes_before_any_admissio
         structured_process_argv: true,
         structured_execution_jobs: true,
         agent_isolated_execution_v1: false,
+        agent_program_execution_v1: false,
         detached_process_jobs: true,
         ..Default::default()
     };
@@ -678,6 +667,7 @@ async fn detached_process_lost_initiation_after_server_restart_recovers_same_job
         structured_process_argv: true,
         structured_execution_jobs: true,
         agent_isolated_execution_v1: false,
+        agent_program_execution_v1: false,
         detached_process_jobs: true,
         job_state_reconciliation: true,
         coding_agent_runs: false,
@@ -867,48 +857,31 @@ async fn run_process_fast_terminal_jobs_project_back_without_visible_duplicates(
 
         let result = task.await.unwrap();
         assert_eq!(result.success, expected_success);
+        assert_eq!(result.output["execution_state"], "completed");
+        assert_eq!(result.output["command_started"], true);
+        assert_eq!(result.output["command_completed"], true);
+        assert_eq!(result.output["command_ok"], expected_success);
+        assert_eq!(result.output["exit_code"], exit_code);
+        assert_eq!(result.output["promoted_to_job"], false);
+        assert_eq!(result.output["terminal"], true);
+        assert!(result.output["job_id"].is_null());
+        assert!(result.output["job_status"].is_null());
+        assert_eq!(result.output["async_handoff_available"], true);
+        assert_eq!(result.output["stdout_tail"], "terminal stdout\n");
+        assert_eq!(result.output["stderr_tail"], "terminal stderr\n");
+        assert_eq!(result.output["stdout_truncated"], false);
+        assert_eq!(result.output["stderr_truncated"], false);
+        assert_eq!(result.output["execution_source"], "run_process");
+        assert_eq!(result.output["purpose"], "diagnostic");
+        assert_eq!(result.output["cwd"], ".");
+        assert_eq!(result.output["executor"], "agent");
+        assert!(result.output.get("duration_ms").is_some());
+        assert!(result.output["process_summary"].as_str().is_some());
+        assert_eq!(result.output["tool_failure"], false);
         if expected_success {
-            for omitted in [
-                "execution_state",
-                "command_started",
-                "command_completed",
-                "command_ok",
-                "exit_code",
-                "duration_ms",
-                "purpose",
-                "cwd",
-                "executor",
-                "promoted_to_job",
-                "terminal",
-                "job_id",
-                "job_status",
-                "observation_token",
-                "effective_timeout_secs",
-                "sync_wait_secs",
-                "async_handoff_available",
-                "failure_kind",
-                "tool_failure",
-                "stdout_truncated",
-                "stderr_truncated",
-            ] {
-                assert!(
-                    result.output.get(omitted).is_none(),
-                    "boring terminal success field {omitted} should be omitted: {}",
-                    result.output
-                );
-            }
+            assert!(result.output["failure_kind"].is_null());
         } else {
-            assert_eq!(result.output["execution_state"], "completed");
-            assert_eq!(result.output["command_started"], true);
-            assert_eq!(result.output["command_completed"], true);
-            assert_eq!(result.output["exit_code"], exit_code);
-            assert_eq!(result.output["promoted_to_job"], false);
-            assert_eq!(result.output["terminal"], true);
-            assert!(result.output["job_id"].is_null());
-            assert!(result.output["job_status"].is_null());
-            assert_eq!(result.output["async_handoff_available"], true);
             assert_eq!(result.output["failure_kind"], "command_exit_nonzero");
-            assert_eq!(result.output["tool_failure"], false);
         }
         assert!(
             runtime
@@ -926,7 +899,7 @@ async fn run_process_fast_terminal_jobs_project_back_without_visible_duplicates(
 }
 
 #[tokio::test]
-async fn run_process_terminal_success_is_sparse_after_full_session_effect_recording() {
+async fn run_process_terminal_success_preserves_full_result_and_session_effect_recording() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = test_runtime().with_structured_execution_sync_wait(Duration::from_millis(250));
     let project = register_process_job_agent(&runtime, "process-sparse-ledger", temp.path()).await;
@@ -968,7 +941,7 @@ async fn run_process_terminal_success_is_sparse_after_full_session_effect_record
 
     let result = task.await.unwrap();
     assert!(result.success, "{:?}", result.error);
-    for omitted in [
+    for retained in [
         "execution_state",
         "command_started",
         "command_completed",
@@ -997,18 +970,27 @@ async fn run_process_terminal_success_is_sparse_after_full_session_effect_record
         "execution_source",
     ] {
         assert!(
-            result.output.get(omitted).is_none(),
-            "model-facing boring success field {omitted} should be omitted: {}",
+            result.output.get(retained).is_some(),
+            "terminal execution field {retained} must remain available: {}",
             result.output
         );
     }
 
-    let sparse_bytes = serde_json::to_vec(&result.output).unwrap().len();
-    assert!(
-        sparse_bytes <= 420,
-        "boring run_process success regressed above the model-facing context budget: {sparse_bytes} bytes"
-    );
-    eprintln!("run_process_sparse_terminal_success_bytes={sparse_bytes}");
+    assert_eq!(result.output["execution_state"], "completed");
+    assert_eq!(result.output["command_started"], true);
+    assert_eq!(result.output["command_completed"], true);
+    assert_eq!(result.output["command_ok"], true);
+    assert_eq!(result.output["exit_code"], 0);
+    assert_eq!(result.output["stdout_tail"], "");
+    assert_eq!(result.output["stderr_tail"], "");
+    assert_eq!(result.output["stdout_lines"], 0);
+    assert_eq!(result.output["stderr_lines"], 0);
+    assert_eq!(result.output["stdout_truncated"], false);
+    assert_eq!(result.output["stderr_truncated"], false);
+    assert_eq!(result.output["cwd"], ".");
+    assert_eq!(result.output["execution_source"], "run_process");
+    assert_eq!(result.output["promoted_to_job"], false);
+    assert_eq!(result.output["terminal"], true);
 
     let summary = runtime.sessions.summary(&session_id, Some(20)).unwrap();
     let finished = summary
@@ -1021,7 +1003,7 @@ async fn run_process_terminal_success_is_sparse_after_full_session_effect_record
     let effect = finished
         .effect_evidence
         .as_ref()
-        .expect("full lifecycle evidence must be recorded before model sparsification");
+        .expect("full lifecycle evidence must also be recorded in the Session");
     assert_eq!(effect.execution_state.as_deref(), Some("completed"));
     assert_eq!(effect.command_started, Some(true));
     assert_eq!(effect.command_completed, Some(true));
@@ -1034,7 +1016,7 @@ async fn run_process_terminal_success_is_sparse_after_full_session_effect_record
     });
     crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&instance, &schema)
         .unwrap_or_else(|error| {
-            panic!("sparse terminal success must match run_process schema: {error}")
+            panic!("complete terminal success must match run_process schema: {error}")
         });
 }
 
@@ -1095,8 +1077,8 @@ async fn run_process_fast_terminal_projection_does_not_silently_drop_retained_li
         Some(retained_stdout.as_str())
     );
     assert_eq!(result.output["stdout_lines"], 300);
-    assert!(result.output.get("stdout_truncated").is_none());
-    assert!(result.output.get("promoted_to_job").is_none());
+    assert_eq!(result.output["stdout_truncated"], false);
+    assert_eq!(result.output["promoted_to_job"], false);
     assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
 }
 
@@ -1383,8 +1365,8 @@ async fn run_process_short_timeout_stays_direct_without_job_headroom() {
     .await;
     let result = task.await.unwrap();
     assert!(result.success, "{:?}", result.error);
-    assert!(result.output.get("execution_state").is_none());
-    assert!(result.output.get("promoted_to_job").is_none());
+    assert_eq!(result.output["execution_state"], "completed");
+    assert_eq!(result.output["promoted_to_job"], false);
     assert!(runtime.runner_registry.list_jobs(Some(10)).await.is_empty());
 }
 
@@ -1768,7 +1750,7 @@ async fn run_process_session_default_cwd_applies_without_default_shell() {
     .await;
     let result = task.await.unwrap();
     assert!(result.success, "{:?}", result.error);
-    assert!(result.output.get("cwd").is_none());
+    assert_eq!(result.output["cwd"], "frontend");
     let summary = runtime
         .sessions
         .summary(&session.session_id, Some(20))

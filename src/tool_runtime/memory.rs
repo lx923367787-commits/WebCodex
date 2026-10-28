@@ -49,9 +49,16 @@ fn memory_scope_id_from_parts(project_runtime_id: &str, client_id: &str, root: &
     format!("wc_memscope_{:x}", hasher.finalize())
 }
 
+fn private_memory_project(project: &str) -> String {
+    webcodex_runner_registry::current_agent_identity().map_or_else(
+        || project.to_owned(),
+        |actor| format!("{project}#agent:{}", actor.agent_id),
+    )
+}
+
 pub(crate) fn memory_scope_id(project: &ResolvedProject) -> String {
     memory_scope_id_from_parts(
-        &project.resolved_id,
+        &private_memory_project(&project.resolved_id),
         &project.config.client_id,
         &project.config.path,
     )
@@ -66,7 +73,7 @@ pub(crate) fn memory_root_fingerprint(root: &str) -> String {
 
 fn memory_scope_attribution(project: &ResolvedProject) -> MemoryScopeAttribution {
     MemoryScopeAttribution {
-        project_runtime_id: project.resolved_id.clone(),
+        project_runtime_id: private_memory_project(&project.resolved_id),
         runner_client_id: project.config.client_id.clone(),
         root_fingerprint: memory_root_fingerprint(&project.config.path),
     }
@@ -567,6 +574,16 @@ impl super::services::MemoryService {
         let normalized_offset = offset.min(total_count);
         let mut scopes = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
+            if let Some(actor) = webcodex_runner_registry::current_agent_identity() {
+                if !snapshot
+                    .scope
+                    .project_runtime_id
+                    .as_deref()
+                    .is_some_and(|id| id.ends_with(&format!("#agent:{}", actor.agent_id)))
+                {
+                    continue;
+                }
+            }
             let status = memory_scope_current_status(&snapshot.scope, &inventory);
             let catalog_revision = memory_catalog_revision(&snapshot.memories);
             let memory_count = snapshot.memories.len();
@@ -659,6 +676,17 @@ impl super::services::MemoryService {
             Ok(Some(scope)) => scope,
             Err(error) => return memory_lifecycle_store_error(error),
         };
+
+        if let Some(actor) = webcodex_runner_registry::current_agent_identity() {
+            if !scope_record
+                .scope
+                .project_runtime_id
+                .as_deref()
+                .is_some_and(|id| id.ends_with(&format!("#agent:{}", actor.agent_id)))
+            {
+                return memory_lifecycle_error("memory_owner_mismatch", json!({}));
+            }
+        }
 
         runner_registry
             .with_bounded_runner_semantic_views_for_auth_locked(

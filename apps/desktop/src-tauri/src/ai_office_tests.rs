@@ -24,8 +24,9 @@ fn project(id: &str) -> OfficeProject {
 fn call(model: &str) -> OfficeCliCall {
     OfficeCliCall {
         provider_id: "workbuddy".into(),
-        model: model.into(),
+        model: Some(model.into()),
         effort: None,
+        instruction: None,
     }
 }
 
@@ -133,18 +134,15 @@ fn corrupt_store_is_preserved_and_not_replaced_by_save() {
 }
 
 #[test]
-fn minimum_counts_apply_to_complete_plan_including_manager() {
+fn legacy_minimum_counts_do_not_block_independent_work() {
     let policy = custom_policy();
     let plan = OfficePlan {
         manager: agent("manager", vec![]),
         subagents: vec![],
     };
     let result = evaluate_plan(&policy, &plan).unwrap();
-    assert!(!result.admitted);
-    assert_eq!(
-        result.violations.iter().map(|v| v.code).collect::<Vec<_>>(),
-        vec!["subagent_count", "cli_count"]
-    );
+    assert!(result.admitted);
+    assert!(result.violations.is_empty());
     let plan = OfficePlan {
         manager: agent("manager", vec![call("model-a")]),
         subagents: vec![agent("child", vec![call("model-a")])],
@@ -156,7 +154,7 @@ fn minimum_counts_apply_to_complete_plan_including_manager() {
 }
 
 #[test]
-fn custom_plan_rejects_disabled_provider_and_model_effort_mismatch() {
+fn old_provider_model_and_effort_preferences_do_not_restrict_a_new_call() {
     let mut policy = custom_policy();
     policy.settings.providers[0].effort = Some("high".into());
     let plan = OfficePlan {
@@ -165,20 +163,19 @@ fn custom_plan_rejects_disabled_provider_and_model_effort_mismatch() {
             "child",
             vec![OfficeCliCall {
                 provider_id: "antigravity".into(),
-                model: "example".into(),
+                model: Some("example".into()),
                 effort: None,
+                instruction: None,
             }],
         )],
     };
     let result = evaluate_plan(&policy, &plan).unwrap();
-    let codes = result.violations.iter().map(|v| v.code).collect::<Vec<_>>();
-    assert!(codes.contains(&"model_mismatch"));
-    assert!(codes.contains(&"effort_mismatch"));
-    assert!(codes.contains(&"provider_disabled"));
+    assert!(result.admitted);
+    assert!(result.violations.is_empty());
 }
 
 #[test]
-fn auto_leaves_plan_choice_free_but_requires_explicit_model() {
+fn auto_accepts_independent_work_and_an_omitted_model() {
     let mut policy = custom_policy();
     policy.settings.mode = PolicyMode::Auto;
     let plan = OfficePlan {
@@ -190,11 +187,25 @@ fn auto_leaves_plan_choice_free_but_requires_explicit_model() {
         manager: agent("solo", vec![call("")]),
         subagents: vec![],
     };
-    assert!(!evaluate_plan(&policy, &plan).unwrap().admitted);
+    assert!(evaluate_plan(&policy, &plan).unwrap().admitted);
+    let call: OfficeCliCall =
+        serde_json::from_value(serde_json::json!({"provider_id":"workbuddy"})).unwrap();
+    assert!(call.model.is_none());
+    assert!(
+        evaluate_plan(
+            &policy,
+            &OfficePlan {
+                manager: agent("solo", vec![call]),
+                subagents: vec![]
+            }
+        )
+        .unwrap()
+        .admitted
+    );
 }
 
 #[test]
-fn plan_preview_respects_new_chat_assignment_caps_in_both_modes() {
+fn plan_preview_does_not_apply_historical_assignment_caps_in_either_mode() {
     let mut policy = OfficePolicy::default();
     let mut plan = OfficePlan {
         manager: agent("manager", vec![]),
@@ -203,15 +214,10 @@ fn plan_preview_respects_new_chat_assignment_caps_in_both_modes() {
             .collect(),
     };
     let result = evaluate_plan(&policy, &plan).unwrap();
-    assert!(!result.admitted);
-    assert!(result.violations.iter().any(|v| v.code == "subagent_count"));
+    assert!(result.admitted);
     plan.subagents.clear();
     plan.manager.cli_calls = (0..11).map(|_| call("model-a")).collect();
-    assert!(evaluate_plan(&policy, &plan)
-        .unwrap()
-        .violations
-        .iter()
-        .any(|v| v.code == "cli_total_budget"));
+    assert!(evaluate_plan(&policy, &plan).unwrap().admitted);
 
     policy.settings.mode = PolicyMode::Custom;
     policy.settings.subagents.max = 32;
@@ -227,18 +233,14 @@ fn plan_preview_respects_new_chat_assignment_caps_in_both_modes() {
         .collect();
     let result = evaluate_plan(&policy, &plan).unwrap();
     assert_eq!(result.cli_call_count, 48);
-    assert!(!result.admitted);
-    assert!(result
-        .violations
-        .iter()
-        .any(|v| v.code == "cli_total_budget"));
+    assert!(result.admitted);
 }
 
 #[test]
-fn invalid_policy_ranges_and_duplicate_provider_ids_fail_before_save() {
+fn obsolete_policy_ranges_are_ignored_but_duplicate_provider_ids_are_invalid() {
     let mut policy = OfficePolicyInput::default();
     policy.subagents.min = 10;
-    assert!(validate_policy(&policy).is_err());
+    assert!(validate_policy(&policy).is_ok());
     policy = OfficePolicyInput::default();
     policy.providers = vec![
         ProviderPreference {
@@ -254,11 +256,11 @@ fn invalid_policy_ranges_and_duplicate_provider_ids_fail_before_save() {
     policy.cli_per_agent.max = 32;
     assert!(validate_policy(&policy).is_ok());
     policy.cli_per_agent.max = 33;
-    assert!(validate_policy(&policy).is_err());
+    assert!(validate_policy(&policy).is_ok());
 }
 
 #[test]
-fn minimum_cli_budget_includes_manager_and_accepts_feasible_maxima() {
+fn historical_minimum_cli_budget_does_not_block_policy_compatibility() {
     let mut policy = OfficePolicyInput::default();
     policy.providers = vec![ProviderPreference {
         provider_id: "workbuddy".into(),
@@ -269,7 +271,7 @@ fn minimum_cli_budget_includes_manager_and_accepts_feasible_maxima() {
     policy.mode = PolicyMode::Custom;
     policy.subagents = CountRange { min: 16, max: 32 };
     policy.cli_per_agent = CountRange { min: 2, max: 32 };
-    assert!(validate_policy_for_save(&policy).is_err());
+    assert!(validate_policy_for_save(&policy).is_ok());
     policy.subagents.min = 15;
     assert!(validate_policy_for_save(&policy).is_ok());
 }
@@ -303,25 +305,24 @@ fn legacy_over_budget_policy_remains_readable_and_can_be_revised() {
         server_policy_from_result(serde_json::json!({"success":true,"output":legacy})).unwrap(),
         legacy
     );
-    let before = std::fs::read(&path).unwrap();
-    assert!(save_policy(
+    let saved = save_policy(
         &path,
         scope,
         project("legacy"),
         legacy.revision,
-        legacy.settings.clone()
+        legacy.settings.clone(),
     )
-    .is_err());
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    .unwrap();
+    assert_eq!(saved.revision, legacy.revision + 1);
     let revised = save_policy(
         &path,
         scope,
         project("legacy"),
-        legacy.revision,
+        saved.revision,
         OfficePolicyInput::default(),
     )
     .unwrap();
-    assert_eq!(revised.revision, legacy.revision + 1);
+    assert_eq!(revised.revision, saved.revision + 1);
     assert_eq!(
         read_store(&path).unwrap().projects[&store_key(scope, "legacy")]
             .project
@@ -333,7 +334,7 @@ fn legacy_over_budget_policy_remains_readable_and_can_be_revised() {
 }
 
 #[test]
-fn duplicate_agent_ids_and_oversized_plans_are_rejected() {
+fn duplicate_agent_ids_are_rejected_without_an_agent_count_cap() {
     let policy = OfficePolicy::default();
     let mut plan = OfficePlan {
         manager: agent("same", vec![]),
@@ -343,10 +344,7 @@ fn duplicate_agent_ids_and_oversized_plans_are_rejected() {
     plan.subagents = (0..33)
         .map(|i| agent(&format!("agent-{i}"), vec![]))
         .collect();
-    assert_eq!(
-        evaluate_plan(&policy, &plan).unwrap_err().code,
-        "ai_office_plan_too_large"
-    );
+    assert!(evaluate_plan(&policy, &plan).unwrap().admitted);
 }
 
 #[test]
@@ -409,11 +407,9 @@ fn native_policy_keeps_server_revision_value_and_business_error_checks() {
                 .is_err()
         );
     }
-    let mut invalid = policy;
-    invalid["subagents"] = serde_json::json!({"min":3,"max":2});
-    assert!(
-        server_policy_from_result(serde_json::json!({"success":true,"output":invalid})).is_err()
-    );
+    let mut legacy = policy;
+    legacy["subagents"] = serde_json::json!({"min":3,"max":2});
+    assert!(server_policy_from_result(serde_json::json!({"success":true,"output":legacy})).is_ok());
     let conflict = server_policy_from_result(serde_json::json!({"success":false,"error":"private diagnostic","output":{"error_kind":"team_policy_revision_conflict"}})).unwrap_err();
     assert_eq!(conflict.code, "team_policy_revision_conflict");
     assert!(!conflict.message.contains("private"));
@@ -454,7 +450,7 @@ fn preview_uses_shared_rules_with_separate_persistence_and_fixed_project_ids() {
         "preview must never open the real desktop policy filename"
     );
     let result = preview_request(dir, serde_json::json!({"op":"evaluate_plan","args":{"projectId":"demo-idle","expectedRevision":1,"plan":{"manager":{"id":"manager","task":"Review","cli_calls":[]},"subagents":[]}}})).unwrap();
-    assert_eq!(result["admitted"], false);
+    assert_eq!(result["admitted"], true);
     assert_eq!(result["enforcement"], "demo_plan_only");
     assert!(preview_request(dir, serde_json::json!({"op":"save_policy","args":{"projectId":"real-project","expectedRevision":0,"policy":OfficePolicyInput::default()}})).is_err());
     let reloaded = preview_request(dir, serde_json::json!({"op":"policies"})).unwrap();

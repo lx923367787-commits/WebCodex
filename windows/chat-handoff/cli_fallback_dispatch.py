@@ -101,8 +101,7 @@ def _launch_arguments(envelope, *, require_fence=True):
 def _verify_chat(observed, arguments, expected):
     if (not isinstance(observed, dict) or _request_id(observed.get("request_id")) != expected
             or observed.get("parent_task_id") != arguments["parent_task_id"]
-            or not isinstance(observed.get("requested_thinking_profile"), dict)
-            or observed["requested_thinking_profile"].get("profile_id") != arguments["thinking_profile_id"]
+            or (observed.get("requested_thinking_profile") or {}).get("profile_id", "") != arguments["thinking_profile_id"]
             or observed.get("state") not in {"running", "finished", "response_observed", "unknown", "not_started"}):
         raise ValueError("chat_identity_or_state_mismatch")
 

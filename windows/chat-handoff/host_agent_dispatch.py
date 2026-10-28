@@ -85,6 +85,8 @@ class HostQueueControlApi:
         if not isinstance(binding, dict) or set(binding) != BINDING_FIELDS:
             raise ValueError("invalid_host_dispatch_binding")
         for key in BINDING_FIELDS - {"queue_kind"}:
+            if key == "thinking_profile_id" and binding[key] == "":
+                continue
             _identifier(binding[key])
         record = operation["record"]
         if (binding["queue_kind"] != self.queue_kind or binding["queue_id"] != operation["queue_id"]
@@ -133,6 +135,8 @@ class HostQueueControlApi:
                 or record.get("project") != self.legacy_api.project):
             raise ValueError("invalid_host_queue_record")
         for key in ("root_task_id", "source_task_id", "thinking_profile_id"):
+            if key == "thinking_profile_id" and record.get(key) == "":
+                continue
             _identifier(record.get(key))
         manager = self.manager_bindings.for_root(record["root_task_id"])
         if not isinstance(manager, dict) or set(manager) != MANAGER_FIELDS:
@@ -145,6 +149,23 @@ class HostQueueControlApi:
         response = self.legacy_api.post(self._payload(operation, "prepare"))
         operation["status"] = self._validate_status(response, operation)
         return operation
+
+    def renew_original_delivery(self, operation, request_id, recovery_key):
+        if self.queue_kind != "member":
+            raise ValueError("original_member_recovery_only")
+        _request_id(request_id)
+        _identifier(recovery_key)
+        payload = self._payload(operation, "read")
+        payload.update(action="agent_host_original_delivery_renew", original_request_id=request_id,
+                       recovery_key=recovery_key)
+        result = self.legacy_api.post(payload)
+        ensure_no_launch_grant(result)
+        if (not isinstance(result, dict) or result.get("original_request_id") != request_id
+                or result.get("enrollment_id") != operation["status"]["binding"]["enrollment_id"]
+                or result.get("task_id") != operation["status"]["binding"]["task_id"]
+                or result.get("business_task_resent") is not False):
+            raise ValueError("original_recovery_binding_mismatch")
+        return result
 
     def read_status(self, operation):
         response = self.legacy_api.post(self._payload(operation, "read"))

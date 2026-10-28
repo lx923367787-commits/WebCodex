@@ -258,7 +258,15 @@ fn public_task_success_keeps_real_quota_gate_and_auto_does_not_replace_stop_proo
                 mode: crate::TeamPolicyMode::Custom,
                 subagents: crate::TeamCountRange { min: 0, max: 0 },
                 cli_per_agent: crate::TeamCountRange { min: 1, max: 1 },
-                ..crate::TeamPolicyInput::default()
+                // Product-neutral defaults intentionally enable no provider.
+                // This fixture explicitly funds WorkBuddy to reach the quota
+                // and physical-stop gates it is meant to exercise.
+                providers: vec![crate::TeamProviderPreference {
+                    provider_id: "workbuddy".into(),
+                    enabled: true,
+                    model: None,
+                    effort: None,
+                }],
             },
         )
         .unwrap();
@@ -270,7 +278,7 @@ fn public_task_success_keeps_real_quota_gate_and_auto_does_not_replace_stop_proo
                 provider_id: "workbuddy".into(),
                 model: "observed-model".into(),
                 effort: Some("high".into()),
-                instruction: None,
+                instruction: Some("Independent delegated test task".into()),
             }],
         },
         subagents: vec![],

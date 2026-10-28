@@ -132,7 +132,7 @@ export function ProjectsPanel({ state, onState, onChooseProject, api = desktopAp
       </div>
       <p className="lede">{t("project.description")}</p>
       <p className="project-help">{t("project.registrationOnly")}</p>
-      <p className="project-help">每个项目文件夹都可以独立设置团队人数、CLI 使用与模型。默认由总经理自主安排。</p>
+      <p className="project-help">主 Agent 可独立工作，也可按任务调用子 Agent 和 CLI；模型与思考强度可选，未指定时使用工具默认设置。</p>
       {preview && <p className="project-help">演示项目支持团队设置与策略保存；文件夹管理操作在桌面端使用。</p>}
       {error && <p role="alert" className="project-error">{t(error)}</p>}
       {!available ? <div className="empty-state">{t("project.runtimeRequired")}</div> : <>

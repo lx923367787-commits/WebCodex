@@ -48,11 +48,17 @@ fn team_cli_native_argv_keeps_instructions_in_provider_specific_stdin() {
 }
 
 #[test]
-fn team_cli_rejects_undeclared_provider_or_missing_reasoning_selection() {
+fn team_cli_default_omits_reasoning_override_and_rejects_invalid_selections() {
     assert!(cli_process(&attempt("shell")).is_err());
     let mut request = attempt("workbuddy");
     request.effort = None;
-    assert!(cli_process(&request).is_err());
+    let (_, args, _) = cli_process(&request).unwrap();
+    assert!(!args.iter().any(|arg| arg == "--effort"));
+    request.provider_id = "codex".into();
+    let (_, args, _) = cli_process(&request).unwrap();
+    assert!(!args
+        .iter()
+        .any(|arg| arg.contains("model_reasoning_effort")));
     request.provider_id = "antigravity".into();
     let (_, args, stdin) = cli_process(&request).unwrap();
     assert_eq!(&args[..2], &["--model", "discovered-model"]);
@@ -284,7 +290,7 @@ impl TerminalTeamFixture {
         let source = task("source");
         db.register_team_plan(&principal, project, &root, 0, serde_json::from_value(json!({
             "manager":{"task_id":root,"cli_calls":[]},
-            "subagents":[{"task_id":source,"cli_calls":[{"provider_id":"workbuddy","model":"selected-model","effort":"high"}]}]
+            "subagents":[{"task_id":source,"cli_calls":[{"provider_id":"workbuddy","model":"selected-model","effort":"high","instruction":"Independently verify the delegated subtask"}]}]
         })).unwrap(), "plan").unwrap();
         let reserved = db
             .reserve_team_cli_attempt(

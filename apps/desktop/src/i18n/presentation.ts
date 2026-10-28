@@ -1,3 +1,4 @@
+import { servicesReady } from "../models/topology";
 import type {
   ActivityEntry,
   DesktopState,
@@ -79,6 +80,7 @@ const activityKeys: Record<ActivityEntry["event_kind"], MessageKey> = {
 };
 
 export function activityMessage(entry: ActivityEntry, t: Translate) {
+  if (entry.event_kind === "operation_failed" && entry.source === "runner") return `${t("activity.operationFailed")} · ${entry.message}`;
   if (entry.event_kind === "project_activated") return t("activity.projectActivated", { project: entry.message });
   if (entry.event_kind === "operation_started") {
     const kind = entry.message.split(": ")[1];
@@ -142,6 +144,7 @@ const processErrors = new Set([
 ]);
 
 export function desktopErrorPresentation(error: DesktopError, t: Translate): ErrorPresentation {
+  if (error.code === "runner_start_failed") return { title: t("error.runnerTitle"), action: error.message };
   if (error.code === "tunnel_config_invalid") return { title: t("error.tunnelTitle"), action: t("tunnelConfig.invalidInput") };
   if (error.code === "tunnel_config_save_failed") return { title: t("error.fallbackTitle"), action: t("tunnelConfig.saveFailed") };
   if (binaryErrors.has(error.code)) return { title: t("error.binaryTitle"), action: t("error.binaryAction") };
@@ -221,7 +224,7 @@ export function operationLabel(kind: DesktopOperationKind, t: Translate) {
 }
 
 export function runtimeLabel(state: DesktopState, t: Translate) {
-  if (state.readiness.runtime_ready) return t("sidebar.runtimeReady");
+  if (servicesReady(state.readiness)) return t("sidebar.runtimeReady");
   if (!state.topology) return t("sidebar.needsSetup");
   if (["runtime_resume", "local_setup", "remote_setup"].includes(state.current_operation?.kind ?? "") || state.readiness.server === "starting") return t("common.starting");
   if (state.readiness.server === "stopped" && state.readiness.runner === "stopped") return t("common.stopped");

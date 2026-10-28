@@ -9,7 +9,7 @@ pub struct AgentCliPlannedSlot {
     pub source_task_id: String,
     pub call_index: u32,
     pub provider_id: String,
-    pub model: String,
+    pub model: webcodex_core::cli_adapter::CliModelSelection,
     pub effort: Option<String>,
     pub instruction: String,
     pub inputs: Vec<crate::AgentEnrollmentInput>,
@@ -114,10 +114,10 @@ impl Database {
             || attempt.dispatch_state != TeamCliDispatchState::Reserved
             || attempt.execution_binding.is_some()
             || attempt.job_id.is_some()
-            || !attempt
+            || attempt
                 .effort
                 .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
+                .is_some_and(|value| value.trim().is_empty())
         {
             return Err(denied());
         }
@@ -167,7 +167,7 @@ impl Database {
             current.project(),
             root_task_id,
         )?;
-        let source = owned_task(
+        owned_task(
             &tx,
             &auth.communication_principal,
             current.project(),
@@ -215,7 +215,7 @@ impl Database {
             provider_id: call.provider_id.clone(),
             model: call.model.clone(),
             effort: call.effort.clone(),
-            instruction: call.instruction.clone().unwrap_or(source.instruction),
+            instruction: delegated_cli_instruction(call)?.to_owned(),
             inputs: call.inputs.clone(),
         })
     }

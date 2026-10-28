@@ -16,9 +16,10 @@
     "invocation": {
       "model_flag": "--model",
       "effort_flag": "--effort",
-      "effort_required": true,
+      "effort_required": false,
       "fixed_args": [
         "--print",
+        "-y",
         "--input-format",
         "text",
         "--output-format",
@@ -30,7 +31,8 @@
         "failure_flag": "is_error",
         "terminal_field": "type",
         "terminal_value": "result"
-      }
+      },
+      "supports_configured_default": true
     }
   },
   {
@@ -56,7 +58,8 @@
         "--output-format",
         "stream-json"
       ],
-      "input": "user_message_json_line"
+      "input": "user_message_json_line",
+      "supports_configured_default": true
     }
   },
   {
@@ -82,13 +85,9 @@
       "model_flag": "--model",
       "effort_flag": "--config",
       "effort_config_key": "model_reasoning_effort",
-      "effort_required": true,
+      "effort_required": false,
       "fixed_args": [
         "--json",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--sandbox",
-        "workspace-write",
         "--skip-git-repo-check"
       ],
       "input": "text",
@@ -101,7 +100,8 @@
         ],
         "terminal_field": "type",
         "terminal_value": "turn.completed"
-      }
+      },
+      "supports_configured_default": true
     }
   },
   {
@@ -136,17 +136,7 @@
         "--input-format",
         "text",
         "--output-format",
-        "json",
-        "--no-session-persistence",
-        "--safe-mode",
-        "--restricted",
-        "--strict-mcp-config",
-        "--permission-mode",
-        "acceptEdits",
-        "--permission-prompts",
-        "none",
-        "--tools",
-        "Read,Glob,Grep,Edit,Write"
+        "json"
       ],
       "input": "text",
       "result": {
@@ -154,7 +144,8 @@
         "failure_flag": "is_error",
         "terminal_field": "type",
         "terminal_value": "result"
-      }
+      },
+      "supports_configured_default": true
     }
   },
   {
